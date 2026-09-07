@@ -1,0 +1,10 @@
+build/
+__pycache__/
+*.py[cod]
+*.vcd
+*.fst
+obj_dir/
+.DS_Store
+.python-version
+third_party/circt-release/
+*.tar.gz

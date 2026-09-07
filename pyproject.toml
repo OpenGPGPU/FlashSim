@@ -1,0 +1,12 @@
+[project]
+name = "flashsim"
+version = "0.1.0"
+description = "Cycle-accurate RTL simulator with activity skipping"
+requires-python = ">=3.10"
+readme = "README.md"
+
+[project.scripts]
+flashsim = "flashsim.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["flashsim*"]
