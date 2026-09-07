@@ -1,8 +1,8 @@
 # FlashSim
 
 Cycle-accurate RTL simulation that must match Verilator at DUT ports, and beat
-it by skipping inactive combinational cones. QEMU/ARTI integration is out of
-scope until this go/no-go holds.
+it by skipping inactive combinational cones. The skip kernel is frozen at the
+go/no-go; `GpuHostAxi` is the QEMU/ARTI control top now in the experiment.
 
 ## Goal
 
@@ -84,6 +84,7 @@ GPU slices from `rtl/gpu/` (Chisel → SystemVerilog, still compared to Verilato
 - `FrontendScalarFpu` — same closed loop plus the scalar FP32 FMA/exact pipe
 - `Gpu` — one FlashSim-sized compute unit: kernel launch, GpuCore (scalar+vector+FPU+shared mem), 16×2 I$
 - `GpuSystem` — command processor + one CU + shared L2 + idle DMA; DRAM refill at 64-byte lines
+- `GpuHostAxi` — ARTI/QEMU control top: AXI4 slave + `m_irq`; one ID-register read, mem ports idle
 
 `gated_pipe` and `sticky_input` must be ≥ 2× 1-thread Verilator. Other benches
 must not be slower than 0.8× 1-thread. All must match Verilator at the dumped
@@ -118,6 +119,7 @@ GPU rows include vs 4-thread Verilator where measured:
 | FrontendScalarFpu | ~2.5× | | same loop plus scalar FP32 FMA; mixed addi/fadd IMEM |
 | Gpu | ~69× | | closed CU; idle after warp finish (8T Verilator was slower than 1T) |
 | GpuSystem | ~53× | **~43×** | 1 CU + L2 + DMA; FlashSim ~5.9 MHz vs 1T 0.11 / 4T 0.14 MHz |
+| GpuHostAxi | ~22× | **~167×** | AXI ID read, then idle; FlashSim ~39 MHz vs 1T 1.7 / 4T 0.23 MHz |
 
 ```bash
 python3 -m flashsim compile build/benches/counter.v -o /tmp/counter.h

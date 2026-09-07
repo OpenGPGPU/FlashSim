@@ -260,6 +260,7 @@ CIRCT_ONLY = {
     "FrontendScalarFpu",
     "Gpu",
     "GpuSystem",
+    "GpuHostAxi",
 }
 
 

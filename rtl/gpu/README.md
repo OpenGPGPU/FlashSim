@@ -1,8 +1,8 @@
 # GPU RTL snapshot
 
 Generated from the sibling `gpu` Chisel tree (`../gpu` from the FlashSim
-root) with CIRCT `firtool-1.158.0`. This is a FlashSim compile target, not
-the ARTI/QEMU top (`GpuHostAxi`).
+root) with CIRCT `firtool-1.158.0`. Slices plus the ARTI/QEMU control top
+(`GpuHostAxi`).
 
 ```bash
 export JAVA_HOME="$(brew --prefix openjdk@21)/libexec/openjdk.jdk/Contents/Home"
@@ -23,6 +23,7 @@ sbt "runMain opengpu.elaboration.EmitPpaRtl frontend-scalar ../FlashSim/rtl/gpu/
 sbt "runMain opengpu.elaboration.EmitPpaRtl frontend-scalar-fpu ../FlashSim/rtl/gpu/frontend-scalar-fpu"
 sbt "runMain opengpu.elaboration.EmitPpaRtl gpu ../FlashSim/rtl/gpu/gpu"
 sbt "runMain opengpu.elaboration.EmitPpaRtl gpu-system ../FlashSim/rtl/gpu/gpu-system"
+sbt "runMain opengpu.elaboration.EmitGpuHostAxi ../FlashSim/rtl/gpu/host-axi"
 ```
 
 | directory | Chisel top | why this slice |
@@ -42,6 +43,7 @@ sbt "runMain opengpu.elaboration.EmitPpaRtl gpu-system ../FlashSim/rtl/gpu/gpu-s
 | `frontend-scalar-fpu/` | `FrontendScalarFpu` 4 warps × 4 lanes | same loop plus scalar FP32 FMA |
 | `gpu/` | `Gpu` 4 warps × 4 lanes | closed compute unit: kernel dispatch, core, I$, FPU |
 | `gpu-system/` | `GpuSystem` 1 CU | command processor, L2, DMA engines; DRAM at 64 B lines |
+| `host-axi/` | `GpuHostAxi` 16×16, 2 warps × 4 lanes | ARTI/QEMU AXI4 slave + irq; graphics mem ports idle |
 
 `python3 -m flashsim experiment --frontend circt` compiles these tops and diffs
 ports against Verilator. Ignore the extra `verification/` SV layers. Multi-file

@@ -43,6 +43,7 @@ CRITERIA = {
     "FrontendScalarFpu": 0.8,
     "Gpu": 0.8,
     "GpuSystem": 0.8,
+    "GpuHostAxi": 0.8,
 }
 
 GPU_BENCHES = {
@@ -61,6 +62,7 @@ GPU_BENCHES = {
     "FrontendScalarFpu": Path("rtl/gpu/frontend-scalar-fpu/FrontendScalarFpu.sv"),
     "Gpu": Path("rtl/gpu/gpu/Gpu.sv"),
     "GpuSystem": Path("rtl/gpu/gpu-system/GpuSystem.sv"),
+    "GpuHostAxi": Path("rtl/gpu/host-axi/GpuHostAxi.sv"),
 }
 
 

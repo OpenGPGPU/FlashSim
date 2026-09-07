@@ -683,12 +683,88 @@ def emit_cpp(mod: Module) -> str:
         "    d[i] = (uint64_t)(x - y);",
         "  }",
         "}",
+        "static inline void fs_mul_limbs(uint64_t *d, const uint64_t *a, const uint64_t *b, unsigned n) {",
+        "  uint64_t tmp[64];",
+        "  memset(tmp, 0, n * sizeof(uint64_t));",
+        "  for (unsigned i = 0; i < n; i++) {",
+        "    unsigned __int128 carry = 0;",
+        "    for (unsigned j = 0; i + j < n; j++) {",
+        "      unsigned __int128 t =",
+        "          (unsigned __int128)a[i] * b[j] + tmp[i + j] + carry;",
+        "      tmp[i + j] = (uint64_t)t;",
+        "      carry = t >> 64;",
+        "    }",
+        "  }",
+        "  memcpy(d, tmp, n * sizeof(uint64_t));",
+        "}",
         "static inline int fs_ucmp_limbs(const uint64_t *a, const uint64_t *b, unsigned n) {",
         "  for (unsigned i = n; i-- > 0u; ) {",
         "    if (a[i] > b[i]) return 1;",
         "    if (a[i] < b[i]) return -1;",
         "  }",
         "  return 0;",
+        "}",
+        "static inline void fs_mask_limbs(uint64_t *d, unsigned n, unsigned width) {",
+        "  unsigned full = width / 64u;",
+        "  unsigned bits = width % 64u;",
+        "  for (unsigned i = full + (bits ? 1u : 0u); i < n; i++) d[i] = 0;",
+        "  if (bits && full < n) d[full] &= (1ull << bits) - 1ull;",
+        "}",
+        "static inline void fs_neg_limbs(uint64_t *d, const uint64_t *a, unsigned n) {",
+        "  unsigned char br = 1;",
+        "  for (unsigned i = 0; i < n; i++) {",
+        "    unsigned __int128 t = (unsigned __int128)(uint64_t)(~a[i]) + br;",
+        "    d[i] = (uint64_t)t;",
+        "    br = (unsigned char)(t >> 64);",
+        "  }",
+        "}",
+        "static inline int fs_zero_limbs(const uint64_t *a, unsigned n) {",
+        "  for (unsigned i = 0; i < n; i++) if (a[i]) return 0;",
+        "  return 1;",
+        "}",
+        "static inline void fs_divrem_limbs(uint64_t *d, const uint64_t *a, const uint64_t *b,",
+        "    unsigned n, unsigned width, int is_signed, int want_quot) {",
+        "  uint64_t ua[64], ub[64], rem[64], quot[64];",
+        "  memcpy(ua, a, n * sizeof(uint64_t));",
+        "  memcpy(ub, b, n * sizeof(uint64_t));",
+        "  fs_mask_limbs(ua, n, width);",
+        "  fs_mask_limbs(ub, n, width);",
+        "  int sa = 0, sb = 0;",
+        "  if (is_signed && width) {",
+        "    unsigned sbit = width - 1u;",
+        "    sa = (int)((ua[sbit / 64u] >> (sbit % 64u)) & 1u);",
+        "    sb = (int)((ub[sbit / 64u] >> (sbit % 64u)) & 1u);",
+        "    if (sa) { fs_neg_limbs(ua, ua, n); fs_mask_limbs(ua, n, width); }",
+        "    if (sb) { fs_neg_limbs(ub, ub, n); fs_mask_limbs(ub, n, width); }",
+        "  }",
+        "  memset(quot, 0, n * sizeof(uint64_t));",
+        "  memset(rem, 0, n * sizeof(uint64_t));",
+        "  if (fs_zero_limbs(ub, n)) {",
+        "    memset(d, 0xff, n * sizeof(uint64_t));",
+        "    fs_mask_limbs(d, n, width);",
+        "    return;",
+        "  }",
+        "  for (unsigned bit = width; bit-- > 0u; ) {",
+        "    unsigned char c = (unsigned char)((ua[bit / 64u] >> (bit % 64u)) & 1u);",
+        "    for (unsigned i = 0; i < n; i++) {",
+        "      unsigned char next = (unsigned char)(rem[i] >> 63);",
+        "      rem[i] = (rem[i] << 1) | c;",
+        "      c = next;",
+        "    }",
+        "    if (fs_ucmp_limbs(rem, ub, n) >= 0) {",
+        "      fs_sub_limbs(rem, rem, ub, n);",
+        "      quot[bit / 64u] |= 1ull << (bit % 64u);",
+        "    }",
+        "  }",
+        "  if (want_quot) {",
+        "    if (sa ^ sb) fs_neg_limbs(quot, quot, n);",
+        "    fs_mask_limbs(quot, n, width);",
+        "    memcpy(d, quot, n * sizeof(uint64_t));",
+        "  } else {",
+        "    if (sa) fs_neg_limbs(rem, rem, n);",
+        "    fs_mask_limbs(rem, n, width);",
+        "    memcpy(d, rem, n * sizeof(uint64_t));",
+        "  }",
         "}",
         "static inline void fs_bump(uint32_t *pg, const uint16_t *ids, unsigned n) {",
         "  for (unsigned i = 0; i < n; i++) pg[ids[i]]++;",
@@ -1490,7 +1566,7 @@ def _emit_wide_assign(
         lines.append(f"{sp}{fn}({tmp}, {src}, {src_n}u, {amt});")
         lines.append(f"{sp}fs_copy_bits({dest}, 0u, {tmp}, 0u, {width}u);")
         return
-    if isinstance(expr, BinOp) and expr.op in {"&", "|", "^", "+", "-"}:
+    if isinstance(expr, BinOp) and expr.op in {"&", "|", "^", "+", "-", "*"}:
         aw = _expr_width(expr.a, sigs)
         bw = _expr_width(expr.b, sigs)
         left = _materialize_limbs(expr.a, aw, cached, sigs, lines, indent, scratch)
@@ -1501,6 +1577,7 @@ def _emit_wide_assign(
             "^": "fs_xor_limbs",
             "+": "fs_add_limbs",
             "-": "fs_sub_limbs",
+            "*": "fs_mul_limbs",
         }[expr.op]
         use_n = max(limb_count(aw), limb_count(bw), n)
         if use_n == n:
@@ -1508,6 +1585,26 @@ def _emit_wide_assign(
         else:
             tmp = _wtmp(lines, indent, use_n, scratch)
             lines.append(f"{sp}{fn}({tmp}, {left}, {right}, {use_n}u);")
+            lines.append(f"{sp}fs_copy_bits({dest}, 0u, {tmp}, 0u, {width}u);")
+        return
+    if isinstance(expr, BinOp) and expr.op in {"/", "s/", "%", "s%"}:
+        aw = _expr_width(expr.a, sigs)
+        bw = _expr_width(expr.b, sigs)
+        left = _materialize_limbs(expr.a, aw, cached, sigs, lines, indent, scratch)
+        right = _materialize_limbs(expr.b, bw, cached, sigs, lines, indent, scratch)
+        use_n = max(limb_count(aw), limb_count(bw), n)
+        bit_w = max(aw, bw, width)
+        signed = 1 if expr.op.startswith("s") else 0
+        want_quot = 1 if expr.op in {"/", "s/"} else 0
+        if use_n == n:
+            lines.append(
+                f"{sp}fs_divrem_limbs({dest}, {left}, {right}, {n}u, {bit_w}u, {signed}, {want_quot});"
+            )
+        else:
+            tmp = _wtmp(lines, indent, use_n, scratch)
+            lines.append(
+                f"{sp}fs_divrem_limbs({tmp}, {left}, {right}, {use_n}u, {bit_w}u, {signed}, {want_quot});"
+            )
             lines.append(f"{sp}fs_copy_bits({dest}, 0u, {tmp}, 0u, {width}u);")
         return
     if isinstance(expr, UnaryOp) and expr.op == "~":

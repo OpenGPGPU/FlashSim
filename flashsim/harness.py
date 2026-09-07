@@ -867,6 +867,38 @@ def _gpu_io() -> BenchIO:
     )
 
 
+def _gpu_host_axi_io() -> BenchIO:
+    # QEMU/ARTI control top. Tick `clock`; inner reset is !s_axi_aresetn.
+    # One single-beat AXI read of the ID register at 0x00 after reset.
+    # Untouched mem-port inputs stay 0 (idle backends).
+    ar = "((i >= 8) && (i == 16ull))"
+    return _fields_io(
+        [
+            ("reset", 1, "(uint8_t)(i < 8)"),
+            ("io_s_axi_aresetn", 1, "(uint8_t)(i >= 8)"),
+            ("io_s_axi_araddr", 32, "0u"),
+            ("io_s_axi_arlen", 8, "0u"),
+            ("io_s_axi_arsize", 3, "2u"),
+            ("io_s_axi_arburst", 2, "0u"),
+            ("io_s_axi_arvalid", 1, f"(uint8_t){ar}"),
+            ("io_s_axi_rready", 1, "1u"),
+            ("io_s_axi_bready", 1, "1u"),
+        ],
+        [
+            "io_s_axi_arready",
+            "io_s_axi_rvalid",
+            "io_s_axi_rdata",
+            "io_s_axi_rresp",
+            "io_s_axi_rlast",
+            "io_s_axi_awready",
+            "io_m_irq",
+        ],
+        "(uint64_t){p}io_s_axi_arready + {p}io_s_axi_rvalid + {p}io_s_axi_rdata + "
+        "{p}io_s_axi_rresp + {p}io_s_axi_rlast + {p}io_s_axi_awready + {p}io_m_irq",
+        dump_hex32=frozenset({"io_s_axi_rdata"}),
+    )
+
+
 def _gpu_system_io() -> BenchIO:
     # One CU behind L2. IMEM line is addi, fadd.s, cease so the kernel finishes
     # and the 1e6-cycle run is mostly idle. DRAM responses are delayed one
@@ -1234,6 +1266,7 @@ IOS = {
     "FrontendScalarFpu": _frontend_scalar_fpu_io(),
     "Gpu": _gpu_io(),
     "GpuSystem": _gpu_system_io(),
+    "GpuHostAxi": _gpu_host_axi_io(),
 }
 
 
