@@ -215,7 +215,11 @@ def _lower_module(raw: _ParsedMod) -> Module:
     mem_writes: list[MemWrite] = []
     instances: list[tuple[str, str, dict[str, str], str]] = []
     clock = next(
-        (n for n in ("clk", "clock") if n in signals and signals[n].kind == "input"),
+        (
+            n
+            for n in ("clk", "clock", "io_s_axi_aclk", "aclk")
+            if n in signals and signals[n].kind == "input"
+        ),
         "clk",
     )
     output_srcs: list[str] = []
@@ -459,8 +463,34 @@ def _rename_stmt(stmt, rename: dict[str, str]):
 
 
 def verilog_sources(path: Path) -> list[Path]:
-    """Synthesizable SystemVerilog next to `path` (skips verification/)."""
-    files = sorted(p for p in path.parent.glob("*.sv") if p.is_file())
+    """Synthesizable SystemVerilog for `path`.
+
+    Prefer a sibling `filelist.f` (the Chisel emit list). Otherwise take
+    `*.sv` next to the top. Skip `verification/` layers in both cases.
+    """
+    path = path.resolve()
+    listed = path.parent / "filelist.f"
+    files: list[Path] = []
+    if listed.is_file():
+        seen: set[Path] = set()
+        for raw in listed.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or line.startswith("//"):
+                continue
+            if "verification/" in line.replace("\\", "/"):
+                continue
+            candidate = (path.parent / line).resolve()
+            if not candidate.is_file() or candidate in seen:
+                continue
+            seen.add(candidate)
+            files.append(candidate)
+        if path not in seen and path.is_file():
+            files.append(path)
+        if files:
+            return files
+    files = sorted(
+        p for p in path.parent.glob("*.sv") if p.is_file() and p.name != "filelist.f"
+    )
     return files if files else [path]
 
 

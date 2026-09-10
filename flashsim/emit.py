@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections import defaultdict
 
 from flashsim.ir import (
@@ -33,18 +34,16 @@ def assign_map(mod: Module) -> dict[str, Expr]:
 def cone_leaves(root: str, assigns: dict[str, Expr], stop: set[str]) -> set[str]:
     found: set[str] = set()
     seen: set[str] = set()
-
-    def walk(name: str) -> None:
+    stack = [root]
+    while stack:
+        name = stack.pop()
         if name in seen:
-            return
+            continue
         seen.add(name)
         if name in stop or name not in assigns:
             found.add(name)
-            return
-        for dep in expr_ids(assigns[name]):
-            walk(dep)
-
-    walk(root)
+            continue
+        stack.extend(expr_ids(assigns[name]))
     return found
 
 
@@ -110,11 +109,25 @@ def always_writes(body: list[Stmt]) -> list[str]:
 
 
 def cached_wires(mod: Module, assigns: dict[str, Expr]) -> set[str]:
-    """Wires that need a skip cache: sequential roots, mem enables, and outputs."""
+    """Wires that need a skip cache: sequential roots, mem enables, and outputs.
+
+    One round of shared-helper promotion: a non-SSA wire used by two skip roots
+    gets its own `eval_*`. A fixpoint over SSA temps copies the whole decoder
+    net into tens of thousands of methods on GPU-sized designs.
+    """
     names = seq_skip_roots(mod.always.body) | set(collect_outputs(mod))
     for wr in mod.mem_writes:
         names |= expr_ids(wr.enable)
-    return {n for n in names if n in assigns}
+    cached = {n for n in names if n in assigns}
+    users: dict[str, int] = defaultdict(int)
+    for name in cached:
+        for dep in expr_ids(assigns[name]):
+            if dep in assigns and dep not in cached:
+                users[dep] += 1
+    for dep, n in users.items():
+        if n >= 2 and not _is_ssa_temp(dep):
+            cached.add(dep)
+    return cached
 
 
 def internal_cone(
@@ -126,38 +139,43 @@ def internal_cone(
     """Topological internals used only to compute `root`."""
     needed: list[str] = []
     seen: set[str] = set()
-
-    def walk(name: str) -> None:
+    stack: list[tuple[str, bool]] = [(root, False)]
+    while stack:
+        name, expanded = stack.pop()
+        if expanded:
+            if name != root:
+                needed.append(name)
+            continue
         if name in seen or name in stop or name not in assigns:
-            return
+            continue
         if name != root and name in cached:
-            return
+            continue
         seen.add(name)
+        stack.append((name, True))
         for dep in expr_ids(assigns[name]):
-            walk(dep)
-        if name != root:
-            needed.append(name)
-
-    walk(root)
+            stack.append((dep, False))
     return needed
 
 
 def cached_deps(root: str, assigns: dict[str, Expr], cached: set[str], stop: set[str]) -> list[str]:
     deps: list[str] = []
     seen: set[str] = set()
-
-    def walk(name: str) -> None:
+    stack = [root]
+    while stack:
+        name = stack.pop()
         if name in seen or name in stop or name not in assigns:
-            return
+            continue
         seen.add(name)
         if name != root and name in cached:
             deps.append(name)
-            return
-        for dep in expr_ids(assigns[name]):
-            walk(dep)
-
-    walk(root)
+            continue
+        stack.extend(expr_ids(assigns[name]))
     return deps
+
+
+def _is_ssa_temp(name: str) -> bool:
+    toks = name.split("_")
+    return bool(toks) and len(toks[-1]) > 1 and toks[-1][0] == "t" and toks[-1][1:].isdigit()
 
 
 def skip_partition_key(name: str) -> str:
@@ -169,14 +187,18 @@ def skip_partition_key(name: str) -> str:
     decoder helper does not get its own partition.
     """
     toks = name.split("_")
-    while toks and len(toks[-1]) > 1 and toks[-1][0] == "t" and toks[-1][1:].isdigit():
+    while toks and _is_ssa_temp("_".join(toks)):
         toks.pop()
+    if toks and toks[0] in {"system", "gpu"}:
+        toks = toks[1:]
+        while toks and _is_ssa_temp("_".join(toks)):
+            toks.pop()
     if not toks:
         return name
-    if toks[0] == "computeUnits" and len(toks) >= 5:
+    if toks[0] == "computeUnits" and len(toks) >= 7:
+        return "_".join(toks[:7])
+    if toks[0] == "l2" and len(toks) >= 5:
         return "_".join(toks[:5])
-    if toks[0] == "l2" and len(toks) >= 4:
-        return "_".join(toks[:4])
     if len(toks) >= 3:
         return "_".join(toks[:3])
     return "_".join(toks)
@@ -233,6 +255,36 @@ def _cond_stop_leaves(
     return leaves
 
 
+def _stmt_stop_leaves(
+    stmt: Stmt,
+    assigns: dict[str, Expr],
+    stop: set[str],
+    wire_deps: dict[str, set[str]],
+) -> set[str]:
+    """Leaves that can change what a hold statement does, data path included.
+
+    Waking on condition leaves alone is unsound: `_h_busy` only survives while
+    the body keeps changing a value, so a hold whose next value happens to
+    repeat for one cycle goes to sleep and then misses every later data-path
+    edge under a steady condition.
+    """
+    leaves: set[str] = set()
+
+    def walk(stmts: list[Stmt]) -> None:
+        for s in stmts:
+            if isinstance(s, NbAssign):
+                leaves.update(_cond_stop_leaves(s.rhs, assigns, stop, wire_deps))
+            elif isinstance(s, If):
+                leaves.update(_cond_stop_leaves(s.cond, assigns, stop, wire_deps))
+                walk(s.then_body)
+                walk(s.else_body)
+            else:
+                raise TypeError(s)
+
+    walk([stmt])
+    return leaves
+
+
 def _hold_wake_tables(leaf_holds: dict[str, list[int]]) -> dict[tuple[int, ...], int]:
     tables: dict[tuple[int, ...], int] = {}
     for ks in leaf_holds.values():
@@ -279,6 +331,7 @@ _ARRAY_INDEX: dict[str, int] = {}
 _HOLD_TAKEN = ""
 _LARGE = False
 _LARGE_WRITES = 256
+_HOLD_GROUP = 24
 
 
 def _eval_invoke(name: str, indent: int) -> str:
@@ -452,7 +505,13 @@ def emit_expr(expr: Expr, sigs: dict[str, Signal]) -> str:
             left = _signed_cast(emit_expr(expr.a, sigs), w)
             right = _signed_cast(emit_expr(expr.b, sigs), w)
             return f"({left} {op} {right})"
-        return f"({emit_expr(expr.a, sigs)} {expr.op} {emit_expr(expr.b, sigs)})"
+        code = f"({emit_expr(expr.a, sigs)} {expr.op} {emit_expr(expr.b, sigs)})"
+        if expr.op in {"+", "-", "*"}:
+            width = _expr_width(expr, sigs)
+            mask = mask_expr(width)
+            if mask:
+                return f"({code} & {mask})"
+        return code
     if isinstance(expr, Ternary):
         return f"({emit_expr(expr.cond, sigs)} ? {emit_expr(expr.a, sigs)} : {emit_expr(expr.b, sigs)})"
     if isinstance(expr, Extract):
@@ -532,6 +591,7 @@ def _array_depth(expr: Expr, sigs: dict[str, Signal]) -> int:
 
 
 def emit_cpp(mod: Module) -> str:
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
     assigns = assign_map(mod)
     regs = collect_regs(mod)
     mems = collect_mems(mod)
@@ -550,19 +610,25 @@ def emit_cpp(mod: Module) -> str:
     live_stmts: list[Stmt] = []
     leaf_holds: dict[str, list[int]] = {}
     if large:
+        # Any statement can be skipped, not just holds: if nothing it reads
+        # changed since it last ran, re-running it would recommit the value
+        # already in the register. Statements with an else arm behave the
+        # same way, so they are bucketed too.
         grouped: dict[str, list[Stmt]] = defaultdict(list)
         for stmt in mod.always.body:
-            if isinstance(stmt, If) and not stmt.else_body:
-                grouped[_stmt_bucket_key(stmt)].append(stmt)
-            else:
-                live_stmts.append(stmt)
-        hold_buckets = sorted(grouped.items())
+            grouped[_stmt_bucket_key(stmt)].append(stmt)
+        hold_buckets = []
+        for key, stmts in sorted(grouped.items()):
+            if len(stmts) <= _HOLD_GROUP:
+                hold_buckets.append((key, stmts))
+                continue
+            for off in range(0, len(stmts), _HOLD_GROUP):
+                hold_buckets.append((f"{key}#{off // _HOLD_GROUP}", stmts[off : off + _HOLD_GROUP]))
         holds_map: dict[str, set[int]] = defaultdict(set)
         for i, (_key, stmts) in enumerate(hold_buckets):
             for stmt in stmts:
-                if isinstance(stmt, If):
-                    for leaf in _cond_stop_leaves(stmt.cond, assigns, stop, wire_deps):
-                        holds_map[leaf].add(i)
+                for leaf in _stmt_stop_leaves(stmt, assigns, stop, wire_deps):
+                    holds_map[leaf].add(i)
         leaf_holds = {k: sorted(v) for k, v in holds_map.items()}
     used_inputs = {
         name for name in inputs if name in leaf_parts or name in leaf_holds
@@ -830,6 +896,10 @@ def emit_cpp(mod: Module) -> str:
             lines.append(f"  uint64_t _h_need[{nw}] = {{}};")
             lines.append(f"  uint64_t _h_busy[{nw}] = {{{busy_init}}};")
     lines.append("  uint8_t __inited = 0;")
+    # Design-independent activity signal: how many state elements actually
+    # changed in the last tick(). Hosts use it to run a model to quiescence
+    # without knowing anything about the design's internals.
+    lines.append("  uint32_t _chg = 0;")
     lines.append("")
     lines.append("  void poke_inputs() {")
     lines.append("    if (!__inited) {")
@@ -909,11 +979,13 @@ def emit_cpp(mod: Module) -> str:
                         f"        if (memcmp({name}__n, {name}, sizeof({name}))) {{"
                     )
                     _bump_parts(name, leaf_parts, inv_tables, lines, 10)
+                    lines.append("          _chg++;")
                     lines.append(f"          memcpy({name}, {name}__n, sizeof({name}));")
                     lines.append("        }")
                 else:
                     lines.append(f"        if ({name}__n != {name}) {{")
                     _bump_parts(name, leaf_parts, inv_tables, lines, 10)
+                    lines.append("          _chg++;")
                     lines.append(f"          {name} = {name}__n;")
                     lines.append("        }")
                 lines.append("      } break;")
@@ -922,6 +994,7 @@ def emit_cpp(mod: Module) -> str:
             lines.append("  }")
             lines.append("")
     lines.append("  void tick() {")
+    lines.append("    _chg = 0;")
     lines.append("    poke_inputs();")
     seq_body = live_stmts if large else mod.always.body
     seq_cached = always_cond_reads(seq_body) & cached
@@ -936,18 +1009,24 @@ def emit_cpp(mod: Module) -> str:
             lines.append("    memset(_ac, 0, sizeof(_ac));")
         if hold_buckets:
             nh = len(hold_buckets)
+            cls = f"{mod.name}Dut"
             nw = (nh + 63) // 64
-            for w in range(nw):
-                lo = w * 64
-                hi = min(lo + 64, nh)
-                last_bits = hi - lo
-                mask = "~0ull" if last_bits == 64 else f"((1ull << {last_bits}) - 1ull)"
-                lines.append(f"    {{ uint64_t __hm = (_h_need[{w}] | _h_busy[{w}]) & {mask};")
-                lines.append("      if (__hm) {")
-                for i in range(lo, hi):
-                    b = i - lo
-                    lines.append(f"        if (__hm & (1ull << {b})) _nba_h{i}();")
-                lines.append("      } }")
+            lines.append(f"    using HoldFn = void ({cls}::*)();")
+            lines.append("    static const HoldFn kHolds[] = {")
+            for i in range(nh):
+                comma = "," if i + 1 < nh else ""
+                lines.append(f"      &{cls}::_nba_h{i}{comma}")
+            lines.append("    };")
+            lines.append(f"    for (unsigned w = 0; w < {nw}u; w++) {{")
+            lines.append("      uint64_t bits = _h_need[w] | _h_busy[w];")
+            if nh & 63:
+                lines.append(f"      if (w == {nw - 1}u) bits &= (1ull << {nh & 63}u) - 1ull;")
+            lines.append("      while (bits) {")
+            lines.append("        unsigned b = (unsigned)__builtin_ctzll(bits);")
+            lines.append("        bits &= bits - 1ull;")
+            lines.append("        (this->*kHolds[(w << 6) + b])();")
+            lines.append("      }")
+            lines.append("    }")
         if live_stmts:
             lines.append("    _nba_live();")
     else:
@@ -1008,6 +1087,7 @@ def emit_cpp(mod: Module) -> str:
                 f"    if (_ac[{idx}] && memcmp({name}__n, {name}, sizeof({name}))) {{"
             )
             _bump_parts(name, leaf_parts, inv_tables, lines, 6)
+            lines.append("      _chg++;")
             lines.append(f"      memcpy({name}, {name}__n, sizeof({name}));")
             lines.append("    }")
     else:
@@ -1016,16 +1096,19 @@ def emit_cpp(mod: Module) -> str:
             if sig.depth:
                 lines.append(f"    if (memcmp({name}__n, {name}, sizeof({name}))) {{")
                 _bump_parts(name, leaf_parts, inv_tables, lines, 6)
+                lines.append("      _chg++;")
                 lines.append(f"      memcpy({name}, {name}__n, sizeof({name}));")
                 lines.append("    }")
             elif is_wide(sig.width):
                 lines.append(f"    if ({name}__w && memcmp({name}__n, {name}, sizeof({name}))) {{")
                 _bump_parts(name, leaf_parts, inv_tables, lines, 6)
+                lines.append("      _chg++;")
                 lines.append(f"      memcpy({name}, {name}__n, sizeof({name}));")
                 lines.append("    }")
             else:
                 lines.append(f"    if ({name}__w && {name}__n != {name}) {{")
                 _bump_parts(name, leaf_parts, inv_tables, lines, 6)
+                lines.append("      _chg++;")
                 lines.append(f"      {name} = {name}__n;")
                 lines.append("    }")
     for i, wr in enumerate(mod.mem_writes):
@@ -1036,6 +1119,7 @@ def emit_cpp(mod: Module) -> str:
         else:
             lines.append(f"      if ({wr.mem}[__wa{i}] != __wd{i}) {{")
         _bump_parts(wr.mem, leaf_parts, inv_tables, lines, 8)
+        lines.append("        _chg++;")
         lines.append("      }")
         if is_wide(w):
             lines.append(f"      memcpy({wr.mem}[__wa{i}], __wd{i}, sizeof(__wd{i}));")
@@ -1126,7 +1210,7 @@ def _emit_assign(
         return
     if isinstance(expr, Ternary):
         _emit_demand(expr.cond, cached, lines, indent)
-        lines.append(f"{sp}if ({emit_expr(expr.cond, sigs)}) {{")
+        lines.append(f"{sp}if ({_cond_code(expr.cond, cached, sigs, lines, indent, scratch)}) {{")
         _emit_assign(dest, expr.a, cached, sigs, lines, indent + 2, mask, scratch)
         lines.append(f"{sp}}} else {{")
         _emit_assign(dest, expr.b, cached, sigs, lines, indent + 2, mask, scratch)
@@ -1147,8 +1231,16 @@ def _emit_assign(
         lines.append(f"{sp}{dest} = {rhs};")
 
 
+def _ternary_nesting(expr: Expr) -> int:
+    n = 0
+    while isinstance(expr, Ternary):
+        n += 1
+        expr = expr.b
+    return n
+
+
 def _needs_limb_emit(expr: Expr, sigs: dict[str, Signal]) -> bool:
-    """True when emit_expr would apply C operators to limb arrays."""
+    """True when emit_expr would apply C operators to limb arrays or deep muxes."""
     if isinstance(expr, Const):
         return False
     if isinstance(expr, Id):
@@ -1156,19 +1248,21 @@ def _needs_limb_emit(expr: Expr, sigs: dict[str, Signal]) -> bool:
     if isinstance(expr, Extract):
         if isinstance(expr.a, Id) and expr.a.name in sigs and is_wide(sigs[expr.a.name].width):
             return False
-        return is_wide(_expr_width(expr.a, sigs)) or _needs_limb_emit(expr.a, sigs)
+        return _expr_width(expr.a, sigs) >= 128 or _needs_limb_emit(expr.a, sigs)
     if isinstance(expr, Concat):
         total = sum(_expr_width(part, sigs) for part in expr.parts)
-        if is_wide(total):
+        if total >= 128:
             return True
         return any(_needs_limb_emit(part, sigs) for part in expr.parts)
     if isinstance(expr, UnaryOp):
-        return is_wide(_expr_width(expr.a, sigs)) or _needs_limb_emit(expr.a, sigs)
+        return _expr_width(expr.a, sigs) >= 128 or _needs_limb_emit(expr.a, sigs)
     if isinstance(expr, BinOp):
-        if is_wide(_expr_width(expr.a, sigs)) or is_wide(_expr_width(expr.b, sigs)):
+        if _expr_width(expr.a, sigs) >= 128 or _expr_width(expr.b, sigs) >= 128:
             return True
         return _needs_limb_emit(expr.a, sigs) or _needs_limb_emit(expr.b, sigs)
     if isinstance(expr, Ternary):
+        if _ternary_nesting(expr) > 8:
+            return True
         return (
             _needs_limb_emit(expr.cond, sigs)
             or _needs_limb_emit(expr.a, sigs)
@@ -1179,6 +1273,27 @@ def _needs_limb_emit(expr: Expr, sigs: dict[str, Signal]) -> bool:
     if isinstance(expr, MemRead):
         return expr.mem in sigs and is_wide(sigs[expr.mem].width)
     return False
+
+
+def _cond_code(
+    expr: Expr,
+    cached: set[str],
+    sigs: dict[str, Signal],
+    lines: list[str],
+    indent: int,
+    scratch: list[int] | None = None,
+) -> str:
+    """C expression for a 1-bit condition. Wide compares become temps."""
+    if scratch is None:
+        scratch = [0]
+    if _needs_limb_emit(expr, sigs) or is_wide(_expr_width(expr, sigs)):
+        name = f"__c{scratch[0]}"
+        scratch[0] += 1
+        sp = " " * indent
+        lines.append(f"{sp}uint8_t {name};")
+        _emit_assign(name, expr, cached, sigs, lines, indent, None, scratch)
+        return name
+    return emit_expr(expr, sigs)
 
 
 def _load_bits(src: str, low: int, width: int) -> str:
@@ -1227,7 +1342,9 @@ def _emit_narrow_from_wide(
     ty = c_type(dest_w)
     if isinstance(expr, Ternary):
         _emit_demand(expr.cond, cached, lines, indent)
-        lines.append(f"{sp}if ({emit_expr(expr.cond, sigs)}) {{")
+        lines.append(
+            f"{sp}if ({_cond_code(expr.cond, cached, sigs, lines, indent, scratch)}) {{"
+        )
         _emit_narrow_from_wide(dest, expr.a, dest_w, cached, sigs, lines, indent + 2, scratch)
         lines.append(f"{sp}}} else {{")
         _emit_narrow_from_wide(dest, expr.b, dest_w, cached, sigs, lines, indent + 2, scratch)
@@ -1307,16 +1424,22 @@ def _emit_narrow_from_wide(
             src = _materialize_limbs(expr, total, cached, sigs, lines, indent, scratch)
             lines.append(f"{sp}{dest} = ({ty}){_load_bits(src, 0, dest_w)};")
             return
-        terms: list[str] = []
         bit = 0
+        first = True
         for part in reversed(expr.parts):
             pw = _expr_width(part, sigs)
             val = _bind_narrow(part, pw, cached, sigs, lines, indent, scratch)
             mask = mask_expr(pw)
             piece = f"(({val}) & {mask})" if mask else f"({val})"
-            terms.append(f"((({ty}){piece}) << {bit})")
+            term = f"((({ty}){piece}) << {bit})"
+            if first:
+                lines.append(f"{sp}{dest} = {term};")
+                first = False
+            else:
+                lines.append(f"{sp}{dest} |= {term};")
             bit += pw
-        lines.append(f"{sp}{dest} = {' | '.join(terms) if terms else '0'};")
+        if first:
+            lines.append(f"{sp}{dest} = 0;")
         return
     if isinstance(expr, UnaryOp):
         aw = _expr_width(expr.a, sigs)
@@ -1501,7 +1624,7 @@ def _emit_wide_assign(
     n = limb_count(width)
     if isinstance(expr, Ternary):
         _emit_demand(expr.cond, cached, lines, indent)
-        lines.append(f"{sp}if ({emit_expr(expr.cond, sigs)}) {{")
+        lines.append(f"{sp}if ({_cond_code(expr.cond, cached, sigs, lines, indent, scratch)}) {{")
         _emit_wide_assign(dest, expr.a, cached, sigs, lines, indent + 2, scratch)
         lines.append(f"{sp}}} else {{")
         _emit_wide_assign(dest, expr.b, cached, sigs, lines, indent + 2, scratch)
@@ -1637,14 +1760,17 @@ def _emit_array_assign(
     sigs: dict[str, Signal],
     lines: list[str],
     indent: int,
+    scratch: list[int] | None = None,
 ) -> None:
+    if scratch is None:
+        scratch = [0]
     sp = " " * indent
     if isinstance(expr, Ternary):
         _emit_demand(expr.cond, cached, lines, indent)
-        lines.append(f"{sp}if ({emit_expr(expr.cond, sigs)}) {{")
-        _emit_array_assign(dest, expr.a, cached, sigs, lines, indent + 2)
+        lines.append(f"{sp}if ({_cond_code(expr.cond, cached, sigs, lines, indent, scratch)}) {{")
+        _emit_array_assign(dest, expr.a, cached, sigs, lines, indent + 2, scratch)
         lines.append(f"{sp}}} else {{")
-        _emit_array_assign(dest, expr.b, cached, sigs, lines, indent + 2)
+        _emit_array_assign(dest, expr.b, cached, sigs, lines, indent + 2, scratch)
         lines.append(f"{sp}}}")
         return
     if isinstance(expr, ArrayZeros):
@@ -1654,7 +1780,7 @@ def _emit_array_assign(
         lines.append(f"{sp}memcpy({dest}, {expr.name}, sizeof({dest}));")
         return
     if isinstance(expr, ArrayInject):
-        _emit_array_assign(dest, expr.arr, cached, sigs, lines, indent)
+        _emit_array_assign(dest, expr.arr, cached, sigs, lines, indent, scratch)
         _emit_demand(expr.index, cached, lines, indent)
         _emit_demand(expr.value, cached, lines, indent)
         depth = _array_depth(expr, sigs)
@@ -1681,17 +1807,20 @@ def _emit_eval_calls(
 ) -> None:
     seen: set[str] = set()
     ordered: list[str] = []
-
-    def walk(name: str) -> None:
-        if name not in cached or name in seen:
-            return
+    stack: list[tuple[str, bool]] = [(name, False) for name in reversed(sorted(names))]
+    while stack:
+        name, expanded = stack.pop()
+        if name not in cached:
+            continue
+        if expanded:
+            ordered.append(name)
+            continue
+        if name in seen:
+            continue
         seen.add(name)
+        stack.append((name, True))
         for dep in cached_deps(name, assigns, cached, stop):
-            walk(dep)
-        ordered.append(name)
-
-    for name in sorted(names):
-        walk(name)
+            stack.append((dep, False))
     if not _WIRE_PART:
         for name in ordered:
             lines.append(_eval_invoke(name, indent))
@@ -1729,17 +1858,18 @@ def _uncached_needed(
 ) -> list[str]:
     needed: list[str] = []
     seen: set[str] = set()
-
-    def walk(name: str) -> None:
+    stack: list[tuple[str, bool]] = [(name, False) for name in expr_ids(expr)]
+    while stack:
+        name, expanded = stack.pop()
+        if expanded:
+            needed.append(name)
+            continue
         if name in seen or name in stop or name in cached or name not in assigns:
-            return
+            continue
         seen.add(name)
+        stack.append((name, True))
         for dep in expr_ids(assigns[name]):
-            walk(dep)
-        needed.append(name)
-
-    for name in expr_ids(expr):
-        walk(name)
+            stack.append((dep, False))
     return needed
 
 
@@ -1836,7 +1966,9 @@ def _emit_nba_tree(
                 _mark_write(stmt.lhs, lines, indent)
         elif isinstance(stmt, If):
             _emit_compute(stmt.cond, cached, assigns, stop, sigs, lines, indent, declared, scratch)
-            lines.append(f"{sp}if ({emit_expr(stmt.cond, sigs)}) {{")
+            lines.append(
+                f"{sp}if ({_cond_code(stmt.cond, cached, sigs, lines, indent, scratch)}) {{"
+            )
             _emit_nba_tree(
                 stmt.then_body,
                 cached,

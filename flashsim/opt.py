@@ -135,11 +135,10 @@ def _subst_consts(assigns: dict[str, Expr]) -> dict[str, Expr]:
 
 
 def _unwrap(expr: Expr, assigns: dict[str, Expr], seen: set[str] | None = None) -> Expr:
-    if seen is None:
-        seen = set()
-    if isinstance(expr, Id) and expr.name in assigns and expr.name not in seen:
+    seen = set() if seen is None else seen
+    while isinstance(expr, Id) and expr.name in assigns and expr.name not in seen:
         seen.add(expr.name)
-        return _unwrap(assigns[expr.name], assigns, seen)
+        expr = assigns[expr.name]
     return expr
 
 
@@ -359,7 +358,9 @@ def _lower_seq_mux(body: list[Stmt], assigns: dict[str, Expr], sigs: dict[str, S
     out: list[Stmt] = []
     for stmt in body:
         if isinstance(stmt, NbAssign):
-            out.extend(_nba_to_if(stmt.lhs, _follow(stmt.rhs, assigns, stmt.lhs, sigs), sigs))
+            out.extend(
+                _nba_to_if(stmt.lhs, _follow(stmt.rhs, assigns, stmt.lhs, sigs), sigs)
+            )
         elif isinstance(stmt, If):
             out.append(
                 If(
@@ -441,12 +442,20 @@ def _hold_next(expr: Expr, lhs: str) -> tuple[str, Expr, Expr] | None:
 
 
 def _nba_to_if(lhs: str, expr: Expr, sigs: dict[str, Signal]) -> list[Stmt]:
+    # A hold is a self-reference: CIRCT emits `when (en) r <= v` as
+    # mux(en, v, r), so only a self-referencing arm may be dropped. An arm
+    # that is a constant — zero included — is real data the design drives,
+    # never an undriven else, so it must be kept.
+    #
+    # Ids are not expanded into the statement tree: that duplicates shared
+    # SSA cones and explodes code size. Only Ternary nodes already present
+    # in the expression get lowered.
     if isinstance(expr, Ternary):
         then_body = _nba_to_if(lhs, expr.a, sigs)
         else_body = _nba_to_if(lhs, expr.b, sigs)
         if _is_hold(lhs, else_body):
-            else_body = []
-        elif _is_hold(lhs, then_body):
+            return [If(expr.cond, then_body)]
+        if _is_hold(lhs, then_body):
             return [If(UnaryOp("!", expr.cond), else_body)]
         return [If(expr.cond, then_body, else_body)]
     if lhs in sigs and sigs[lhs].width == 1:

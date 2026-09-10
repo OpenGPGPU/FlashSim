@@ -42,6 +42,9 @@ Release tarballs go to `third_party/circt-release/` (gitignored). Override with
 ```bash
 python3 -m flashsim experiment
 python3 -m flashsim experiment --frontend native   # skip CIRCT
+python3 -m flashsim qemu-smoke                     # ARTI MMIO C API on GpuHostAxi
+python3 -m flashsim arti-model rtl/gpu/host-axi/GpuHostAxi.sv -o build/GpuHostAxi
+# GPU_SIM=flashsim ../gpu/scripts/run_arti_gpu.sh  # QEMU embeds FlashSim instead of Verilator
 ```
 
 `experiment` uses CIRCT when `circt-verilog` is on `PATH` (or under

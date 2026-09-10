@@ -140,50 +140,43 @@ def expr_ids(expr: Expr) -> set[str]:
 
 def expr_id_counts(expr: Expr) -> dict[str, int]:
     counts: dict[str, int] = {}
-
-    def add(node: Expr) -> None:
+    stack: list[Expr] = [expr]
+    while stack:
+        node = stack.pop()
         if isinstance(node, Id):
             counts[node.name] = counts.get(node.name, 0) + 1
-            return
-        if isinstance(node, Const):
-            return
-        if isinstance(node, UnaryOp):
-            add(node.a)
-            return
+            continue
+        if isinstance(node, Const) or isinstance(node, ArrayZeros):
+            continue
+        if isinstance(node, UnaryOp) or isinstance(node, Extract):
+            stack.append(node.a)
+            continue
         if isinstance(node, BinOp):
-            add(node.a)
-            add(node.b)
-            return
+            stack.append(node.b)
+            stack.append(node.a)
+            continue
         if isinstance(node, Ternary):
-            add(node.cond)
-            add(node.a)
-            add(node.b)
-            return
-        if isinstance(node, Extract):
-            add(node.a)
-            return
+            stack.append(node.b)
+            stack.append(node.a)
+            stack.append(node.cond)
+            continue
         if isinstance(node, Concat):
-            for part in node.parts:
-                add(part)
-            return
+            stack.extend(node.parts)
+            continue
         if isinstance(node, ArrayGet):
-            add(node.arr)
-            add(node.index)
-            return
+            stack.append(node.index)
+            stack.append(node.arr)
+            continue
         if isinstance(node, ArrayInject):
-            add(node.arr)
-            add(node.index)
-            add(node.value)
-            return
-        if isinstance(node, ArrayZeros):
-            return
+            stack.append(node.value)
+            stack.append(node.index)
+            stack.append(node.arr)
+            continue
         if isinstance(node, MemRead):
             counts[node.mem] = counts.get(node.mem, 0) + 1
-            add(node.addr)
-            return
+            stack.append(node.addr)
+            continue
         raise TypeError(type(node))
-
-    add(expr)
     return counts
 
 
