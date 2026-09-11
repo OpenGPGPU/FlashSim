@@ -116,6 +116,10 @@ def cached_wires(mod: Module, assigns: dict[str, Expr]) -> set[str]:
     One round of shared-helper promotion: a non-SSA wire used by two skip roots
     gets its own `eval_*`. A fixpoint over SSA temps copies the whole decoder
     net into tens of thousands of methods on GPU-sized designs.
+
+    GPU L2/CU path: also promote SSA temps whose expression trees are huge so
+    they are not inlined into a single multi-megabyte `eval_*` (probe DRM
+    hotspot). Cap the number promoted to keep method count bounded.
     """
     names = seq_skip_roots(mod.always.body) | set(collect_outputs(mod))
     for wr in mod.mem_writes:
@@ -129,7 +133,67 @@ def cached_wires(mod: Module, assigns: dict[str, Expr]) -> set[str]:
     for dep, n in users.items():
         if n >= 2 and not _is_ssa_temp(dep):
             cached.add(dep)
+    _promote_large_gpu_ssa(assigns, cached)
     return cached
+
+
+# Promote SSA boolean trees this large into their own skip-cached eval.
+_LARGE_SSA_NODES = 48
+# Hard cap so GpuHostSystemAxi does not grow unbounded method counts.
+_LARGE_SSA_PROMOTE_CAP = 2048
+
+
+def _expr_node_count(expr: Expr) -> int:
+    if isinstance(expr, (Id, Const)):
+        return 1
+    if isinstance(expr, UnaryOp):
+        return 1 + _expr_node_count(expr.a)
+    if isinstance(expr, BinOp):
+        return 1 + _expr_node_count(expr.a) + _expr_node_count(expr.b)
+    if isinstance(expr, Ternary):
+        return (
+            1
+            + _expr_node_count(expr.cond)
+            + _expr_node_count(expr.a)
+            + _expr_node_count(expr.b)
+        )
+    if isinstance(expr, Extract):
+        return 1 + _expr_node_count(expr.a)
+    if isinstance(expr, Concat):
+        return 1 + sum(_expr_node_count(p) for p in expr.parts)
+    if isinstance(expr, ArrayGet):
+        return 1 + _expr_node_count(expr.arr) + _expr_node_count(expr.index)
+    if isinstance(expr, ArrayInject):
+        return (
+            1
+            + _expr_node_count(expr.arr)
+            + _expr_node_count(expr.index)
+            + _expr_node_count(expr.value)
+        )
+    if isinstance(expr, ArrayZeros):
+        return 1
+    if isinstance(expr, MemRead):
+        return 1 + _expr_node_count(expr.addr)
+    return 1
+
+
+def _is_gpu_hot_ssa(name: str) -> bool:
+    """SSA nets under L2 slices / compute units — DRM probe hot path."""
+    return "l2_slices_" in name or "computeUnits_" in name
+
+
+def _promote_large_gpu_ssa(assigns: dict[str, Expr], cached: set[str]) -> None:
+    """Split mega inlined cones by giving large GPU SSA temps their own eval."""
+    cands: list[tuple[int, str]] = []
+    for name, expr in assigns.items():
+        if name in cached or not _is_ssa_temp(name) or not _is_gpu_hot_ssa(name):
+            continue
+        n = _expr_node_count(expr)
+        if n >= _LARGE_SSA_NODES:
+            cands.append((n, name))
+    cands.sort(reverse=True)
+    for _, name in cands[:_LARGE_SSA_PROMOTE_CAP]:
+        cached.add(name)
 
 
 def internal_cone(

@@ -118,6 +118,25 @@ def test_l2_partition_keeps_slice_submodule() -> None:
     )
 
 
+def test_promote_large_gpu_ssa() -> None:
+    from flashsim.emit import _expr_node_count, _promote_large_gpu_ssa
+    from flashsim.ir import BinOp, Const, Id
+
+    # Build a deep AND chain (≥ 48 nodes).
+    expr: object = Id("leaf")
+    for i in range(50):
+        expr = BinOp("&", expr, Const(1, 1))  # type: ignore[assignment]
+    assert _expr_node_count(expr) >= 48  # type: ignore[arg-type]
+    assigns = {
+        "system_l2_slices_0_t999": expr,  # type: ignore[dict-item]
+        "system_l2_slices_0_t1": BinOp("&", Id("a"), Id("b")),
+    }
+    cached: set[str] = set()
+    _promote_large_gpu_ssa(assigns, cached)  # type: ignore[arg-type]
+    assert "system_l2_slices_0_t999" in cached
+    assert "system_l2_slices_0_t1" not in cached
+
+
 if __name__ == "__main__":
     test_wake_covers_data_path()
     test_wake_follows_combinational_wires()
@@ -126,4 +145,5 @@ if __name__ == "__main__":
     test_wake_uses_cached_wire_deps()
     test_split_dut_methods_out_of_line()
     test_l2_partition_keeps_slice_submodule()
+    test_promote_large_gpu_ssa()
     print("ok")
