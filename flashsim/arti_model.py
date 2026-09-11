@@ -321,9 +321,40 @@ echo "=== Building FlashSim embedded RTL model for $TOP_MODULE ==="
 cd "$SCRIPT_DIR"
 [ -f dut.h ] || { echo "missing dut.h (run flashsim arti-model first)" >&2; exit 1; }
 [ -f arti_rtl_model.cpp ] || { echo "missing arti_rtl_model.cpp" >&2; exit 1; }
-c++ -std=gnu++17 -fPIC -fPIE -O1 -w -Wno-parentheses-equality -fbracket-depth=4096 -I. \
-  -c arti_rtl_model.cpp -o arti_rtl_model.o
-ar rcs libarti_rtl_model.a arti_rtl_model.o
+
+# Split DUT shards (dut_*.cpp) compile at -O2 in parallel. The thin ARTI
+# wrapper stays -O1-compatible; without shards we keep -O1 on the monolith
+# because clang -O2 never finishes on a ~300MB single TU.
+NPROC="$(sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+CXXFLAGS_BASE=(-std=gnu++17 -fPIC -fPIE -w -Wno-parentheses-equality -fbracket-depth=4096 -I.)
+OBJS=()
+
+compile_one() {
+  local src="$1" obj="$2" opt="$3"
+  echo "  c++ $opt $src"
+  c++ "${CXXFLAGS_BASE[@]}" "$opt" -c "$src" -o "$obj"
+}
+
+shopt -s nullglob
+SHARDS=(dut_*.cpp)
+if ((${#SHARDS[@]} > 0)); then
+  # DUT method shards: -O2. Wrapper includes the huge class layout — keep -O1
+  # or clang hangs for tens of minutes at 0% CPU on arti_rtl_model.cpp.
+  for src in "${SHARDS[@]}"; do
+    obj="${src%.cpp}.o"
+    OBJS+=("$obj")
+    compile_one "$src" "$obj" -O2 &
+  done
+  wait
+  compile_one arti_rtl_model.cpp arti_rtl_model.o -O1
+  OBJS+=(arti_rtl_model.o)
+else
+  compile_one arti_rtl_model.cpp arti_rtl_model.o -O1
+  OBJS=(arti_rtl_model.o)
+fi
+
+rm -f libarti_rtl_model.a
+ar rcs libarti_rtl_model.a "${OBJS[@]}"
 ls -lh libarti_rtl_model.a
 
 cmp -s libarti_rtl_model.a "$QEMU_SRC/hw/misc/libarti_rtl_model.a" || \
@@ -947,7 +978,9 @@ def write_embedded_model(out_dir: Path, top: str, verilog: Path | None = None,
     """Compile `top` and emit the ARTI embedded library sources."""
     out_dir.mkdir(parents=True, exist_ok=True)
     if verilog is not None:
-        compile_file(verilog, out_dir / "dut.h", frontend=frontend)
+        # GpuHostSystemAxi is too large for a single -O2 TU; emit method shards.
+        split = 16 if top == "GpuHostSystemAxi" else 0
+        compile_file(verilog, out_dir / "dut.h", frontend=frontend, split=split)
     (out_dir / "arti_rtl_model.h").write_text(HEADER)
     if top == "GpuHostSystemAxi":
         (out_dir / "arti_rtl_model.cpp").write_text(SYSTEM_SOURCE)

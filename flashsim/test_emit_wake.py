@@ -46,6 +46,55 @@ def test_wake_uses_cached_wire_deps() -> None:
     assert leaves == {"en", "p", "q"}
 
 
+def test_split_dut_methods_out_of_line() -> None:
+    from flashsim.emit import split_dut_methods
+
+    mono = """\
+#include <cstdint>
+
+struct FooDut {
+  uint32_t x;
+  uint32_t x__ok = 0;
+  uint32_t _pg[1];
+  uint8_t __inited = 0;
+  uint32_t _chg = 0;
+
+  void _note(uint16_t i) { (void)i; }
+
+  void poke_inputs() {
+    __inited = 1;
+  }
+
+  void eval_x() {
+    if (x__ok == _pg[0]) return;
+    x = 1;
+    x__ok = _pg[0];
+  }
+
+  void eval_y() {}
+
+  void tick() {
+    poke_inputs();
+  }
+};
+"""
+    header, parts = split_dut_methods(mono, n_shards=2)
+    assert "void poke_inputs();" in header
+    assert "void eval_x();" in header
+    assert "void eval_y();" in header
+    assert "void tick();" in header
+    # tiny helper stays inline
+    assert "void _note(uint16_t i) { (void)i; }" in header
+    assert "void FooDut::poke_inputs()" in parts[0][1]
+    bodies = "".join(b for _, b in parts)
+    assert "void FooDut::eval_x()" in bodies
+    assert "void FooDut::eval_y() {}" in bodies
+    assert "void FooDut::tick()" in bodies
+    # no in-class method bodies left except _note
+    assert "void poke_inputs() {" not in header
+    assert "void eval_x() {" not in header
+
+
 def test_l2_partition_keeps_slice_submodule() -> None:
     from flashsim.emit import skip_partition_key
 
@@ -68,5 +117,6 @@ if __name__ == "__main__":
     test_wake_covers_both_arms_of_nested_holds()
     test_wake_covers_memory_reads()
     test_wake_uses_cached_wire_deps()
+    test_split_dut_methods_out_of_line()
     test_l2_partition_keeps_slice_submodule()
     print("ok")

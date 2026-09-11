@@ -8,7 +8,7 @@ from flashsim.circt_frontend import (
     parse_hw_mlir,
     verilog_sources,
 )
-from flashsim.emit import emit_cpp
+from flashsim.emit import emit_cpp, split_dut_methods
 from flashsim.ir import Module
 from flashsim.opt import optimize
 from flashsim.parse import parse_verilog
@@ -39,13 +39,34 @@ def compile_verilog(
     return mod, emit_cpp(mod)
 
 
-def compile_file(path: Path, out_h: Path, frontend: str = "auto") -> Module:
+def compile_file(
+    path: Path,
+    out_h: Path,
+    frontend: str = "auto",
+    *,
+    split: int = 0,
+) -> Module:
+    """Compile Verilog to `out_h`.
+
+    When `split > 0`, large DUT method bodies are written to `dut_0.cpp` …
+    `dut_{split-1}.cpp` beside the header so each shard can be -O2'd in
+    parallel (needed for GpuHostSystemAxi-sized tops).
+    """
     out_h.parent.mkdir(parents=True, exist_ok=True)
     mlir_path = out_h.parent / "hw.mlir" if _resolve_frontend(frontend) == "circt" else None
     mod, cpp = compile_verilog(
         path.read_text(), frontend=frontend, path=path, mlir_path=mlir_path
     )
-    out_h.write_text(cpp)
+    # Drop stale shards from a prior split emit.
+    for stale in out_h.parent.glob("dut_*.cpp"):
+        stale.unlink()
+    if split > 0:
+        header, parts = split_dut_methods(cpp, n_shards=split)
+        out_h.write_text(header)
+        for name, body in parts:
+            (out_h.parent / name).write_text(body)
+    else:
+        out_h.write_text(cpp)
     return mod
 
 

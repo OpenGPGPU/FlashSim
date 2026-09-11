@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import sys
+import zlib
 from collections import defaultdict
 
 from flashsim.ir import (
@@ -1156,6 +1157,108 @@ def emit_cpp(mod: Module) -> str:
     _HOLD_WAKE_TABLES = {}
     _LARGE = False
     return "\n".join(lines) + "\n"
+
+
+# Methods that stay in the class body even when splitting: tiny helpers called
+# from many NBA shards must remain visible without a cross-TU call.
+_SPLIT_KEEP_INLINE = frozenset({"_note"})
+
+# Core control path — always shard 0 so arti_rtl_model's hot loop shares a TU
+# with tick/poke when useful for inlining within that shard.
+_SPLIT_CORE = frozenset({"poke_inputs", "tick", "tick_nba", "_commit", "_nba_live"})
+
+_METHOD_START_RE = re.compile(
+    r"^  ((?:__attribute__\(\(noinline\)\) )?)void ([A-Za-z_][A-Za-z0-9_]*)\(\) \{(})?$"
+)
+
+
+def _shard_index(name: str, n_shards: int) -> int:
+    """Stable, well-mixed shard id (avoid little-endian prefix bias on eval_*)."""
+    if name in _SPLIT_CORE:
+        return 0
+    return zlib.adler32(name.encode()) % n_shards
+
+
+def split_dut_methods(
+    cpp: str, n_shards: int = 8
+) -> tuple[str, list[tuple[str, str]]]:
+    """Move in-class method bodies into `n_shards` out-of-line .cpp files.
+
+    Large FlashSim tops (GpuHostSystemAxi) are a ~300MB translation unit; clang
+    -O2 never finishes on that. Splitting eval/NBA methods lets each shard
+    compile at -O2 in parallel while arti_rtl_model.cpp stays a thin wrapper.
+    """
+    if n_shards < 1:
+        raise ValueError("n_shards must be >= 1")
+    m = re.search(r"^struct (\w+) \{", cpp, re.M)
+    if not m:
+        raise ValueError("dut header has no struct")
+    cls = m.group(1)
+    lines = cpp.splitlines(keepends=True)
+    out_lines: list[str] = []
+    shards: list[list[str]] = [[] for _ in range(n_shards)]
+    for s in shards:
+        s.append(f'#include "dut.h"\n')
+        s.append("\n")
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        mm = _METHOD_START_RE.match(line.rstrip("\n"))
+        if not mm:
+            out_lines.append(line)
+            i += 1
+            continue
+        attr, name, empty = mm.group(1), mm.group(2), mm.group(3)
+        if name in _SPLIT_KEEP_INLINE:
+            out_lines.append(line)
+            i += 1
+            continue
+        # One-line empty body: `void eval_x() {}`
+        if empty == "}":
+            out_lines.append(f"  {attr}void {name}();\n")
+            shard_i = _shard_index(name, n_shards)
+            shards[shard_i].append(f"void {cls}::{name}() {{}}\n\n")
+            i += 1
+            continue
+        # Multi-line body: brace-match from this line's `{`
+        depth = line.count("{") - line.count("}")
+        body_lines = [line]
+        i += 1
+        while i < len(lines) and depth > 0:
+            body_lines.append(lines[i])
+            depth += lines[i].count("{") - lines[i].count("}")
+            i += 1
+        # Drop trailing blank after method if present (re-add in shard)
+        out_lines.append(f"  {attr}void {name}();\n")
+        if i < len(lines) and lines[i].strip() == "":
+            out_lines.append(lines[i])
+            i += 1
+        # Convert `  void name() {` / attr form → `void Class::name() {`
+        first = body_lines[0]
+        first = re.sub(
+            r"^  ((?:__attribute__\(\(noinline\)\) )?)void "
+            + re.escape(name)
+            + r"\(\) \{",
+            rf"void {cls}::{name}() {{",
+            first,
+        )
+        # Dedent body by 2 spaces (class indent)
+        converted = [first]
+        for bl in body_lines[1:]:
+            if bl.startswith("  "):
+                converted.append(bl[2:])
+            else:
+                converted.append(bl)
+        shard_i = _shard_index(name, n_shards)
+        shards[shard_i].extend(converted)
+        if not converted[-1].endswith("\n"):
+            shards[shard_i].append("\n")
+        shards[shard_i].append("\n")
+
+    header = "".join(out_lines)
+    parts = [(f"dut_{k}.cpp", "".join(shards[k])) for k in range(n_shards)]
+    return header, parts
 
 
 def _emit_eval_method(
