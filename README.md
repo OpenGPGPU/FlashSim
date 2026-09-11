@@ -2,14 +2,15 @@
 
 Cycle-accurate RTL simulation that must match Verilator at DUT ports, and beat
 it by skipping inactive combinational cones. The skip kernel is frozen at the
-go/no-go; `GpuHostAxi` is the QEMU/ARTI control top now in the experiment.
+go/no-go; `GpuHostAxi` / `GpuHostSystemAxi` are the QEMU/ARTI control tops.
 
 ## Goal
 
 | Constraint | Rule |
 |---|---|
 | Gold model | Same Verilog, same stimulus, same per-cycle `dout` as Verilator |
-| Speed | Low-activity ≥ 2× **1-thread** Verilator; busy ≥ 0.8×. Also report `--threads 4`. |
+| Speed (unit) | Low-activity ≥ 2× **1-thread** Verilator; busy ≥ 0.8×. Also report `--threads 4`. |
+| Speed (ARTI) | Real QEMU/Linux GPU paths (bind, sparse MMIO, DRM jobs) must beat the Verilator-linked QEMU on **wall clock**. Microbench-only wins do not count. |
 | CIRCT | Official release binaries, not a git submodule |
 
 CIRCT lowers RTL (`firtool` / `circt-opt` / `circt-verilog`). FlashSim imports
@@ -22,6 +23,13 @@ self-gated, arrays are copy-on-write, and hold dispatch is a 64-bit bitmask
 so idle ticks do not memcpy, re-clear, or scan hundreds of skip flags. Do
 not fork CIRCT unless a pass must land in-tree. `--frontend native` is a
 Verilog-subset fallback when CIRCT is not installed.
+
+ARTI A/B (needs a probe initramfs under `$WORK`):
+
+```bash
+./scripts/bench_arti_backends.sh
+ARTI_MODEL_STATS=1 ./scripts/bench_arti_backends.sh   # tick/active counters
+```
 
 ## Setup
 

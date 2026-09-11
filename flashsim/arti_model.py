@@ -338,6 +338,12 @@ if [ "${SKIP_QEMU_REBUILD:-}" != "1" ]; then
         exit 1
     fi
     PATH="$ARTI_WORK/qemu-build-tools/bin:$PATH" ninja -C "$QEMU_BUILD" qemu-system-aarch64
+    # macOS: a plain cp of the linked binary can leave Finder xattrs that break
+    # ad-hoc codesign; dyld then hangs in _dyld_start. Clear and re-sign.
+    if command -v codesign >/dev/null 2>&1; then
+      xattr -cr "$QEMU_BUILD/qemu-system-aarch64" 2>/dev/null || true
+      codesign -s - --force --deep "$QEMU_BUILD/qemu-system-aarch64"
+    fi
     echo "=== Done ==="
     ls -lh "$QEMU_BUILD/qemu-system-aarch64"
 else
@@ -366,10 +372,14 @@ static constexpr unsigned TIMEOUT_CYCLES = 1000;
 static constexpr unsigned M_AXI_BYTES = 8;
 
 #ifndef ARTI_MODEL_MMIO_ADVANCE_CYCLES
-// Job-queue doorbell needs a few hundred cycles before jq_running/busy
-// go live. Idle-grace must not fire during that startup window or
-// check_irq will see an idle GPU and refuse to pump the draw.
-#define ARTI_MODEL_MMIO_ADVANCE_CYCLES 2048
+// Cap per host MMIO settle. Must be in the same ballpark as Verilator's
+// effective settle (~IDLE_GRACE of 20k with a free-running idle counter):
+// during a busy draw the guest only advances the model on MMIO/IRQ poll, so a
+// much smaller FlashSim cap starves the GPU relative to Verilator and makes
+// end-to-end "business" paths look slower even when per-cycle eval is faster.
+// Idle exits early via gpu_active()+IDLE_GRACE, so a higher cap does not tax
+// sparse/idle traffic.
+#define ARTI_MODEL_MMIO_ADVANCE_CYCLES 20000
 #endif
 #ifndef ARTI_MODEL_IDLE_GRACE
 #define ARTI_MODEL_IDLE_GRACE 16
@@ -386,12 +396,45 @@ static constexpr unsigned M_AXI_BYTES = 8;
 #define ARTI_MODEL_IRQ_PUMP_NS 0
 #endif
 
-// Debug/reference switch only: skip-eval is exact, so the default is off.
-// A non-zero value forces full evaluation for that many ticks after the host
-// touches the device, which is how skip-eval gets cross-checked.
 #ifndef ARTI_MODEL_HOLD_BOOST
 #define ARTI_MODEL_HOLD_BOOST 0
 #endif
+
+// Optional: ARTI_MODEL_STATS=1 prints settle/irq-pump tick and activity counts
+// so business-path A/B can separate "cycles advanced" from "wall time".
+static uint64_t g_stat_ticks;
+static uint64_t g_stat_active_ticks;
+static uint64_t g_stat_settles;
+static uint64_t g_stat_irq_pumps;
+
+static int stats_enabled(void)
+{
+  static int v = -1;
+  if (v < 0)
+    v = getenv("ARTI_MODEL_STATS") ? 1 : 0;
+  return v;
+}
+
+static void stats_report(const char *why)
+{
+  if (!stats_enabled())
+    return;
+  // QEMU merges model stderr into the guest serial log. Printing on every
+  // 100us IRQ poll floods the console and skews wall-clock A/B — throttle.
+  static uint64_t last_ticks;
+  static unsigned calls;
+  calls++;
+  if ((calls & 255u) != 0 && g_stat_ticks - last_ticks < 50000ull)
+    return;
+  last_ticks = g_stat_ticks;
+  fprintf(stderr,
+          "[artistats] %s ticks=%llu active=%llu settles=%llu irq_pumps=%llu\n",
+          why,
+          (unsigned long long)g_stat_ticks,
+          (unsigned long long)g_stat_active_ticks,
+          (unsigned long long)g_stat_settles,
+          (unsigned long long)g_stat_irq_pumps);
+}
 
 static unsigned env_u(const char *name, unsigned defv)
 {
@@ -532,11 +575,30 @@ static void combo_master(void)
   g_rtl->eval_io_m_axi_rready();
 }
 
+static void combo_eval(void)
+{
+  combo_slave();
+  combo_master();
+}
+
 static void combo(void)
 {
   g_rtl->poke_inputs();
-  combo_slave();
+  combo_eval();
+}
+
+// Hot path for settle / IRQ pump: the control slave is idle, so skip the
+// s_axi eval cone. Master + IRQ still update every cycle for memoryAXI.
+static void combo_pump_eval(void)
+{
   combo_master();
+  g_rtl->eval_io_m_irq();
+}
+
+static void combo_pump(void)
+{
+  g_rtl->poke_inputs();
+  combo_pump_eval();
 }
 
 static void idle_slave(void)
@@ -660,27 +722,45 @@ static void force_hold_boost(void)
     g_rtl->_pg[i]++;
 }
 
-static void tick(void)
+// combo_fn runs before the posedge (must poke: mem_drive just updated
+// inputs). eval_fn runs after tick(); tick() already poke_inputs(), and
+// mem_capture does not change DUT inputs, so skip a redundant poke walk.
+static void tick_with(void (*combo_fn)(void), void (*eval_fn)(void))
 {
   force_hold_boost();
   mem_drive();
-  combo();
+  combo_fn();
   // Sample response handshakes before the posedge so the DUT sees each
   // R/B beat for a full cycle. Popping before tick() dropped the first
   // beat of every read burst and hung depth-tested draws.
   const bool b_fire = g_rtl->io_m_axi_bvalid && g_rtl->io_m_axi_bready;
   const bool r_fire = g_rtl->io_m_axi_rvalid && g_rtl->io_m_axi_rready;
   mem_capture();
-  g_rtl->tick();
-  combo();
+  // Inputs unchanged since the pre-tick combo's poke; tick() would poke again.
+  g_rtl->tick_nba();
+  eval_fn();
   if (b_fire && !g_bresp.empty())
     g_bresp.pop_front();
   if (r_fire && !g_rresp.empty())
     g_rresp.pop_front();
-  if (gpu_active())
+  if (gpu_active()) {
     g_arti_idle = 0;
-  else
+    g_stat_active_ticks++;
+  } else {
     g_arti_idle++;
+  }
+  g_stat_ticks++;
+}
+
+static void tick(void)
+{
+  tick_with(combo, combo_eval);
+}
+
+// Settle and IRQ pump never drive the control slave; use the lighter combo.
+static void tick_pump(void)
+{
+  tick_with(combo_pump, combo_pump_eval);
 }
 
 static void arti_model_settle(void)
@@ -690,12 +770,13 @@ static void arti_model_settle(void)
   g_arti_idle = 0;
   g_hold_boost = hold_boost_ticks();
   unsigned i;
+  g_stat_settles++;
   // Do not stop on io_m_irq: a leftover level (JOB_CONTROL, W1C races)
   // would abort UCMD_SUBMIT/doorbell before fill/draw FSMs go live.
   // Completion is visible once gpu_active() drops and idle grace expires;
   // QEMU samples the pin after MMIO and on the IRQ poll timer.
   for (i = 0; i < mmio_advance(); i++) {
-    tick();
+    tick_pump();
     if (i + 1 >= ARTI_MODEL_SETTLE_MIN && g_arti_idle > idle_grace())
       break;
   }
@@ -842,8 +923,9 @@ extern "C" int arti_rtl_model_check_irq(unsigned index)
               cap, g_rtl->_chg, (unsigned)g_rtl->io_m_axi_arvalid,
               (unsigned)g_rtl->io_m_axi_awvalid, g_rresp.size());
     g_hold_boost = hold_boost_ticks();
+    g_stat_irq_pumps++;
     for (unsigned i = 0; i < cap && gpu_active(); i++) {
-      tick();
+      tick_pump();
       if (limit > 0 && (i & 15u) == 15u) {
         clock_gettime(CLOCK_MONOTONIC, &t1);
         long ns = (t1.tv_sec - t0.tv_sec) * 1000000000L +
@@ -853,7 +935,8 @@ extern "C" int arti_rtl_model_check_irq(unsigned index)
       }
     }
   }
-  combo();
+  combo_pump();
+  stats_report("check_irq");
   return g_rtl->io_m_irq ? 1 : 0;
 }
 '''

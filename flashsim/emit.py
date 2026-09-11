@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sys
 from collections import defaultdict
 
@@ -185,6 +186,12 @@ def skip_partition_key(name: str) -> str:
     Chisel instance prefix share one generation counter, so a leaf change bumps
     O(partitions) instead of O(wires). Strip SSA temps (`t12`) first so a
     decoder helper does not get its own partition.
+
+    L2 slice SSA nets are special: after stripping `tN`, ~10k eval caches share
+    a single `l2_slices_N` generation, so any slice activity re-evaluates the
+    whole cone (dominant cost on the ARTI DRM path). Named submodules keep a
+    4-token key; pure-SSA names under a slice are hashed into a small bucket
+    set so related temps can skip independently without one part per wire.
     """
     toks = name.split("_")
     while toks and _is_ssa_temp("_".join(toks)):
@@ -197,8 +204,15 @@ def skip_partition_key(name: str) -> str:
         return name
     if toks[0] == "computeUnits" and len(toks) >= 7:
         return "_".join(toks[:7])
-    if toks[0] == "l2" and len(toks) >= 5:
-        return "_".join(toks[:5])
+    if toks[0] == "l2":
+        if len(toks) >= 4:
+            return "_".join(toks[:4])
+        # Pure `l2_slices_N` after SSA strip — bucket by the original temp id.
+        if len(toks) == 3 and toks[1] == "slices" and toks[2].isdigit():
+            m = re.search(r"_t(\d+)$", name)
+            if m:
+                return f"l2_slices_{toks[2]}_b{int(m.group(1)) % 64}"
+        return "_".join(toks)
     if len(toks) >= 3:
         return "_".join(toks[:3])
     return "_".join(toks)
@@ -996,6 +1010,12 @@ def emit_cpp(mod: Module) -> str:
     lines.append("  void tick() {")
     lines.append("    _chg = 0;")
     lines.append("    poke_inputs();")
+    lines.append("    tick_nba();")
+    lines.append("  }")
+    lines.append("")
+    # Posedge body without re-scanning inputs (hosts may poke first).
+    lines.append("  void tick_nba() {")
+    lines.append("    _chg = 0;")
     seq_body = live_stmts if large else mod.always.body
     seq_cached = always_cond_reads(seq_body) & cached
     for wr in mod.mem_writes:

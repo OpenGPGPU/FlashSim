@@ -46,10 +46,27 @@ def test_wake_uses_cached_wire_deps() -> None:
     assert leaves == {"en", "p", "q"}
 
 
+def test_l2_partition_keeps_slice_submodule() -> None:
+    from flashsim.emit import skip_partition_key
+
+    assert (
+        skip_partition_key("system_l2_slices_1_memoryRequestArbiter_t29")
+        == "l2_slices_1_memoryRequestArbiter"
+    )
+    assert skip_partition_key("system_l2_slices_1_t59013") == "l2_slices_1_b5"
+    assert skip_partition_key("system_l2_slices_1_t64") == "l2_slices_1_b0"
+    assert (
+        skip_partition_key("system_l2_slices_0_mshrTable_valid_0")
+        == "l2_slices_0_mshrTable"
+    )
+    assert skip_partition_key("system_l2_slices_1_lowerIssued") == "l2_slices_1_lowerIssued"
+
+
 if __name__ == "__main__":
     test_wake_covers_data_path()
     test_wake_follows_combinational_wires()
     test_wake_covers_both_arms_of_nested_holds()
     test_wake_covers_memory_reads()
     test_wake_uses_cached_wire_deps()
+    test_l2_partition_keeps_slice_submodule()
     print("ok")
