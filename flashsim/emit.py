@@ -191,8 +191,8 @@ def skip_partition_key(name: str) -> str:
     L2 slice SSA nets are special: after stripping `tN`, ~10k eval caches share
     a single `l2_slices_N` generation, so any slice activity re-evaluates the
     whole cone (dominant cost on the ARTI DRM path). Named submodules keep a
-    4-token key; pure-SSA names under a slice are hashed into a small bucket
-    set so related temps can skip independently without one part per wire.
+    4-token key; pure-SSA names under a slice are hashed into 64 buckets so
+    related temps can skip independently without one part per wire.
     """
     toks = name.split("_")
     while toks and _is_ssa_temp("_".join(toks)):
@@ -209,11 +209,22 @@ def skip_partition_key(name: str) -> str:
         if len(toks) >= 4:
             return "_".join(toks[:4])
         # Pure `l2_slices_N` after SSA strip — bucket by the original temp id.
+        # 64 buckets: enough to split the ~10k SSA caches without exploding
+        # per-leaf invalidation fanout (256 buckets regressed probe wall clock).
         if len(toks) == 3 and toks[1] == "slices" and toks[2].isdigit():
             m = re.search(r"_t(\d+)$", name)
             if m:
                 return f"l2_slices_{toks[2]}_b{int(m.group(1)) % 64}"
         return "_".join(toks)
+    # Host AXI response fanout: keep bits/ready/valid in separate gens so a
+    # single leaf bump does not invalidate the whole `memoryAxi_io_response`
+    # family (tiny evals called from nearly every NBA shard).
+    if toks[0] == "memoryAxi" and len(toks) >= 4:
+        return "_".join(toks[:4])
+    # Compute-unit pipeline stages: keep CU index + first submodule so a
+    # scoreboard leaf does not invalidate the whole CU SSA fanout.
+    if toks[0] == "computeUnits" and len(toks) >= 4:
+        return "_".join(toks[:4])
     if len(toks) >= 3:
         return "_".join(toks[:3])
     return "_".join(toks)
@@ -1163,6 +1174,13 @@ def emit_cpp(mod: Module) -> str:
 # from many NBA shards must remain visible without a cross-TU call.
 _SPLIT_KEEP_INLINE = frozenset({"_note"})
 
+# Keep tiny eval helpers in the header so cross-shard call sites can inline
+# them. Profile of GpuHostSystemAxi: ~14k call sites of a 4-line
+# `eval_memoryAxi_io_response_bits_fault` dominate samples via call/ret, not
+# the body. Keep the threshold tight: inlining thousands of mid-size helpers
+# into `tick_nba` makes clang -O2 hang on dut_0.
+_SPLIT_INLINE_MAX_BYTES = 320
+
 # Core control path — always shard 0 so arti_rtl_model's hot loop shares a TU
 # with tick/poke when useful for inlining within that shard.
 _SPLIT_CORE = frozenset({"poke_inputs", "tick", "tick_nba", "_commit", "_nba_live"})
@@ -1187,6 +1205,9 @@ def split_dut_methods(
     Large FlashSim tops (GpuHostSystemAxi) are a ~300MB translation unit; clang
     -O2 never finishes on that. Splitting eval/NBA methods lets each shard
     compile at -O2 in parallel while arti_rtl_model.cpp stays a thin wrapper.
+
+    Tiny methods (≤ `_SPLIT_INLINE_MAX_BYTES`) stay in the class body so the
+    thousands of cross-shard early-return evals do not pay an out-of-line call.
     """
     if n_shards < 1:
         raise ValueError("n_shards must be >= 1")
@@ -1214,11 +1235,9 @@ def split_dut_methods(
             out_lines.append(line)
             i += 1
             continue
-        # One-line empty body: `void eval_x() {}`
+        # One-line empty body: keep inline (no cross-TU stub tax).
         if empty == "}":
-            out_lines.append(f"  {attr}void {name}();\n")
-            shard_i = _shard_index(name, n_shards)
-            shards[shard_i].append(f"void {cls}::{name}() {{}}\n\n")
+            out_lines.append(line)
             i += 1
             continue
         # Multi-line body: brace-match from this line's `{`
@@ -1229,11 +1248,20 @@ def split_dut_methods(
             body_lines.append(lines[i])
             depth += lines[i].count("{") - lines[i].count("}")
             i += 1
-        # Drop trailing blank after method if present (re-add in shard)
-        out_lines.append(f"  {attr}void {name}();\n")
+        trailing_blank = ""
         if i < len(lines) and lines[i].strip() == "":
-            out_lines.append(lines[i])
+            trailing_blank = lines[i]
             i += 1
+        body_bytes = sum(len(bl) for bl in body_lines)
+        # Tiny helpers: stay in-class (implicit inline across all shards).
+        if body_bytes <= _SPLIT_INLINE_MAX_BYTES:
+            out_lines.extend(body_lines)
+            if trailing_blank:
+                out_lines.append(trailing_blank)
+            continue
+        out_lines.append(f"  {attr}void {name}();\n")
+        if trailing_blank:
+            out_lines.append(trailing_blank)
         # Convert `  void name() {` / attr form → `void Class::name() {`
         first = body_lines[0]
         first = re.sub(

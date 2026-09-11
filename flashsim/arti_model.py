@@ -340,6 +340,8 @@ SHARDS=(dut_*.cpp)
 if ((${#SHARDS[@]} > 0)); then
   # DUT method shards: -O2. Wrapper includes the huge class layout — keep -O1
   # or clang hangs for tens of minutes at 0% CPU on arti_rtl_model.cpp.
+  # (Tiny in-header evals are capped via _SPLIT_INLINE_MAX_BYTES so dut_0's
+  # tick_nba still finishes under -O2.)
   for src in "${SHARDS[@]}"; do
     obj="${src%.cpp}.o"
     OBJS+=("$obj")
@@ -403,16 +405,16 @@ static constexpr unsigned TIMEOUT_CYCLES = 1000;
 static constexpr unsigned M_AXI_BYTES = 8;
 
 #ifndef ARTI_MODEL_MMIO_ADVANCE_CYCLES
-// Cap per host MMIO settle. Must be in the same ballpark as Verilator's
-// effective settle (~IDLE_GRACE of 20k with a free-running idle counter):
-// during a busy draw the guest only advances the model on MMIO/IRQ poll, so a
-// much smaller FlashSim cap starves the GPU relative to Verilator and makes
-// end-to-end "business" paths look slower even when per-cycle eval is faster.
-// Idle exits early via gpu_active()+IDLE_GRACE, so a higher cap does not tax
-// sparse/idle traffic.
-#define ARTI_MODEL_MMIO_ADVANCE_CYCLES 20000
+// Cap per host MMIO settle. Match Verilator's ARTI default (500k): while the
+// GPU keeps DMA/_chg live, idle stays reset and the job can finish inside one
+// MMIO settle instead of being sliced across 100us IRQ polls (BQL tax).
+// Idle exits early via gpu_active()+IDLE_GRACE, so sparse MMIO is unaffected.
+#define ARTI_MODEL_MMIO_ADVANCE_CYCLES 500000
 #endif
 #ifndef ARTI_MODEL_IDLE_GRACE
+// FlashSim detects activity via _chg + AXI queues (stricter than Verilator's
+// mem-traffic-only idle reset), so a small grace is enough to drain bubbles
+// without burning Verilator's 20k idle ticks on every quiet MMIO.
 #define ARTI_MODEL_IDLE_GRACE 16
 #endif
 #ifndef ARTI_MODEL_SETTLE_MIN

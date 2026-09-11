@@ -49,50 +49,49 @@ def test_wake_uses_cached_wire_deps() -> None:
 def test_split_dut_methods_out_of_line() -> None:
     from flashsim.emit import split_dut_methods
 
-    mono = """\
+    # Large body forces out-of-line extraction past _SPLIT_INLINE_MAX_BYTES.
+    big = "    x = x + 1;\n" * 80
+    mono = f"""\
 #include <cstdint>
 
-struct FooDut {
+struct FooDut {{
   uint32_t x;
   uint32_t x__ok = 0;
   uint32_t _pg[1];
   uint8_t __inited = 0;
   uint32_t _chg = 0;
 
-  void _note(uint16_t i) { (void)i; }
+  void _note(uint16_t i) {{ (void)i; }}
 
-  void poke_inputs() {
-    __inited = 1;
-  }
+  void poke_inputs() {{
+{big}    __inited = 1;
+  }}
 
-  void eval_x() {
+  void eval_x() {{
     if (x__ok == _pg[0]) return;
     x = 1;
     x__ok = _pg[0];
-  }
+  }}
 
-  void eval_y() {}
+  void eval_y() {{}}
 
-  void tick() {
-    poke_inputs();
-  }
-};
+  void tick() {{
+{big}    poke_inputs();
+  }}
+}};
 """
     header, parts = split_dut_methods(mono, n_shards=2)
     assert "void poke_inputs();" in header
-    assert "void eval_x();" in header
-    assert "void eval_y();" in header
     assert "void tick();" in header
-    # tiny helper stays inline
+    # tiny eval / empty stay in-class for cross-TU inlining
+    assert "void eval_x() {" in header
+    assert "void eval_y() {}" in header
     assert "void _note(uint16_t i) { (void)i; }" in header
     assert "void FooDut::poke_inputs()" in parts[0][1]
     bodies = "".join(b for _, b in parts)
-    assert "void FooDut::eval_x()" in bodies
-    assert "void FooDut::eval_y() {}" in bodies
     assert "void FooDut::tick()" in bodies
-    # no in-class method bodies left except _note
+    assert "void FooDut::eval_x()" not in bodies
     assert "void poke_inputs() {" not in header
-    assert "void eval_x() {" not in header
 
 
 def test_l2_partition_keeps_slice_submodule() -> None:
@@ -109,6 +108,14 @@ def test_l2_partition_keeps_slice_submodule() -> None:
         == "l2_slices_0_mshrTable"
     )
     assert skip_partition_key("system_l2_slices_1_lowerIssued") == "l2_slices_1_lowerIssued"
+    assert (
+        skip_partition_key("memoryAxi_io_response_bits_fault")
+        == "memoryAxi_io_response_bits"
+    )
+    assert (
+        skip_partition_key("memoryAxi_io_response_valid")
+        == "memoryAxi_io_response_valid"
+    )
 
 
 if __name__ == "__main__":
