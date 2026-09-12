@@ -120,6 +120,10 @@ def cached_wires(mod: Module, assigns: dict[str, Expr]) -> set[str]:
     GPU L2/CU path: also promote SSA temps whose expression trees are huge so
     they are not inlined into a single multi-megabyte `eval_*` (probe DRM
     hotspot). Cap the number promoted to keep method count bounded.
+
+    Hold payloads are normally locals (idle skip). On always-busy draws those
+    holds stay live and re-inline thousand-temp cones every cycle — promote
+    bulky gated cones into skip-cached evals too.
     """
     names = seq_skip_roots(mod.always.body) | set(collect_outputs(mod))
     for wr in mod.mem_writes:
@@ -134,13 +138,22 @@ def cached_wires(mod: Module, assigns: dict[str, Expr]) -> set[str]:
         if n >= 2 and not _is_ssa_temp(dep):
             cached.add(dep)
     _promote_large_gpu_ssa(assigns, cached)
+    stop = set(collect_regs(mod)) | set(collect_inputs(mod)) | set(collect_mems(mod))
+    _promote_bulky_gated_cones(mod.always.body, assigns, cached, stop)
     return cached
 
 
 # Promote SSA boolean trees this large into their own skip-cached eval.
 _LARGE_SSA_NODES = 48
 # Hard cap so GpuHostSystemAxi does not grow unbounded method counts.
-_LARGE_SSA_PROMOTE_CAP = 2048
+# Busy CU holds alone can need >1k SSA promotions (vectorCoalescer nests);
+# allow enough headroom for several mega-holds.
+_LARGE_SSA_PROMOTE_CAP = 16384
+# Gated hold RHS whose uncached SSA cone exceeds this gets non-trivial temps
+# promoted.
+_BULKY_GATED_CONE = 48
+# One-hot compares are cheaper as locals; only promote richer SSA temps.
+_BULKY_TMP_NODES = 12
 
 
 def _expr_node_count(expr: Expr) -> int:
@@ -179,7 +192,16 @@ def _expr_node_count(expr: Expr) -> int:
 
 def _is_gpu_hot_ssa(name: str) -> bool:
     """SSA nets under L2 slices / compute units — DRM probe hot path."""
-    return "l2_slices_" in name or "computeUnits_" in name
+    return (
+        "l2_slices_" in name
+        or "computeUnits_" in name
+        or "vectorCoalescer_" in name
+        or "missEngine_" in name
+        or "commandRouter" in name
+        or "copyEngine" in name
+        or "fillEngine" in name
+        or "strided" in name
+    )
 
 
 def _promote_large_gpu_ssa(assigns: dict[str, Expr], cached: set[str]) -> None:
@@ -194,6 +216,133 @@ def _promote_large_gpu_ssa(assigns: dict[str, Expr], cached: set[str]) -> None:
     cands.sort(reverse=True)
     for _, name in cands[:_LARGE_SSA_PROMOTE_CAP]:
         cached.add(name)
+
+
+def _promote_bulky_gated_cones(
+    body: list[Stmt],
+    assigns: dict[str, Expr],
+    cached: set[str],
+    stop: set[str],
+) -> None:
+    """Cache non-trivial SSA temps from huge hold bodies.
+
+    Tiny one-hot compares stay as locals (cheaper than eval+/__ok). Only temps
+    with `_expr_node_count >= _BULKY_TMP_NODES` are promoted, and only from
+    regions that would otherwise inline ≥ `_BULKY_GATED_CONE` SSA locals.
+    """
+    regions: list[tuple[int, list[str]]] = []
+
+    def add_needed(expr: Expr) -> set[str]:
+        return set(_uncached_needed(expr, assigns, cached, stop))
+
+    def region_temps(stmts: list[Stmt]) -> list[str]:
+        needed: set[str] = set()
+
+        def gather(ss: list[Stmt]) -> None:
+            for stmt in ss:
+                if isinstance(stmt, NbAssign):
+                    needed.update(add_needed(stmt.rhs))
+                elif isinstance(stmt, If):
+                    needed.update(add_needed(stmt.cond))
+                    gather(stmt.then_body)
+                    gather(stmt.else_body)
+                else:
+                    raise TypeError(stmt)
+
+        gather(stmts)
+        out: list[str] = []
+        for n in needed:
+            if n in cached or not _is_ssa_temp(n) or not _is_gpu_hot_ssa(n):
+                continue
+            if _expr_node_count(assigns[n]) < _BULKY_TMP_NODES:
+                continue
+            out.append(n)
+        return out
+
+    def walk(stmts: list[Stmt], gated: bool) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, If):
+                if stmt.else_body:
+                    walk(stmt.then_body, gated)
+                    walk(stmt.else_body, gated)
+                else:
+                    # Use full uncached cone size for the bulkiness test.
+                    raw = set()
+                    def gather(ss: list[Stmt]) -> None:
+                        for s in ss:
+                            if isinstance(s, NbAssign):
+                                raw.update(add_needed(s.rhs))
+                            elif isinstance(s, If):
+                                raw.update(add_needed(s.cond))
+                                gather(s.then_body)
+                                gather(s.else_body)
+                    gather(stmt.then_body)
+                    raw_ssa = [
+                        n
+                        for n in raw
+                        if _is_ssa_temp(n) and _is_gpu_hot_ssa(n) and n not in cached
+                    ]
+                    if len(raw_ssa) >= _BULKY_GATED_CONE:
+                        regions.append((len(raw_ssa), region_temps(stmt.then_body)))
+                    walk(stmt.then_body, True)
+            elif isinstance(stmt, NbAssign):
+                if gated:
+                    temps = region_temps([stmt])
+                    raw = [
+                        n
+                        for n in add_needed(stmt.rhs)
+                        if _is_ssa_temp(n) and _is_gpu_hot_ssa(n) and n not in cached
+                    ]
+                    if len(raw) >= _BULKY_GATED_CONE:
+                        regions.append((len(raw), temps))
+            else:
+                raise TypeError(stmt)
+
+    walk(body, False)
+    regions.sort(key=lambda rt: rt[0], reverse=True)
+    added = 0
+    for _size, temps in regions:
+        for tmp in temps:
+            if added >= _LARGE_SSA_PROMOTE_CAP:
+                return
+            if tmp in cached:
+                continue
+            cached.add(tmp)
+            added += 1
+
+
+def _collect_cached_demands(
+    stmts: list[Stmt],
+    cached: set[str],
+    assigns: dict[str, Expr],
+    stop: set[str],
+) -> set[str]:
+    """Cached wires demanded anywhere in an NBA stmt tree."""
+    demand: set[str] = set()
+
+    def note_expr(expr: Expr) -> None:
+        for dep in expr_ids(expr):
+            if dep in cached:
+                demand.add(dep)
+        for tmp in _uncached_needed(expr, assigns, cached, stop):
+            for dep in expr_ids(assigns[tmp]):
+                if dep in cached:
+                    demand.add(dep)
+
+    def walk(ss: list[Stmt]) -> None:
+        for stmt in ss:
+            if isinstance(stmt, NbAssign):
+                note_expr(stmt.rhs)
+            elif isinstance(stmt, If):
+                note_expr(stmt.cond)
+                walk(stmt.then_body)
+                walk(stmt.else_body)
+            else:
+                raise TypeError(stmt)
+
+    walk(stmts)
+    return demand
+
 
 
 def internal_cone(
@@ -384,6 +533,39 @@ def _hold_wake_tables(leaf_holds: dict[str, list[int]]) -> dict[tuple[int, ...],
     return tables
 
 
+def _bump_sig(
+    leaf: str, leaf_parts: dict[str, list[int]]
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Invalidation + wake signature for a committed leaf."""
+    return (tuple(leaf_parts.get(leaf, ())), tuple(_LEAF_HOLDS.get(leaf, ())))
+
+
+def _emit_bump_sig(
+    parts: tuple[int, ...],
+    holds: tuple[int, ...],
+    tables: dict[tuple[int, ...], int],
+    lines: list[str],
+    indent: int,
+) -> None:
+    sp = " " * indent
+    if parts:
+        if len(parts) <= _BUMP_INLINE:
+            for p in parts:
+                lines.append(f"{sp}_pg[{p}]++;")
+        else:
+            i = tables[parts]
+            lines.append(f"{sp}fs_bump(_pg, _inv{i}, {len(parts)}u);")
+    if not holds:
+        return
+    if len(holds) <= _BUMP_INLINE:
+        for k in holds:
+            word, bit = k >> 6, k & 63
+            lines.append(f"{sp}_h_need[{word}] |= 1ull << {bit};")
+        return
+    i = _HOLD_WAKE_TABLES[holds]
+    lines.append(f"{sp}fs_wake(_h_need, _hw{i}, {len(holds)}u);")
+
+
 def _bump_parts(
     leaf: str,
     leaf_parts: dict[str, list[int]],
@@ -391,25 +573,8 @@ def _bump_parts(
     lines: list[str],
     indent: int,
 ) -> None:
-    sp = " " * indent
-    parts = leaf_parts.get(leaf, ())
-    if parts:
-        if len(parts) <= _BUMP_INLINE:
-            for p in parts:
-                lines.append(f"{sp}_pg[{p}]++;")
-        else:
-            i = tables[tuple(parts)]
-            lines.append(f"{sp}fs_bump(_pg, _inv{i}, {len(parts)}u);")
-    ks = _LEAF_HOLDS.get(leaf, ())
-    if not ks:
-        return
-    if len(ks) <= _BUMP_INLINE:
-        for k in ks:
-            word, bit = k >> 6, k & 63
-            lines.append(f"{sp}_h_need[{word}] |= 1ull << {bit};")
-        return
-    i = _HOLD_WAKE_TABLES[tuple(ks)]
-    lines.append(f"{sp}fs_wake(_h_need, _hw{i}, {len(ks)}u);")
+    parts, holds = _bump_sig(leaf, leaf_parts)
+    _emit_bump_sig(parts, holds, tables, lines, indent)
 
 
 _WIRE_PART: dict[str, int] = {}
@@ -1036,6 +1201,11 @@ def emit_cpp(mod: Module) -> str:
             lines.append(f"    _h_need[{word}] &= ~{mask};")
             lines.append(f"    _h_busy[{word}] &= ~{mask};")
             _HOLD_TAKEN = f"_h_busy[{word}] |= {mask};"
+            # Hoist unique cached demands once per hold — sibling if-arms would
+            # otherwise re-emit the same __ok checks dozens of times.
+            demanded = _collect_cached_demands(stmts, cached, assigns, stop)
+            for dep in sorted(demanded):
+                lines.append(_eval_invoke(dep, 4))
             _emit_nba_tree(
                 stmts,
                 cached,
@@ -1046,6 +1216,7 @@ def emit_cpp(mod: Module) -> str:
                 4,
                 set(),
                 [0],
+                demanded,
             )
             _HOLD_TAKEN = ""
             lines.append("  }")
@@ -1150,11 +1321,36 @@ def emit_cpp(mod: Module) -> str:
             scratch=tick_scratch,
         )
     tick_scratch = [0]
+    # Hoist cached evals demanded by any mem-write enable/data/addr once —
+    # the per-port gated bodies otherwise re-check the same __ok dozens of times.
+    mem_demanded: set[str] = set()
+    for wr in mod.mem_writes:
+        for expr in (wr.enable, wr.data, wr.addr):
+            for dep in expr_ids(expr):
+                if dep in cached:
+                    mem_demanded.add(dep)
+            for tmp in _uncached_needed(expr, assigns, cached, stop):
+                for dep in expr_ids(assigns[tmp]):
+                    if dep in cached:
+                        mem_demanded.add(dep)
+    for dep in sorted(mem_demanded):
+        lines.append(_eval_invoke(dep, 4))
     for i, wr in enumerate(mod.mem_writes):
         depth = sigs[wr.mem].depth
         mask = depth - 1 if depth else 0
         w = sigs[wr.mem].width
-        _emit_compute(wr.enable, cached, assigns, stop, sigs, lines, 4, set(), tick_scratch)
+        _emit_compute(
+            wr.enable,
+            cached,
+            assigns,
+            stop,
+            sigs,
+            lines,
+            4,
+            set(),
+            tick_scratch,
+            set(mem_demanded),
+        )
         lines.append(f"    uint8_t __we{i} = (uint8_t)({emit_expr(wr.enable, sigs)});")
         if is_wide(w):
             lines.append(f"    uint64_t __wd{i}[{limb_count(w)}];")
@@ -1163,8 +1359,30 @@ def emit_cpp(mod: Module) -> str:
         lines.append(f"    uint32_t __wa{i} = 0;")
         lines.append(f"    if (__we{i}) {{")
         decl: set[str] = set()
-        _emit_compute(wr.data, cached, assigns, stop, sigs, lines, 6, decl, tick_scratch)
-        _emit_compute(wr.addr, cached, assigns, stop, sigs, lines, 6, decl, tick_scratch)
+        _emit_compute(
+            wr.data,
+            cached,
+            assigns,
+            stop,
+            sigs,
+            lines,
+            6,
+            decl,
+            tick_scratch,
+            set(mem_demanded),
+        )
+        _emit_compute(
+            wr.addr,
+            cached,
+            assigns,
+            stop,
+            sigs,
+            lines,
+            6,
+            decl,
+            tick_scratch,
+            set(mem_demanded),
+        )
         if is_wide(w):
             _emit_wide_assign(f"__wd{i}", wr.data, cached, sigs, lines, 6, tick_scratch)
         else:
@@ -1247,7 +1465,11 @@ _SPLIT_INLINE_MAX_BYTES = 320
 
 # Core control path — always shard 0 so arti_rtl_model's hot loop shares a TU
 # with tick/poke when useful for inlining within that shard.
-_SPLIT_CORE = frozenset({"poke_inputs", "tick", "tick_nba", "_commit", "_nba_live"})
+# `_commit` is intentionally NOT in core: the dirty-list switch is tens of
+# thousands of lines and clang -O2 on it can hang for hours. It gets its own
+# `dut_commit.cpp` translation unit (see split_dut_methods).
+_SPLIT_CORE = frozenset({"poke_inputs", "tick", "tick_nba", "_nba_live"})
+_SPLIT_OWN_FILE = frozenset({"_commit"})
 
 _METHOD_START_RE = re.compile(
     r"^  ((?:__attribute__\(\(noinline\)\) )?)void ([A-Za-z_][A-Za-z0-9_]*)\(\) \{(})?$"
@@ -1282,6 +1504,7 @@ def split_dut_methods(
     lines = cpp.splitlines(keepends=True)
     out_lines: list[str] = []
     shards: list[list[str]] = [[] for _ in range(n_shards)]
+    own_files: dict[str, list[str]] = {}
     for s in shards:
         s.append(f'#include "dut.h"\n')
         s.append("\n")
@@ -1342,6 +1565,13 @@ def split_dut_methods(
                 converted.append(bl[2:])
             else:
                 converted.append(bl)
+        if name in _SPLIT_OWN_FILE:
+            bucket = own_files.setdefault(name, [f'#include "dut.h"\n', "\n"])
+            bucket.extend(converted)
+            if not converted[-1].endswith("\n"):
+                bucket.append("\n")
+            bucket.append("\n")
+            continue
         shard_i = _shard_index(name, n_shards)
         shards[shard_i].extend(converted)
         if not converted[-1].endswith("\n"):
@@ -1350,6 +1580,8 @@ def split_dut_methods(
 
     header = "".join(out_lines)
     parts = [(f"dut_{k}.cpp", "".join(shards[k])) for k in range(n_shards)]
+    for name, body_lines in sorted(own_files.items()):
+        parts.append((f"dut_{name.lstrip('_')}.cpp", "".join(body_lines)))
     return header, parts
 
 
@@ -2057,11 +2289,17 @@ def _emit_demand(
     cached: set[str],
     lines: list[str],
     indent: int,
+    demanded: set[str] | None = None,
 ) -> None:
+    if demanded is None:
+        demanded = set()
     seen: set[str] = set()
     for dep in expr_ids(expr):
         if dep in cached and dep not in seen:
             seen.add(dep)
+            if dep in demanded:
+                continue
+            demanded.add(dep)
             lines.append(_eval_invoke(dep, indent))
 
 
@@ -2098,10 +2336,13 @@ def _emit_compute(
     indent: int,
     declared: set[str],
     scratch: list[int] | None = None,
+    demanded: set[str] | None = None,
 ) -> None:
     """Eval cached deps and bind uncached cone wires as locals."""
     if scratch is None:
         scratch = [0]
+    if demanded is None:
+        demanded = set()
     sp = " " * indent
     needed = _uncached_needed(expr, assigns, cached, stop)
     demand: set[str] = set()
@@ -2113,6 +2354,9 @@ def _emit_compute(
             if dep in cached:
                 demand.add(dep)
     for dep in sorted(demand):
+        if dep in demanded:
+            continue
+        demanded.add(dep)
         lines.append(_eval_invoke(dep, indent))
     for tmp in needed:
         if tmp in declared:
@@ -2149,14 +2393,28 @@ def _emit_nba_tree(
     indent: int,
     declared: set[str],
     scratch: list[int] | None = None,
+    demanded: set[str] | None = None,
 ) -> None:
     if scratch is None:
         scratch = [0]
+    if demanded is None:
+        demanded = set()
     sp = " " * indent
     for stmt in stmts:
         if isinstance(stmt, NbAssign):
             tmp = f"{stmt.lhs}__n"
-            _emit_compute(stmt.rhs, cached, assigns, stop, sigs, lines, indent, declared, scratch)
+            _emit_compute(
+                stmt.rhs,
+                cached,
+                assigns,
+                stop,
+                sigs,
+                lines,
+                indent,
+                declared,
+                scratch,
+                demanded,
+            )
             if _is_array(sigs, stmt.lhs):
                 aidx = _ARRAY_INDEX.get(stmt.lhs)
                 if aidx is not None:
@@ -2180,10 +2438,23 @@ def _emit_nba_tree(
                     lines.append(f"{sp}{tmp} = {rhs_c};")
                 _mark_write(stmt.lhs, lines, indent)
         elif isinstance(stmt, If):
-            _emit_compute(stmt.cond, cached, assigns, stop, sigs, lines, indent, declared, scratch)
+            _emit_compute(
+                stmt.cond,
+                cached,
+                assigns,
+                stop,
+                sigs,
+                lines,
+                indent,
+                declared,
+                scratch,
+                demanded,
+            )
             lines.append(
                 f"{sp}if ({_cond_code(stmt.cond, cached, sigs, lines, indent, scratch)}) {{"
             )
+            # Branch-local demanded copies: then/else must not suppress each
+            # other's eval calls (only one arm runs).
             _emit_nba_tree(
                 stmt.then_body,
                 cached,
@@ -2194,6 +2465,7 @@ def _emit_nba_tree(
                 indent + 2,
                 set(declared),
                 scratch,
+                set(demanded),
             )
             if stmt.else_body:
                 lines.append(f"{sp}}} else {{")
@@ -2207,6 +2479,7 @@ def _emit_nba_tree(
                     indent + 2,
                     set(declared),
                     scratch,
+                    set(demanded),
                 )
                 lines.append(f"{sp}}}")
             else:

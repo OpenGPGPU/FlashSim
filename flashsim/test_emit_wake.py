@@ -75,6 +75,10 @@ struct FooDut {{
 
   void eval_y() {{}}
 
+  void _commit() {{
+{big}    _chg++;
+  }}
+
   void tick() {{
 {big}    poke_inputs();
   }}
@@ -83,6 +87,7 @@ struct FooDut {{
     header, parts = split_dut_methods(mono, n_shards=2)
     assert "void poke_inputs();" in header
     assert "void tick();" in header
+    assert "void _commit();" in header
     # tiny eval / empty stay in-class for cross-TU inlining
     assert "void eval_x() {" in header
     assert "void eval_y() {}" in header
@@ -92,6 +97,12 @@ struct FooDut {{
     assert "void FooDut::tick()" in bodies
     assert "void FooDut::eval_x()" not in bodies
     assert "void poke_inputs() {" not in header
+    # _commit gets its own TU so clang -O2 does not hang on the dirty switch.
+    assert any(name == "dut_commit.cpp" for name, _ in parts)
+    commit_body = next(b for name, b in parts if name == "dut_commit.cpp")
+    assert "void FooDut::_commit()" in commit_body
+    assert "void FooDut::_commit()" not in parts[0][1]
+    assert "void FooDut::_commit()" not in parts[1][1]
 
 
 def test_l2_partition_keeps_slice_submodule() -> None:
@@ -137,6 +148,44 @@ def test_promote_large_gpu_ssa() -> None:
     assert "system_l2_slices_0_t1" not in cached
 
 
+def test_promote_bulky_gated_cones() -> None:
+    from flashsim.emit import _BULKY_TMP_NODES, _promote_bulky_gated_cones
+    from flashsim.ir import BinOp, Const, Id, If, NbAssign
+
+    # Rich SSA under a bulky hold region → promoted; tiny compares stay local.
+    assigns: dict = {}
+    body_assigns = []
+    for i in range(60):
+        # Build expr with ≥ _BULKY_TMP_NODES nodes.
+        expr: object = Id("en")
+        for _ in range(_BULKY_TMP_NODES):
+            expr = BinOp("&", expr, Const(1, 1))
+        assigns[f"system_computeUnits_0_t{i}"] = expr
+        body_assigns.append(NbAssign(f"r{i}", Id(f"system_computeUnits_0_t{i}")))
+    # One tiny temp should not be promoted even in a bulky region.
+    assigns["system_computeUnits_0_t_tiny"] = BinOp("&", Id("en"), Const(1, 1))
+    body_assigns.append(NbAssign("rt", Id("system_computeUnits_0_t_tiny")))
+    body = [If(Id("en"), body_assigns)]
+    cached: set[str] = set()
+    _promote_bulky_gated_cones(body, assigns, cached, stop={"en"})
+    assert "system_computeUnits_0_t0" in cached
+    assert "system_computeUnits_0_t_tiny" not in cached
+
+
+def test_bump_sig_stable_for_commit_batching() -> None:
+    from flashsim import emit as em
+
+    em._LEAF_HOLDS = {"a": [1, 2, 3], "b": [1, 2, 3], "c": [9]}
+    leaf_parts = {"a": [10, 11], "b": [10, 11], "c": []}
+    assert em._bump_sig("a", leaf_parts) == em._bump_sig("b", leaf_parts)
+    assert em._bump_sig("a", leaf_parts) != em._bump_sig("c", leaf_parts)
+    lines: list[str] = []
+    em._HOLD_WAKE_TABLES = {}
+    em._emit_bump_sig((10, 11), (1, 2, 3), {}, lines, 2)
+    assert any("_pg[10]++" in ln for ln in lines)
+    assert any("_h_need[" in ln for ln in lines)
+
+
 if __name__ == "__main__":
     test_wake_covers_data_path()
     test_wake_follows_combinational_wires()
@@ -146,4 +195,6 @@ if __name__ == "__main__":
     test_split_dut_methods_out_of_line()
     test_l2_partition_keeps_slice_submodule()
     test_promote_large_gpu_ssa()
+    test_promote_bulky_gated_cones()
+    test_bump_sig_stable_for_commit_batching()
     print("ok")

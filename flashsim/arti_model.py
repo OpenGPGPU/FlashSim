@@ -342,10 +342,16 @@ if ((${#SHARDS[@]} > 0)); then
   # or clang hangs for tens of minutes at 0% CPU on arti_rtl_model.cpp.
   # (Tiny in-header evals are capped via _SPLIT_INLINE_MAX_BYTES so dut_0's
   # tick_nba still finishes under -O2.)
+  # dut_commit.cpp holds the dirty-list switch (~2MB); clang -O1/-O2 can take
+  # hours on it. -O0 is fine — invalidation batching is algorithmic.
   for src in "${SHARDS[@]}"; do
     obj="${src%.cpp}.o"
     OBJS+=("$obj")
-    compile_one "$src" "$obj" -O2 &
+    if [[ "$src" == "dut_commit.cpp" ]]; then
+      compile_one "$src" "$obj" -O0 &
+    else
+      compile_one "$src" "$obj" -O2 &
+    fi
   done
   wait
   compile_one arti_rtl_model.cpp arti_rtl_model.o -O1
