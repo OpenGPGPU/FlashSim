@@ -343,7 +343,7 @@ if ((${#SHARDS[@]} > 0)); then
   # (Tiny in-header evals are capped via _SPLIT_INLINE_MAX_BYTES so dut_0's
   # tick_nba still finishes under -O2.)
   # dut_commit.cpp holds the dirty-list switch (~2MB); clang -O1/-O2 can take
-  # hours on it. -O0 is fine — invalidation batching is algorithmic.
+  # hours on it, so compile that TU at -O0.
   for src in "${SHARDS[@]}"; do
     obj="${src%.cpp}.o"
     OBJS+=("$obj")
