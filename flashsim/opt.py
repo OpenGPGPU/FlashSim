@@ -535,9 +535,32 @@ def _flatten_nested_holds(body: list[Stmt]) -> list[Stmt]:
     return out
 
 
+def _merge_hold_key(stmt: If) -> tuple[Expr, str] | None:
+    """Identity for foldable holds: same cond and same write-partition bucket.
+
+    Cross-partition merges would glue unrelated CU cones into one mega hold and
+    wake them together. Mirror emit's write-target bucketing.
+    """
+    from flashsim.emit import skip_partition_key
+
+    writes = stmt_writes(stmt)
+    if not writes:
+        return None
+    part = max((skip_partition_key(w) for w in writes), key=len)
+    return (stmt.cond, part)
+
+
 def _merge_hold_ifs(body: list[Stmt]) -> list[Stmt]:
-    """Collapse adjacent `if (en) a <= ...; if (en) b <= ...` into one branch."""
+    """Collapse same-cond holds, even when non-adjacent and both have else.
+
+    Chisel/GPU always_ff emits many `if (en) a <= ... else a <= ...` for each
+    field. Adjacent-only / empty-else-only merge left vectorCoalescer cones
+    duplicated under repeated `if (arbiter_t8)`. Folding every `if (c)` into the
+    first matching `if (c)` (same write partition), concatenating then and else
+    arms, is safe for NBA: arms only write `__n` and do not observe siblings.
+    """
     out: list[Stmt] = []
+    first: dict[tuple[Expr, str], int] = {}
     for stmt in body:
         if isinstance(stmt, If):
             stmt = If(
@@ -545,17 +568,21 @@ def _merge_hold_ifs(body: list[Stmt]) -> list[Stmt]:
                 _merge_hold_ifs(stmt.then_body),
                 _merge_hold_ifs(stmt.else_body),
             )
-        if (
-            out
-            and isinstance(out[-1], If)
-            and isinstance(stmt, If)
-            and not out[-1].else_body
-            and not stmt.else_body
-            and out[-1].cond == stmt.cond
-        ):
-            out[-1] = If(stmt.cond, out[-1].then_body + stmt.then_body, [])
-        else:
-            out.append(stmt)
+        if isinstance(stmt, If):
+            key = _merge_hold_key(stmt)
+            if key is not None and key in first:
+                i = first[key]
+                prev = out[i]
+                assert isinstance(prev, If)
+                out[i] = If(
+                    prev.cond,
+                    prev.then_body + stmt.then_body,
+                    prev.else_body + stmt.else_body,
+                )
+                continue
+            if key is not None:
+                first[key] = len(out)
+        out.append(stmt)
     return out
 
 

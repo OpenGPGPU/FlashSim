@@ -84,6 +84,75 @@ def test_follow_unwraps_ssa_to_the_mux() -> None:
     assert not body[0].else_body
 
 
+def test_merge_hold_ifs_joins_nonadjacent_same_cond() -> None:
+    from flashsim.opt import _merge_hold_ifs
+
+    # Same write partition (vectorTlb_*), scattered `if (en)` with unrelated hold between.
+    a = "system_computeUnits_0_core_vectorTlb_a"
+    b = "system_computeUnits_0_core_sharedCachePort_b"
+    c = "system_computeUnits_0_core_vectorTlb_c"
+    body = [
+        If(Id("en"), [NbAssign(a, Const(1, 8))]),
+        If(Id("other"), [NbAssign(b, Const(2, 8))]),
+        If(Id("en"), [NbAssign(c, Const(3, 8))]),
+    ]
+    merged = _merge_hold_ifs(body)
+    assert len(merged) == 2
+    assert isinstance(merged[0], If) and merged[0].cond == Id("en")
+    assert [s.lhs for s in merged[0].then_body if isinstance(s, NbAssign)] == [a, c]
+    assert isinstance(merged[1], If) and merged[1].cond == Id("other")
+
+
+def test_merge_hold_ifs_appends_into_then_with_else() -> None:
+    from flashsim.opt import _merge_hold_ifs
+
+    a = "system_computeUnits_0_core_vectorTlb_a"
+    b = "system_computeUnits_0_core_sharedCachePort_b"
+    c = "system_computeUnits_0_core_vectorTlb_c"
+    z = "system_computeUnits_0_core_vectorTlb_z"
+    body = [
+        If(Id("en"), [NbAssign(a, Const(1, 8))], [NbAssign(z, Const(0, 8))]),
+        If(Id("other"), [NbAssign(b, Const(2, 8))]),
+        If(Id("en"), [NbAssign(c, Const(3, 8))]),
+    ]
+    merged = _merge_hold_ifs(body)
+    assert len(merged) == 2
+    assert isinstance(merged[0], If)
+    assert [s.lhs for s in merged[0].then_body if isinstance(s, NbAssign)] == [a, c]
+    assert [s.lhs for s in merged[0].else_body if isinstance(s, NbAssign)] == [z]
+
+
+def test_merge_hold_ifs_merges_same_cond_with_else() -> None:
+    from flashsim.opt import _merge_hold_ifs
+
+    a = "system_computeUnits_0_core_vectorTlb_a"
+    c = "system_computeUnits_0_core_vectorTlb_c"
+    za = "system_computeUnits_0_core_vectorTlb_za"
+    zc = "system_computeUnits_0_core_vectorTlb_zc"
+    body = [
+        If(Id("en"), [NbAssign(a, Const(1, 8))], [NbAssign(za, Const(0, 8))]),
+        If(Id("en"), [NbAssign(c, Const(3, 8))], [NbAssign(zc, Const(0, 8))]),
+    ]
+    merged = _merge_hold_ifs(body)
+    assert len(merged) == 1
+    assert isinstance(merged[0], If)
+    assert [s.lhs for s in merged[0].then_body if isinstance(s, NbAssign)] == [a, c]
+    assert [s.lhs for s in merged[0].else_body if isinstance(s, NbAssign)] == [za, zc]
+
+
+def test_merge_hold_ifs_skips_cross_partition() -> None:
+    from flashsim.opt import _merge_hold_ifs
+
+    a = "system_computeUnits_0_core_vectorTlb_a"
+    c = "system_computeUnits_0_core_vectorCoalescer_c"
+    body = [
+        If(Id("en"), [NbAssign(a, Const(1, 8))]),
+        If(Id("en"), [NbAssign(c, Const(3, 8))]),
+    ]
+    merged = _merge_hold_ifs(body)
+    assert len(merged) == 2
+
+
 if __name__ == "__main__":
     test_self_reference_else_is_a_hold()
     test_self_reference_then_inverts_the_condition()
@@ -91,4 +160,8 @@ if __name__ == "__main__":
     test_const_priority_mux_keeps_zero_arm()
     test_nested_value_mux_keeps_zero_under_a_hold()
     test_follow_unwraps_ssa_to_the_mux()
+    test_merge_hold_ifs_joins_nonadjacent_same_cond()
+    test_merge_hold_ifs_appends_into_then_with_else()
+    test_merge_hold_ifs_merges_same_cond_with_else()
+    test_merge_hold_ifs_skips_cross_partition()
     print("ok")
