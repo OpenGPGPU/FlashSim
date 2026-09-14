@@ -1518,23 +1518,21 @@ def emit_cpp(mod: Module) -> str:
             scratch=tick_scratch,
         )
     tick_scratch = [0]
-    # Hoist cached evals demanded by any mem-write enable/data/addr once —
-    # the per-port gated bodies otherwise re-check the same __ok dozens of times.
-    mem_demanded: set[str] = set()
+    # Mem-write path is two-phase: evaluate enable cones every tick (cheap —
+    # usually a handful of skip-cached wires), then only if any enable fires
+    # pull data/addr cones. Quiet settle ticks otherwise paid hundreds of
+    # unused __ok checks + wide pack temps every cycle.
+    mem_en_demanded: set[str] = set()
+    mem_data_demanded: set[str] = set()
     for wr in mod.mem_writes:
-        for expr in (wr.enable, wr.data, wr.addr):
-            for dep in expr_ids(expr):
-                if dep in cached:
-                    mem_demanded.add(dep)
-            for tmp in _uncached_needed(expr, assigns, cached, stop):
-                for dep in expr_ids(assigns[tmp]):
-                    if dep in cached:
-                        mem_demanded.add(dep)
-    for dep in sorted(mem_demanded):
+        mem_en_demanded |= _cached_deps_for_expr(wr.enable, assigns, cached, stop)
+        for expr in (wr.data, wr.addr):
+            mem_data_demanded |= _cached_deps_for_expr(expr, assigns, cached, stop)
+    mem_data_demanded -= mem_en_demanded
+    mem_all_demanded = mem_en_demanded | mem_data_demanded
+    for dep in sorted(mem_en_demanded):
         lines.append(_eval_invoke(dep, 4))
     for i, wr in enumerate(mod.mem_writes):
-        depth = sigs[wr.mem].depth
-        mask = depth - 1 if depth else 0
         w = sigs[wr.mem].width
         _emit_compute(
             wr.enable,
@@ -1546,7 +1544,7 @@ def emit_cpp(mod: Module) -> str:
             4,
             set(),
             tick_scratch,
-            set(mem_demanded),
+            set(mem_en_demanded),
         )
         lines.append(f"    uint8_t __we{i} = (uint8_t)({emit_expr(wr.enable, sigs)});")
         if is_wide(w):
@@ -1554,41 +1552,51 @@ def emit_cpp(mod: Module) -> str:
         else:
             lines.append(f"    {c_type(w)} __wd{i} = 0;")
         lines.append(f"    uint32_t __wa{i} = 0;")
-        lines.append(f"    if (__we{i}) {{")
-        decl: set[str] = set()
-        _emit_compute(
-            wr.data,
-            cached,
-            assigns,
-            stop,
-            sigs,
-            lines,
-            6,
-            decl,
-            tick_scratch,
-            set(mem_demanded),
-        )
-        _emit_compute(
-            wr.addr,
-            cached,
-            assigns,
-            stop,
-            sigs,
-            lines,
-            6,
-            decl,
-            tick_scratch,
-            set(mem_demanded),
-        )
-        if is_wide(w):
-            _emit_wide_assign(f"__wd{i}", wr.data, cached, sigs, lines, 6, tick_scratch)
-        else:
-            lines.append(
-                f"      __wd{i} = {emit_expr(wr.data, sigs)};"
+    if mod.mem_writes:
+        we_or = " | ".join(f"__we{i}" for i in range(len(mod.mem_writes)))
+        lines.append(f"    if ({we_or}) {{")
+        for dep in sorted(mem_data_demanded):
+            lines.append(_eval_invoke(dep, 6))
+        for i, wr in enumerate(mod.mem_writes):
+            depth = sigs[wr.mem].depth
+            mask = depth - 1 if depth else 0
+            w = sigs[wr.mem].width
+            lines.append(f"      if (__we{i}) {{")
+            decl: set[str] = set()
+            _emit_compute(
+                wr.data,
+                cached,
+                assigns,
+                stop,
+                sigs,
+                lines,
+                8,
+                decl,
+                tick_scratch,
+                set(mem_all_demanded),
             )
-        lines.append(
-            f"      __wa{i} = ({emit_expr(wr.addr, sigs)}) & {mask}u;"
-        )
+            _emit_compute(
+                wr.addr,
+                cached,
+                assigns,
+                stop,
+                sigs,
+                lines,
+                8,
+                decl,
+                tick_scratch,
+                set(mem_all_demanded),
+            )
+            if is_wide(w):
+                _emit_wide_assign(
+                    f"__wd{i}", wr.data, cached, sigs, lines, 8, tick_scratch
+                )
+            else:
+                lines.append(f"        __wd{i} = {emit_expr(wr.data, sigs)};")
+            lines.append(
+                f"        __wa{i} = ({emit_expr(wr.addr, sigs)}) & {mask}u;"
+            )
+            lines.append("      }")
         lines.append("    }")
     if large:
         if write_flags:
@@ -1622,20 +1630,28 @@ def emit_cpp(mod: Module) -> str:
                 lines.append("      _chg++;")
                 lines.append(f"      {name} = {name}__n;")
                 lines.append("    }")
-    for i, wr in enumerate(mod.mem_writes):
-        w = sigs[wr.mem].width
-        lines.append(f"    if (__we{i}) {{")
-        if is_wide(w):
-            lines.append(f"      if (memcmp({wr.mem}[__wa{i}], __wd{i}, sizeof(__wd{i}))) {{")
-        else:
-            lines.append(f"      if ({wr.mem}[__wa{i}] != __wd{i}) {{")
-        _bump_parts(wr.mem, leaf_parts, inv_tables, lines, 8)
-        lines.append("        _chg++;")
-        lines.append("      }")
-        if is_wide(w):
-            lines.append(f"      memcpy({wr.mem}[__wa{i}], __wd{i}, sizeof(__wd{i}));")
-        else:
-            lines.append(f"      {wr.mem}[__wa{i}] = __wd{i};")
+    if mod.mem_writes:
+        we_or = " | ".join(f"__we{i}" for i in range(len(mod.mem_writes)))
+        lines.append(f"    if ({we_or}) {{")
+        for i, wr in enumerate(mod.mem_writes):
+            w = sigs[wr.mem].width
+            lines.append(f"      if (__we{i}) {{")
+            if is_wide(w):
+                lines.append(
+                    f"        if (memcmp({wr.mem}[__wa{i}], __wd{i}, sizeof(__wd{i}))) {{"
+                )
+            else:
+                lines.append(f"        if ({wr.mem}[__wa{i}] != __wd{i}) {{")
+            _bump_parts(wr.mem, leaf_parts, inv_tables, lines, 10)
+            lines.append("          _chg++;")
+            lines.append("        }")
+            if is_wide(w):
+                lines.append(
+                    f"        memcpy({wr.mem}[__wa{i}], __wd{i}, sizeof(__wd{i}));"
+                )
+            else:
+                lines.append(f"        {wr.mem}[__wa{i}] = __wd{i};")
+            lines.append("      }")
         lines.append("    }")
     lines.append("  }")
     lines.append("};")
@@ -2496,6 +2512,24 @@ def _emit_demand(
                 continue
             demanded.add(dep)
             lines.append(_eval_invoke(dep, indent))
+
+
+def _cached_deps_for_expr(
+    expr: Expr,
+    assigns: dict[str, Expr],
+    cached: set[str],
+    stop: set[str],
+) -> set[str]:
+    """Skip-cached wires demanded to evaluate `expr` (including via SSA temps)."""
+    out: set[str] = set()
+    for dep in expr_ids(expr):
+        if dep in cached:
+            out.add(dep)
+    for tmp in _uncached_needed(expr, assigns, cached, stop):
+        for dep in expr_ids(assigns[tmp]):
+            if dep in cached:
+                out.add(dep)
+    return out
 
 
 def _uncached_needed(

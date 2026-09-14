@@ -526,6 +526,17 @@ static unsigned idle_grace(void)
   return v;
 }
 
+static unsigned settle_min(void)
+{
+  static unsigned v;
+  static int once;
+  if (!once) {
+    v = env_u("ARTI_MODEL_SETTLE_MIN", ARTI_MODEL_SETTLE_MIN);
+    once = 1;
+  }
+  return v;
+}
+
 static long irq_pump_ns(void)
 {
   static long v;
@@ -816,7 +827,7 @@ static void arti_model_settle(void)
   // QEMU samples the pin after MMIO and on the IRQ poll timer.
   for (i = 0; i < mmio_advance(); i++) {
     tick_pump();
-    if (i + 1 >= ARTI_MODEL_SETTLE_MIN && g_arti_idle > idle_grace())
+    if (i + 1 >= settle_min() && g_arti_idle > idle_grace())
       break;
   }
   if (g_arti_debug)

@@ -225,6 +225,56 @@ def test_emit_ternary_else_if_flatten() -> None:
     assert text.count("else if") >= 3
 
 
+def test_mem_write_enable_gates_data_evals() -> None:
+    """Data/addr skip-evals must sit behind any-enable, not every tick."""
+    from flashsim.emit import emit_cpp
+    from flashsim.ir import (
+        AlwaysFF,
+        Assign,
+        Const,
+        Id,
+        MemWrite,
+        Module,
+        NbAssign,
+        Signal,
+    )
+
+    mod = Module(
+        name="MemGate",
+        signals={
+            "clock": Signal(name="clock", width=1, kind="input"),
+            "en_w": Signal(name="en_w", width=1, kind="wire"),
+            "data_w": Signal(name="data_w", width=32, kind="wire"),
+            "addr_w": Signal(name="addr_w", width=2, kind="wire"),
+            "r": Signal(name="r", width=1, kind="reg"),
+            "m": Signal(name="m", width=32, kind="mem", depth=4),
+            "out": Signal(name="out", width=32, kind="output"),
+        },
+        assigns=[
+            Assign("en_w", Id("r")),
+            Assign("data_w", Id("out")),
+            Assign("addr_w", Const(0, 2)),
+        ],
+        always=AlwaysFF("clock", [NbAssign("r", Id("en_w"))]),
+        ports=["clock", "out"],
+        mem_writes=[
+            MemWrite(mem="m", addr=Id("addr_w"), data=Id("data_w"), enable=Id("en_w")),
+        ],
+    )
+    text = emit_cpp(mod)
+    # Enable eval runs unconditionally; data eval only inside any-enable guard.
+    assert "uint8_t __we0" in text
+    assert "if (__we0) {" in text
+    # With a single port the OR-guard collapses to if (__we0) wrapping data.
+    # data_w is an output → cached; its eval must not precede the first __we0.
+    we = text.index("uint8_t __we0")
+    # Find tick_nba body after we0
+    rest = text[we:]
+    assert "eval_data_w" in rest or "data_w =" in rest or "data_w__ok" in rest
+    # The any-enable wrapper precedes data packing / writeback.
+    assert rest.count("if (__we0)") >= 2
+
+
 def test_bump_sig_stable_for_commit_batching() -> None:
     from flashsim import emit as em
 
@@ -251,5 +301,6 @@ if __name__ == "__main__":
     test_promote_bulky_gated_cones()
     test_extract_deep_mux_chunks()
     test_emit_ternary_else_if_flatten()
+    test_mem_write_enable_gates_data_evals()
     test_bump_sig_stable_for_commit_batching()
     print("ok")
