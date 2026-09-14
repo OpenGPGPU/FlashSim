@@ -127,6 +127,18 @@ def test_l2_partition_keeps_slice_submodule() -> None:
         skip_partition_key("memoryAxi_io_response_valid")
         == "memoryAxi_io_response_valid"
     )
+    # CU mega-holds: coalescer / fmaAlu must not collapse to one partition.
+    c0 = skip_partition_key("system_computeUnits_0_core_vectorCoalescer_t30")
+    c1 = skip_partition_key("system_computeUnits_0_core_vectorCoalescer_t94")
+    assert c0 == "computeUnits_0_core_vectorCoalescer_b30"
+    assert c1 == "computeUnits_0_core_vectorCoalescer_b30"  # 94 % 32 == 30
+    c2 = skip_partition_key("system_computeUnits_0_core_vectorCoalescer_t31")
+    assert c2 == "computeUnits_0_core_vectorCoalescer_b31"
+    assert c0 != c2
+    f0 = skip_partition_key(
+        "system_computeUnits_0_core_vector_fmaAlu_lanes_0_core_t188"
+    )
+    assert f0 == "computeUnits_0_core_vector_fmaAlu_l0_b12"  # 188 % 16
 
 
 def test_promote_large_gpu_ssa() -> None:

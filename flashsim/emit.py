@@ -612,6 +612,29 @@ def skip_partition_key(name: str) -> str:
             toks.pop()
     if not toks:
         return name
+    # vectorCoalescer / fmaAlu holds were one multi-100KB method each because
+    # every reg shared `computeUnits_N_core_vectorCoalescer`. Bucket like L2
+    # SSA so idle subtrees can sleep independently on the busy CU path.
+    if (
+        len(toks) >= 4
+        and toks[0] == "computeUnits"
+        and toks[2] == "core"
+        and toks[3] == "vectorCoalescer"
+    ):
+        m = re.search(r"_t(\d+)$", name)
+        b = int(m.group(1)) % 32 if m else (zlib.adler32(name.encode()) & 31)
+        return f"computeUnits_{toks[1]}_core_vectorCoalescer_b{b}"
+    if (
+        len(toks) >= 5
+        and toks[0] == "computeUnits"
+        and toks[2] == "core"
+        and toks[3] == "vector"
+        and toks[4] == "fmaAlu"
+    ):
+        lane = toks[6] if len(toks) > 6 and toks[5] == "lanes" else "x"
+        m = re.search(r"_t(\d+)$", name)
+        b = int(m.group(1)) % 16 if m else (zlib.adler32(name.encode()) & 15)
+        return f"computeUnits_{toks[1]}_core_vector_fmaAlu_l{lane}_b{b}"
     if toks[0] == "computeUnits" and len(toks) >= 7:
         return "_".join(toks[:7])
     if toks[0] == "l2":
