@@ -154,6 +154,14 @@ _LARGE_SSA_PROMOTE_CAP = 16384
 _BULKY_GATED_CONE = 48
 # One-hot compares are cheaper as locals; only promote richer SSA temps.
 _BULKY_TMP_NODES = 12
+# Right-nested priority muxes this deep become separate skip-cached chunk evals
+# (commandRouter completions / opcode decode). Early arms skip later chunks.
+_DEEP_MUX_SPLIT = 64
+_DEEP_MUX_CHUNK = 64
+_DEEP_MUX_CAP = 4096
+# Flatten right-nested ternaries to else-if when at least this many arms and
+# conditions are pure expressions (no demand stmts between else / if).
+_FLAT_TERNARY_ARMS = 3
 
 
 def _expr_node_count(expr: Expr) -> int:
@@ -309,6 +317,194 @@ def _promote_bulky_gated_cones(
                 continue
             cached.add(tmp)
             added += 1
+
+
+def _right_ternary_arms(expr: Expr) -> tuple[list[tuple[Expr, Expr]], Expr]:
+    """Decompose right-nested `c ? a : (c2 ? a2 : …)` into arms + default."""
+    arms: list[tuple[Expr, Expr]] = []
+    cur: Expr = expr
+    while isinstance(cur, Ternary):
+        arms.append((cur.cond, cur.a))
+        cur = cur.b
+    return arms, cur
+
+
+def _make_ternary_chain(arms: list[tuple[Expr, Expr]], default: Expr) -> Expr:
+    expr = default
+    for cond, a in reversed(arms):
+        expr = Ternary(cond, a, expr)
+    return expr
+
+
+def _max_ternary_nesting(expr: Expr) -> int:
+    if isinstance(expr, Ternary):
+        return max(
+            _ternary_nesting(expr),
+            _max_ternary_nesting(expr.cond),
+            _max_ternary_nesting(expr.a),
+            _max_ternary_nesting(expr.b),
+        )
+    if isinstance(expr, UnaryOp):
+        return _max_ternary_nesting(expr.a)
+    if isinstance(expr, BinOp):
+        return max(_max_ternary_nesting(expr.a), _max_ternary_nesting(expr.b))
+    if isinstance(expr, Extract):
+        return _max_ternary_nesting(expr.a)
+    if isinstance(expr, Concat):
+        return max((_max_ternary_nesting(p) for p in expr.parts), default=0)
+    if isinstance(expr, ArrayGet):
+        return max(_max_ternary_nesting(expr.arr), _max_ternary_nesting(expr.index))
+    if isinstance(expr, ArrayInject):
+        return max(
+            _max_ternary_nesting(expr.arr),
+            _max_ternary_nesting(expr.index),
+            _max_ternary_nesting(expr.value),
+        )
+    if isinstance(expr, MemRead):
+        return _max_ternary_nesting(expr.addr)
+    return 0
+
+
+def _rewrite_deep_mux_expr(
+    expr: Expr,
+    *,
+    prefix: str,
+    counter: list[int],
+    assigns: dict[str, Expr],
+    sigs: dict[str, Signal],
+    cached: set[str],
+    budget: list[int],
+) -> Expr:
+    """Replace deep right-nested ternaries with cached chunk wires."""
+
+    def rec(e: Expr) -> Expr:
+        return _rewrite_deep_mux_expr(
+            e,
+            prefix=prefix,
+            counter=counter,
+            assigns=assigns,
+            sigs=sigs,
+            cached=cached,
+            budget=budget,
+        )
+
+    if isinstance(expr, Ternary):
+        arms, default = _right_ternary_arms(expr)
+        arms = [(rec(c), rec(a)) for c, a in arms]
+        default = rec(default)
+        n = len(arms)
+        n_chunks = (n + _DEEP_MUX_CHUNK - 1) // _DEEP_MUX_CHUNK
+        if n < _DEEP_MUX_SPLIT or n_chunks < 2 or budget[0] < n_chunks:
+            return _make_ternary_chain(arms, default)
+        next_def = default
+        for start in reversed(range(0, n, _DEEP_MUX_CHUNK)):
+            chunk_arms = arms[start : start + _DEEP_MUX_CHUNK]
+            body = _make_ternary_chain(chunk_arms, next_def)
+            tmp = f"{prefix}_dmux{counter[0]}"
+            counter[0] += 1
+            width = _expr_width(chunk_arms[0][1], sigs)
+            assigns[tmp] = body
+            sigs[tmp] = Signal(name=tmp, width=width, kind="wire")
+            cached.add(tmp)
+            budget[0] -= 1
+            next_def = Id(tmp)
+        return next_def
+    if isinstance(expr, UnaryOp):
+        return UnaryOp(expr.op, rec(expr.a))
+    if isinstance(expr, BinOp):
+        return BinOp(expr.op, rec(expr.a), rec(expr.b))
+    if isinstance(expr, Extract):
+        return Extract(rec(expr.a), expr.low, expr.width)
+    if isinstance(expr, Concat):
+        return Concat(tuple(rec(p) for p in expr.parts))
+    if isinstance(expr, ArrayGet):
+        return ArrayGet(rec(expr.arr), rec(expr.index))
+    if isinstance(expr, ArrayInject):
+        return ArrayInject(rec(expr.arr), rec(expr.index), rec(expr.value))
+    if isinstance(expr, MemRead):
+        return MemRead(expr.mem, rec(expr.addr))
+    return expr
+
+
+def _extract_deep_mux_chunks(
+    assigns: dict[str, Expr],
+    sigs: dict[str, Signal],
+    cached: set[str],
+) -> int:
+    """Split mega priority-mux evals into skip-cached chunk methods.
+
+    Returns the number of new chunk wires created. Early mux arms skip later
+    chunk `eval_*` calls (demand sits in the else path).
+    """
+    budget = [_DEEP_MUX_CAP]
+    counter = [0]
+    before = budget[0]
+    for name in list(cached):
+        if name not in assigns:
+            continue
+        if not _is_gpu_hot_ssa(name):
+            continue
+        expr = assigns[name]
+        if _max_ternary_nesting(expr) < _DEEP_MUX_SPLIT:
+            continue
+        assigns[name] = _rewrite_deep_mux_expr(
+            expr,
+            prefix=name,
+            counter=counter,
+            assigns=assigns,
+            sigs=sigs,
+            cached=cached,
+            budget=budget,
+        )
+    return before - budget[0]
+
+
+def _ternary_chain_flat_ok(
+    arms: list[tuple[Expr, Expr]], cached: set[str], sigs: dict[str, Signal]
+) -> bool:
+    """True when else-if flatten is safe (no stmts between else and if)."""
+    for cond, _then in arms:
+        if _needs_limb_emit(cond, sigs) or is_wide(_expr_width(cond, sigs)):
+            return False
+        if any(d in cached for d in expr_ids(cond)):
+            return False
+    return True
+
+
+def _emit_ternary_priority(
+    dest: str,
+    expr: Ternary,
+    cached: set[str],
+    sigs: dict[str, Signal],
+    lines: list[str],
+    indent: int,
+    scratch: list[int],
+    emit_arm,
+) -> None:
+    """Emit right-nested ternaries as flat else-if when safe."""
+    arms, default = _right_ternary_arms(expr)
+    sp = " " * indent
+    if len(arms) >= _FLAT_TERNARY_ARMS and _ternary_chain_flat_ok(arms, cached, sigs):
+        for i, (cond, then_e) in enumerate(arms):
+            _emit_demand(cond, cached, lines, indent)
+            kw = "if" if i == 0 else "else if"
+            lines.append(
+                f"{sp}{kw} ({_cond_code(cond, cached, sigs, lines, indent, scratch)}) {{"
+            )
+            emit_arm(dest, then_e, indent + 2)
+            lines.append(f"{sp}}}")
+        lines.append(f"{sp}else {{")
+        emit_arm(dest, default, indent + 2)
+        lines.append(f"{sp}}}")
+        return
+    _emit_demand(expr.cond, cached, lines, indent)
+    lines.append(
+        f"{sp}if ({_cond_code(expr.cond, cached, sigs, lines, indent, scratch)}) {{"
+    )
+    emit_arm(dest, expr.a, indent + 2)
+    lines.append(f"{sp}}} else {{")
+    emit_arm(dest, expr.b, indent + 2)
+    lines.append(f"{sp}}}")
 
 
 def _collect_cached_demands(
@@ -856,6 +1052,7 @@ def emit_cpp(mod: Module) -> str:
     stop = set(regs) | set(collect_inputs(mod)) | set(mems)
     writes = always_writes(mod.always.body)
     cached = cached_wires(mod, assigns)
+    _extract_deep_mux_chunks(assigns, sigs, cached)
     wire_deps = {w: cone_leaves(w, assigns, stop) for w in cached}
     wire_part, leaf_parts, nparts = _partition_maps(cached, wire_deps)
     inv_tables = _invalidation_tables(leaf_parts)
@@ -1656,12 +1853,12 @@ def _emit_assign(
         _emit_array_assign(dest, expr, cached, sigs, lines, indent)
         return
     if isinstance(expr, Ternary):
-        _emit_demand(expr.cond, cached, lines, indent)
-        lines.append(f"{sp}if ({_cond_code(expr.cond, cached, sigs, lines, indent, scratch)}) {{")
-        _emit_assign(dest, expr.a, cached, sigs, lines, indent + 2, mask, scratch)
-        lines.append(f"{sp}}} else {{")
-        _emit_assign(dest, expr.b, cached, sigs, lines, indent + 2, mask, scratch)
-        lines.append(f"{sp}}}")
+        def arm(d: str, e: Expr, ind: int) -> None:
+            _emit_assign(d, e, cached, sigs, lines, ind, mask, scratch)
+
+        _emit_ternary_priority(
+            dest, expr, cached, sigs, lines, indent, scratch, arm
+        )
         return
     if _needs_limb_emit(expr, sigs):
         _emit_narrow_from_wide(
@@ -1788,14 +1985,12 @@ def _emit_narrow_from_wide(
     sp = " " * indent
     ty = c_type(dest_w)
     if isinstance(expr, Ternary):
-        _emit_demand(expr.cond, cached, lines, indent)
-        lines.append(
-            f"{sp}if ({_cond_code(expr.cond, cached, sigs, lines, indent, scratch)}) {{"
+        def arm(d: str, e: Expr, ind: int) -> None:
+            _emit_narrow_from_wide(d, e, dest_w, cached, sigs, lines, ind, scratch)
+
+        _emit_ternary_priority(
+            dest, expr, cached, sigs, lines, indent, scratch, arm
         )
-        _emit_narrow_from_wide(dest, expr.a, dest_w, cached, sigs, lines, indent + 2, scratch)
-        lines.append(f"{sp}}} else {{")
-        _emit_narrow_from_wide(dest, expr.b, dest_w, cached, sigs, lines, indent + 2, scratch)
-        lines.append(f"{sp}}}")
         return
     if isinstance(expr, Extract):
         aw = _expr_width(expr.a, sigs)
@@ -2070,12 +2265,12 @@ def _emit_wide_assign(
     width = _expr_width(expr, sigs)
     n = limb_count(width)
     if isinstance(expr, Ternary):
-        _emit_demand(expr.cond, cached, lines, indent)
-        lines.append(f"{sp}if ({_cond_code(expr.cond, cached, sigs, lines, indent, scratch)}) {{")
-        _emit_wide_assign(dest, expr.a, cached, sigs, lines, indent + 2, scratch)
-        lines.append(f"{sp}}} else {{")
-        _emit_wide_assign(dest, expr.b, cached, sigs, lines, indent + 2, scratch)
-        lines.append(f"{sp}}}")
+        def arm(d: str, e: Expr, ind: int) -> None:
+            _emit_wide_assign(d, e, cached, sigs, lines, ind, scratch)
+
+        _emit_ternary_priority(
+            dest, expr, cached, sigs, lines, indent, scratch, arm
+        )
         return
     lines.append(f"{sp}memset({dest}, 0, sizeof({dest}));")
     if isinstance(expr, Const):
@@ -2213,12 +2408,12 @@ def _emit_array_assign(
         scratch = [0]
     sp = " " * indent
     if isinstance(expr, Ternary):
-        _emit_demand(expr.cond, cached, lines, indent)
-        lines.append(f"{sp}if ({_cond_code(expr.cond, cached, sigs, lines, indent, scratch)}) {{")
-        _emit_array_assign(dest, expr.a, cached, sigs, lines, indent + 2, scratch)
-        lines.append(f"{sp}}} else {{")
-        _emit_array_assign(dest, expr.b, cached, sigs, lines, indent + 2, scratch)
-        lines.append(f"{sp}}}")
+        def arm(d: str, e: Expr, ind: int) -> None:
+            _emit_array_assign(d, e, cached, sigs, lines, ind, scratch)
+
+        _emit_ternary_priority(
+            dest, expr, cached, sigs, lines, indent, scratch, arm
+        )
         return
     if isinstance(expr, ArrayZeros):
         lines.append(f"{sp}memset({dest}, 0, sizeof({dest}));")

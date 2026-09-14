@@ -172,6 +172,59 @@ def test_promote_bulky_gated_cones() -> None:
     assert "system_computeUnits_0_t_tiny" not in cached
 
 
+def test_extract_deep_mux_chunks() -> None:
+    from flashsim.emit import (
+        _DEEP_MUX_CHUNK,
+        _DEEP_MUX_SPLIT,
+        _extract_deep_mux_chunks,
+        _right_ternary_arms,
+    )
+    from flashsim.ir import Const, Id, Signal, Ternary
+
+    # Build a right-nested priority mux deeper than the split threshold.
+    n = _DEEP_MUX_SPLIT + _DEEP_MUX_CHUNK
+    expr: object = Const(0, 8)
+    for i in reversed(range(n)):
+        expr = Ternary(Id(f"c{i}"), Const(i & 0xFF, 8), expr)  # type: ignore[arg-type]
+    root = "system_commandRouter_completions_t0"
+    assigns = {root: expr}
+    sigs = {
+        root: Signal(name=root, width=8, kind="wire"),
+        **{f"c{i}": Signal(name=f"c{i}", width=1, kind="wire") for i in range(n)},
+    }
+    for i in range(n):
+        # Const arms need no extra sigs; conditions are Ids already in sigs.
+        pass
+    cached = {root}
+    n_new = _extract_deep_mux_chunks(assigns, sigs, cached)  # type: ignore[arg-type]
+    assert n_new >= 2
+    assert isinstance(assigns[root], Id)
+    top = assigns[root].name
+    assert top in cached and "_dmux" in top
+    # Top chunk should else-demand another dmux (early arms skip later evals).
+    arms, default = _right_ternary_arms(assigns[top])
+    assert len(arms) <= _DEEP_MUX_CHUNK
+    assert isinstance(default, Id) and default.name in cached
+
+
+def test_emit_ternary_else_if_flatten() -> None:
+    from flashsim.emit import _emit_assign
+    from flashsim.ir import Const, Id, Signal, Ternary
+
+    expr: object = Const(0, 8)
+    for i in reversed(range(5)):
+        expr = Ternary(Id(f"c{i}"), Const(i, 8), expr)  # type: ignore[arg-type]
+    sigs = {
+        **{f"c{i}": Signal(name=f"c{i}", width=1, kind="wire") for i in range(5)},
+        "out": Signal(name="out", width=8, kind="wire"),
+    }
+    lines: list[str] = []
+    _emit_assign("out", expr, set(), sigs, lines, 2, None, [0])  # type: ignore[arg-type]
+    text = "\n".join(lines)
+    assert "else if" in text
+    assert text.count("else if") >= 3
+
+
 def test_bump_sig_stable_for_commit_batching() -> None:
     from flashsim import emit as em
 
@@ -196,5 +249,7 @@ if __name__ == "__main__":
     test_l2_partition_keeps_slice_submodule()
     test_promote_large_gpu_ssa()
     test_promote_bulky_gated_cones()
+    test_extract_deep_mux_chunks()
+    test_emit_ternary_else_if_flatten()
     test_bump_sig_stable_for_commit_batching()
     print("ok")
