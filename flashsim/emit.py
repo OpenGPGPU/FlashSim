@@ -507,6 +507,164 @@ def _emit_ternary_priority(
     lines.append(f"{sp}}}")
 
 
+def _collect_uncached_temps(
+    stmts: list[Stmt],
+    cached: set[str],
+    assigns: dict[str, Expr],
+    stop: set[str],
+) -> set[str]:
+    """SSA temps that would be bound as locals anywhere in an NBA stmt tree."""
+    temps: set[str] = set()
+
+    def note_expr(expr: Expr) -> None:
+        temps.update(_uncached_needed(expr, assigns, cached, stop))
+
+    def walk(ss: list[Stmt]) -> None:
+        for stmt in ss:
+            if isinstance(stmt, NbAssign):
+                note_expr(stmt.rhs)
+            elif isinstance(stmt, If):
+                note_expr(stmt.cond)
+                walk(stmt.then_body)
+                if stmt.else_body:
+                    walk(stmt.else_body)
+            else:
+                raise TypeError(stmt)
+
+    walk(stmts)
+    return temps
+
+
+def _order_ssa_temps(
+    temps: set[str],
+    assigns: dict[str, Expr],
+    cached: set[str],
+    stop: set[str],
+) -> list[str]:
+    """Dependency order for a set of SSA temps (deps before users)."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def visit(tmp: str) -> None:
+        if tmp in seen or tmp not in temps:
+            return
+        for dep in _uncached_needed(assigns[tmp], assigns, cached, stop):
+            if dep in temps:
+                visit(dep)
+        seen.add(tmp)
+        ordered.append(tmp)
+
+    for tmp in sorted(temps):
+        visit(tmp)
+    return ordered
+
+
+def _emit_ssa_assign(
+    tmp: str,
+    cached: set[str],
+    assigns: dict[str, Expr],
+    sigs: dict[str, Signal],
+    lines: list[str],
+    indent: int,
+    scratch: list[int],
+) -> None:
+    sp = " " * indent
+    tw = sigs[tmp].width if tmp in sigs else 32
+    td = sigs[tmp].depth if tmp in sigs else 0
+    if td:
+        _emit_array_assign(tmp, assigns[tmp], cached, sigs, lines, indent)
+    elif is_wide(tw):
+        _emit_wide_assign(tmp, assigns[tmp], cached, sigs, lines, indent, scratch)
+    elif _needs_limb_emit(assigns[tmp], sigs):
+        tmask = mask_expr(tw)
+        _emit_assign(tmp, assigns[tmp], cached, sigs, lines, indent, tmask, scratch)
+    else:
+        tmask = mask_expr(tw)
+        rhs = emit_expr(assigns[tmp], sigs)
+        if tmask:
+            lines.append(f"{sp}{tmp} = ({rhs}) & {tmask};")
+        else:
+            lines.append(f"{sp}{tmp} = {rhs};")
+
+
+def _emit_ssa_binding(
+    tmp: str,
+    cached: set[str],
+    assigns: dict[str, Expr],
+    sigs: dict[str, Signal],
+    lines: list[str],
+    indent: int,
+    declared: set[str],
+    scratch: list[int],
+    branch_assigned: set[str] | None = None,
+) -> None:
+    if branch_assigned is not None and tmp in branch_assigned:
+        return
+    if tmp in declared:
+        _emit_ssa_assign(tmp, cached, assigns, sigs, lines, indent, scratch)
+        if branch_assigned is not None:
+            branch_assigned.add(tmp)
+        return
+    declared.add(tmp)
+    if branch_assigned is not None:
+        branch_assigned.add(tmp)
+    sp = " " * indent
+    tw = sigs[tmp].width if tmp in sigs else 32
+    td = sigs[tmp].depth if tmp in sigs else 0
+    if td:
+        lines.append(f"{sp}{_storage_decl(tmp, tw, td, init=False)}")
+        _emit_array_assign(tmp, assigns[tmp], cached, sigs, lines, indent)
+    elif is_wide(tw):
+        lines.append(f"{sp}{_storage_decl(tmp, tw, init=False)}")
+        _emit_wide_assign(tmp, assigns[tmp], cached, sigs, lines, indent, scratch)
+    elif _needs_limb_emit(assigns[tmp], sigs):
+        tmask = mask_expr(tw)
+        lines.append(f"{sp}{c_type(tw)} {tmp};")
+        _emit_assign(tmp, assigns[tmp], cached, sigs, lines, indent, tmask, scratch)
+    else:
+        tmask = mask_expr(tw)
+        rhs = emit_expr(assigns[tmp], sigs)
+        if tmask:
+            lines.append(f"{sp}{c_type(tw)} {tmp} = ({rhs}) & {tmask};")
+        else:
+            lines.append(f"{sp}{c_type(tw)} {tmp} = {rhs};")
+
+
+def _emit_branch_hoist(
+    hoist: set[str],
+    cached: set[str],
+    assigns: dict[str, Expr],
+    stop: set[str],
+    sigs: dict[str, Signal],
+    lines: list[str],
+    indent: int,
+    declared: set[str],
+    scratch: list[int],
+    demanded: set[str],
+    branch_assigned: set[str] | None = None,
+) -> None:
+    """Bind SSA temps shared by then/else once before the enclosing if."""
+    if not hoist:
+        return
+    if branch_assigned is None:
+        branch_assigned = set()
+    order = _order_ssa_temps(hoist, assigns, cached, stop)
+    demand: set[str] = set()
+    for tmp in order:
+        for dep in expr_ids(assigns[tmp]):
+            if dep in cached:
+                demand.add(dep)
+    for dep in sorted(demand):
+        if dep in demanded:
+            continue
+        demanded.add(dep)
+        lines.append(_eval_invoke(dep, indent))
+    for tmp in order:
+        _emit_ssa_binding(
+            tmp, cached, assigns, sigs, lines, indent, declared, scratch, branch_assigned
+        )
+
+
 def _collect_cached_demands(
     stmts: list[Stmt],
     cached: set[str],
@@ -855,6 +1013,11 @@ def _stmt_names(stmt: Stmt) -> set[str]:
 
 
 def _stmt_bucket_key(stmt: Stmt) -> str:
+    # Bucket by write target, not alphabetically-first wire read in the cond
+    # (otherwise vectorTlb holds absorb sharedCachePort/coalescer cones).
+    writes = stmt_writes(stmt)
+    if writes:
+        return max((skip_partition_key(w) for w in writes), key=len)
     names = _stmt_names(stmt)
     return skip_partition_key(sorted(names)[0]) if names else "_"
 
@@ -2589,6 +2752,7 @@ def _emit_compute(
     declared: set[str],
     scratch: list[int] | None = None,
     demanded: set[str] | None = None,
+    branch_assigned: set[str] | None = None,
 ) -> None:
     """Eval cached deps and bind uncached cone wires as locals."""
     if scratch is None:
@@ -2611,28 +2775,9 @@ def _emit_compute(
         demanded.add(dep)
         lines.append(_eval_invoke(dep, indent))
     for tmp in needed:
-        if tmp in declared:
-            continue
-        declared.add(tmp)
-        tw = sigs[tmp].width if tmp in sigs else 32
-        td = sigs[tmp].depth if tmp in sigs else 0
-        if td:
-            lines.append(f"{sp}{_storage_decl(tmp, tw, td, init=False)}")
-            _emit_array_assign(tmp, assigns[tmp], cached, sigs, lines, indent)
-        elif is_wide(tw):
-            lines.append(f"{sp}{_storage_decl(tmp, tw, init=False)}")
-            _emit_wide_assign(tmp, assigns[tmp], cached, sigs, lines, indent, scratch)
-        elif _needs_limb_emit(assigns[tmp], sigs):
-            tmask = mask_expr(tw)
-            lines.append(f"{sp}{c_type(tw)} {tmp};")
-            _emit_assign(tmp, assigns[tmp], cached, sigs, lines, indent, tmask, scratch)
-        else:
-            tmask = mask_expr(tw)
-            rhs = emit_expr(assigns[tmp], sigs)
-            if tmask:
-                lines.append(f"{sp}{c_type(tw)} {tmp} = ({rhs}) & {tmask};")
-            else:
-                lines.append(f"{sp}{c_type(tw)} {tmp} = {rhs};")
+        _emit_ssa_binding(
+            tmp, cached, assigns, sigs, lines, indent, declared, scratch, branch_assigned
+        )
 
 
 def _emit_nba_tree(
@@ -2646,6 +2791,7 @@ def _emit_nba_tree(
     declared: set[str],
     scratch: list[int] | None = None,
     demanded: set[str] | None = None,
+    branch_assigned: set[str] | None = None,
 ) -> None:
     if scratch is None:
         scratch = [0]
@@ -2666,6 +2812,7 @@ def _emit_nba_tree(
                 declared,
                 scratch,
                 demanded,
+                branch_assigned,
             )
             if _is_array(sigs, stmt.lhs):
                 aidx = _ARRAY_INDEX.get(stmt.lhs)
@@ -2701,7 +2848,25 @@ def _emit_nba_tree(
                 declared,
                 scratch,
                 demanded,
+                branch_assigned,
             )
+            if_branch_assigned: set[str] = set()
+            if stmt.else_body:
+                then_t = _collect_uncached_temps(stmt.then_body, cached, assigns, stop)
+                else_t = _collect_uncached_temps(stmt.else_body, cached, assigns, stop)
+                _emit_branch_hoist(
+                    then_t & else_t,
+                    cached,
+                    assigns,
+                    stop,
+                    sigs,
+                    lines,
+                    indent,
+                    declared,
+                    scratch,
+                    demanded,
+                    if_branch_assigned,
+                )
             lines.append(
                 f"{sp}if ({_cond_code(stmt.cond, cached, sigs, lines, indent, scratch)}) {{"
             )
@@ -2718,6 +2883,7 @@ def _emit_nba_tree(
                 set(declared),
                 scratch,
                 set(demanded),
+                if_branch_assigned,
             )
             if stmt.else_body:
                 lines.append(f"{sp}}} else {{")
@@ -2732,6 +2898,7 @@ def _emit_nba_tree(
                     set(declared),
                     scratch,
                     set(demanded),
+                    if_branch_assigned,
                 )
                 lines.append(f"{sp}}}")
             else:

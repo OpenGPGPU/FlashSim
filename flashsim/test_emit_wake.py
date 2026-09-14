@@ -141,6 +141,21 @@ def test_l2_partition_keeps_slice_submodule() -> None:
     assert f0 == "computeUnits_0_core_vector_fmaAlu_l0_b12"  # 188 % 16
 
 
+def test_stmt_bucket_key_prefers_write_partition() -> None:
+    from flashsim.emit import _stmt_bucket_key, skip_partition_key
+    from flashsim.ir import Const, Id, If, NbAssign
+
+    # Cond reads sharedCachePort; write is vectorTlb — bucket follows the write.
+    stmt = If(
+        Id("system_computeUnits_0_core_sharedCachePort_arbiter_t8"),
+        [NbAssign("system_computeUnits_0_core_vectorTlb_request_lineAddress", Const(0, 32))],
+    )
+    key = _stmt_bucket_key(stmt)
+    assert key == skip_partition_key("system_computeUnits_0_core_vectorTlb_request_lineAddress")
+    assert "vectorTlb" in key
+    assert "sharedCachePort" not in key
+
+
 def test_promote_large_gpu_ssa() -> None:
     from flashsim.emit import _expr_node_count, _promote_large_gpu_ssa
     from flashsim.ir import BinOp, Const, Id
@@ -217,6 +232,34 @@ def test_extract_deep_mux_chunks() -> None:
     arms, default = _right_ternary_arms(assigns[top])
     assert len(arms) <= _DEEP_MUX_CHUNK
     assert isinstance(default, Id) and default.name in cached
+
+
+def test_branch_hoist_shared_ssa() -> None:
+    """Then/else arms must not each re-bind the same SSA temp."""
+    from flashsim.emit import _emit_nba_tree
+    from flashsim.ir import BinOp, Id, If, NbAssign, Signal
+
+    assigns = {"t1": BinOp("&", Id("x"), Id("y"))}
+    sigs = {
+        "x": Signal(name="x", width=8, kind="wire"),
+        "y": Signal(name="y", width=8, kind="wire"),
+        "t1": Signal(name="t1", width=8, kind="wire"),
+        "r_then": Signal(name="r_then", width=8, kind="reg"),
+        "r_else": Signal(name="r_else", width=8, kind="reg"),
+        "sel": Signal(name="sel", width=1, kind="wire"),
+    }
+    stmts = [
+        If(
+            Id("sel"),
+            [NbAssign("r_then", Id("t1"))],
+            [NbAssign("r_else", Id("t1"))],
+        )
+    ]
+    lines: list[str] = []
+    _emit_nba_tree(stmts, set(), assigns, set(), sigs, lines, 0, set())
+    text = "\n".join(lines)
+    assert text.count("t1 =") == 1
+    assert text.index("t1 =") < text.index("if (sel)")
 
 
 def test_emit_ternary_else_if_flatten() -> None:
@@ -309,9 +352,11 @@ if __name__ == "__main__":
     test_wake_uses_cached_wire_deps()
     test_split_dut_methods_out_of_line()
     test_l2_partition_keeps_slice_submodule()
+    test_stmt_bucket_key_prefers_write_partition()
     test_promote_large_gpu_ssa()
     test_promote_bulky_gated_cones()
     test_extract_deep_mux_chunks()
+    test_branch_hoist_shared_ssa()
     test_emit_ternary_else_if_flatten()
     test_mem_write_enable_gates_data_evals()
     test_bump_sig_stable_for_commit_batching()
