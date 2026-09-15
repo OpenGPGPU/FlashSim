@@ -195,6 +195,55 @@ def test_absorb_and_after_self_gate() -> None:
     assert any(isinstance(p, Id) and p.name == "v0" for p in parts)
 
 
+def test_cse_sibling_or_prefixes_factors_shared_spine() -> None:
+    """Sibling ifs with a large shared &/| prefix get one SSA for the spine."""
+    from flashsim.ir import BinOp, Const, NbAssign
+    from flashsim.opt import (
+        _CSE_CHAIN_NODES_MIN,
+        _cse_sibling_or_prefixes,
+        _expr_eq,
+        _expr_nodes,
+        _or_chain,
+    )
+
+    # Build a shared OR spine big enough to pass the node threshold.
+    shared_ids = [f"t{i}" for i in range(20)]
+    shared = _or_chain([Id(n) for n in shared_ids])
+    assert _expr_nodes(shared) >= _CSE_CHAIN_NODES_MIN
+    body = []
+    for k in range(3):
+        cond = BinOp("&", shared, Id(f"u{k}"))
+        body.append(If(cond, [NbAssign(f"r{k}", Const(1, 1))], []))
+    assigns: dict = {}
+    out = _cse_sibling_or_prefixes(body, assigns)
+    assert len(assigns) == 1
+    cse = next(iter(assigns))
+    assert cse.startswith("_fs_cse_t")
+    assert _expr_eq(assigns[cse], shared)
+    for stmt in out:
+        assert isinstance(stmt, If)
+        assert isinstance(stmt.cond, BinOp) and stmt.cond.op == "&"
+        assert isinstance(stmt.cond.a, Id) and stmt.cond.a.name == cse
+
+    # Flat &-chain of Ids (L2-like left-nested spine).
+    spine = Id("a0")
+    for i in range(1, 20):
+        spine = BinOp("&", spine, Id(f"a{i}"))
+    body2 = [
+        If(BinOp("&", spine, Id(f"u{k}")), [NbAssign(f"r{k}", Const(1, 1))], [])
+        for k in range(3)
+    ]
+    assigns2: dict = {}
+    out2 = _cse_sibling_or_prefixes(body2, assigns2)
+    assert len(assigns2) == 1
+    assert all(
+        isinstance(s, If)
+        and isinstance(s.cond, BinOp)
+        and isinstance(s.cond.a, Id)
+        for s in out2
+    )
+
+
 if __name__ == "__main__":
     test_self_reference_else_is_a_hold()
     test_self_reference_then_inverts_the_condition()
@@ -208,4 +257,5 @@ if __name__ == "__main__":
     test_merge_hold_ifs_skips_cross_partition()
     test_absorb_and_drops_or_covered_by_conjunct()
     test_absorb_and_after_self_gate()
+    test_cse_sibling_or_prefixes_factors_shared_spine()
     print("ok")

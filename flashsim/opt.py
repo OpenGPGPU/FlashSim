@@ -89,6 +89,7 @@ def optimize(mod: Module) -> Module:
         body = _merge_hold_ifs(body)
         body = _self_gate_const_holds(body, sigs)
         body = _map_stmts(body, _fold_expr)
+    body = _cse_sibling_or_prefixes(body, assigns)
     assigns, body = _dce(assigns, body, outputs, mem_writes)
 
     referred: set[str] = set(assigns)
@@ -452,6 +453,176 @@ def _or_chain(parts: list[Expr]) -> Expr:
     for part in parts[1:]:
         expr = BinOp("|", expr, part)
     return expr
+
+
+# Sibling L2 gates share huge &/| spines that differ only in a suffix.
+# Factor the common prefix (by structural equality) into one SSA temp.
+_CSE_CHAIN_NODES_MIN = 24
+_CSE_OR_GROUP_MIN = 3
+
+
+def _expr_eq(a: Expr, b: Expr) -> bool:
+    if a is b:
+        return True
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, Id):
+        return a.name == b.name
+    if isinstance(a, Const):
+        return a.value == b.value and a.width == b.width
+    if isinstance(a, UnaryOp):
+        return a.op == b.op and _expr_eq(a.a, b.a)
+    if isinstance(a, BinOp):
+        return a.op == b.op and _expr_eq(a.a, b.a) and _expr_eq(a.b, b.b)
+    if isinstance(a, Ternary):
+        return (
+            _expr_eq(a.cond, b.cond)
+            and _expr_eq(a.a, b.a)
+            and _expr_eq(a.b, b.b)
+        )
+    if isinstance(a, Extract):
+        return a.low == b.low and a.width == b.width and _expr_eq(a.a, b.a)
+    if isinstance(a, Concat):
+        return len(a.parts) == len(b.parts) and all(
+            _expr_eq(x, y) for x, y in zip(a.parts, b.parts)
+        )
+    return False
+
+
+def _expr_nodes(expr: Expr) -> int:
+    if isinstance(expr, (Id, Const, ArrayZeros)):
+        return 1
+    if isinstance(expr, UnaryOp):
+        return 1 + _expr_nodes(expr.a)
+    if isinstance(expr, BinOp):
+        return 1 + _expr_nodes(expr.a) + _expr_nodes(expr.b)
+    if isinstance(expr, Ternary):
+        return 1 + _expr_nodes(expr.cond) + _expr_nodes(expr.a) + _expr_nodes(expr.b)
+    if isinstance(expr, Extract):
+        return 1 + _expr_nodes(expr.a)
+    if isinstance(expr, Concat):
+        return 1 + sum(_expr_nodes(p) for p in expr.parts)
+    if isinstance(expr, ArrayGet):
+        return 1 + _expr_nodes(expr.arr) + _expr_nodes(expr.index)
+    if isinstance(expr, ArrayInject):
+        return (
+            1
+            + _expr_nodes(expr.arr)
+            + _expr_nodes(expr.index)
+            + _expr_nodes(expr.value)
+        )
+    if isinstance(expr, MemRead):
+        return 1 + _expr_nodes(expr.addr)
+    return 1
+
+
+def _chain_op(op: str, parts: list[Expr]) -> Expr:
+    expr = parts[0]
+    for part in parts[1:]:
+        expr = BinOp(op, expr, part)
+    return expr
+
+
+def _common_term_prefix(seqs: list[list[Expr]]) -> int:
+    if not seqs:
+        return 0
+    n = min(len(s) for s in seqs)
+    i = 0
+    while i < n and all(_expr_eq(s[i], seqs[0][i]) for s in seqs[1:]):
+        i += 1
+    return i
+
+
+def _cse_or_prefix_run(
+    stmts: list[Stmt], assigns: dict[str, Expr], counter: list[int]
+) -> list[Stmt]:
+    """Factor shared &/| prefixes across a flat list of sibling stmts."""
+    out: list[Stmt] = []
+    i = 0
+    while i < len(stmts):
+        stmt = stmts[i]
+        if not isinstance(stmt, If):
+            out.append(stmt)
+            i += 1
+            continue
+        best_op: str | None = None
+        best_group: list[If] = []
+        best_seqs: list[list[Expr]] = []
+        best_pre = 0
+        best_nodes = 0
+        for op in ("&", "|"):
+            first = _flatten_op(stmt.cond, op)
+            if len(first) < 2 and _expr_nodes(stmt.cond) < _CSE_CHAIN_NODES_MIN:
+                continue
+            group = [stmt]
+            seqs = [first]
+            j = i + 1
+            while j < len(stmts):
+                nxt = stmts[j]
+                if not isinstance(nxt, If):
+                    break
+                nl = _flatten_op(nxt.cond, op)
+                trial = seqs + [nl]
+                pre = _common_term_prefix(trial)
+                if pre < 1:
+                    break
+                nodes = _expr_nodes(_chain_op(op, trial[0][:pre]))
+                if nodes < _CSE_CHAIN_NODES_MIN:
+                    break
+                group.append(nxt)
+                seqs.append(nl)
+                j += 1
+            if len(group) < _CSE_OR_GROUP_MIN:
+                continue
+            pre = _common_term_prefix(seqs)
+            if pre < 1:
+                continue
+            nodes = _expr_nodes(_chain_op(op, seqs[0][:pre]))
+            if nodes > best_nodes:
+                best_op, best_group, best_seqs, best_pre, best_nodes = (
+                    op,
+                    group,
+                    seqs,
+                    pre,
+                    nodes,
+                )
+        if best_op is None or best_nodes < _CSE_CHAIN_NODES_MIN:
+            out.append(stmt)
+            i += 1
+            continue
+        cse = f"_fs_cse_t{counter[0]}"
+        counter[0] += 1
+        prefix = best_seqs[0][:best_pre]
+        assigns[cse] = prefix[0] if len(prefix) == 1 else _chain_op(best_op, prefix)
+        for ifs, terms in zip(best_group, best_seqs):
+            suffix = terms[best_pre:]
+            if suffix:
+                new_cond = _chain_op(best_op, [Id(cse)] + suffix)
+            else:
+                new_cond = Id(cse)
+            out.append(If(new_cond, ifs.then_body, ifs.else_body))
+        i = i + len(best_group)
+    return out
+
+
+def _cse_sibling_or_prefixes(
+    body: list[Stmt], assigns: dict[str, Expr]
+) -> list[Stmt]:
+    """CSE long shared &/| prefixes among sibling hold/if conditions (L2)."""
+    counter = [0]
+
+    def walk(stmts: list[Stmt]) -> list[Stmt]:
+        mapped: list[Stmt] = []
+        for stmt in stmts:
+            if isinstance(stmt, If):
+                mapped.append(
+                    If(stmt.cond, walk(stmt.then_body), walk(stmt.else_body))
+                )
+            else:
+                mapped.append(stmt)
+        return _cse_or_prefix_run(mapped, assigns, counter)
+
+    return walk(body)
 
 
 def _hold_next(expr: Expr, lhs: str) -> tuple[str, Expr, Expr] | None:
