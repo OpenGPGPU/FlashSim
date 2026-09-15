@@ -8,7 +8,7 @@ drives, and dropping it strands whatever state the design meant to clear.
 
 from __future__ import annotations
 
-from flashsim.ir import Const, Id, If, NbAssign, Signal, Ternary
+from flashsim.ir import Const, Id, If, NbAssign, Signal, Ternary, UnaryOp
 from flashsim.opt import _follow, _nba_to_if
 
 
@@ -153,6 +153,48 @@ def test_merge_hold_ifs_skips_cross_partition() -> None:
     assert len(merged) == 2
 
 
+def test_absorb_and_drops_or_covered_by_conjunct() -> None:
+    """`v & (a | v | b)` → `v`; instruction-cache one-hot gates rely on this."""
+    from flashsim.ir import BinOp
+    from flashsim.opt import _fold_expr
+
+    v = Id("valid_1_32")
+    a = Id("valid_0_0")
+    b = Id("valid_1_63")
+    big_or = BinOp("|", BinOp("|", a, v), b)
+    expr = BinOp("&", BinOp("&", UnaryOp("~", Id("busy")), big_or), BinOp("&", v, v))
+    out = _fold_expr(expr)
+    # Remaining and-chain should be ~busy & valid — no mega OR.
+    from flashsim.opt import _flatten_op
+
+    parts = _flatten_op(out, "&") if isinstance(out, BinOp) and out.op == "&" else [out]
+    assert any(isinstance(p, Id) and p.name == "valid_1_32" for p in parts)
+    assert not any(isinstance(p, BinOp) and p.op == "|" for p in parts)
+    assert sum(1 for p in parts if isinstance(p, Id) and p.name == "valid_1_32") == 1
+
+
+def test_absorb_and_after_self_gate() -> None:
+    """self_gate ands `valid_k` onto `(…|valid_k|…)`; post-fold must drop the OR."""
+    from flashsim.ir import BinOp, Const, NbAssign, Signal
+    from flashsim.opt import _fold_expr, _map_stmts, _self_gate_const_holds
+
+    sigs = {
+        "en": Signal("en", 1, "wire"),
+        "v0": Signal("v0", 1, "reg"),
+        "v1": Signal("v1", 1, "reg"),
+    }
+    # Pretend enable already includes OR of valids (common after merge+self_gate).
+    en = BinOp("&", Id("en"), BinOp("|", Id("v0"), Id("v1")))
+    body = [If(en, [NbAssign("v0", Const(0, 1))], [])]
+    gated = _self_gate_const_holds(body, sigs)
+    folded = _map_stmts(gated, _fold_expr)
+    from flashsim.opt import _flatten_op
+
+    parts = _flatten_op(folded[0].cond, "&")
+    assert not any(isinstance(p, BinOp) and p.op == "|" for p in parts)
+    assert any(isinstance(p, Id) and p.name == "v0" for p in parts)
+
+
 if __name__ == "__main__":
     test_self_reference_else_is_a_hold()
     test_self_reference_then_inverts_the_condition()
@@ -164,4 +206,6 @@ if __name__ == "__main__":
     test_merge_hold_ifs_appends_into_then_with_else()
     test_merge_hold_ifs_merges_same_cond_with_else()
     test_merge_hold_ifs_skips_cross_partition()
+    test_absorb_and_drops_or_covered_by_conjunct()
+    test_absorb_and_after_self_gate()
     print("ok")

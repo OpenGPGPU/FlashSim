@@ -73,6 +73,9 @@ def optimize(mod: Module) -> Module:
     body = _flatten_nested_holds(body)
     body = _merge_hold_ifs(body)
     body = _self_gate_const_holds(body, sigs)
+    # self_gate may and-in `valid_k` onto a cond that already ORs all valids;
+    # re-fold so `v & (…|v|…)` collapses before emit.
+    body = _map_stmts(body, _fold_expr)
     n_writes = 0
     seen_w: set[str] = set()
     for stmt in body:
@@ -85,6 +88,7 @@ def optimize(mod: Module) -> Module:
         body = _flatten_nested_holds(body)
         body = _merge_hold_ifs(body)
         body = _self_gate_const_holds(body, sigs)
+        body = _map_stmts(body, _fold_expr)
     assigns, body = _dce(assigns, body, outputs, mem_writes)
 
     referred: set[str] = set(assigns)
@@ -230,6 +234,10 @@ def _fold_expr(expr: Expr) -> Expr:
             if expr.op in ops:
                 width = 1 if expr.op in CMP_OPS else width
                 return Const(ops[expr.op](a.value, b.value) & mask, width)
+        if expr.op == "&":
+            absorbed = _absorb_and(BinOp("&", a, b))
+            if absorbed is not None:
+                return absorbed
         return BinOp(expr.op, a, b)
     if isinstance(expr, Ternary):
         cond, a, b = _fold_expr(expr.cond), _fold_expr(expr.a), _fold_expr(expr.b)
@@ -396,6 +404,40 @@ def _flatten_op(expr: Expr, op: str) -> list[Expr]:
     if isinstance(expr, BinOp) and expr.op == op:
         return _flatten_op(expr.a, op) + _flatten_op(expr.b, op)
     return [expr]
+
+
+def _absorb_and(expr: BinOp) -> Expr | None:
+    """Simplify `v & (v | …)` / duplicate `v & v` in an and-chain.
+
+    Instruction-cache holds gate each bit with a mega `(OR all valids) & valid_k`
+    conjunct; absorbing the OR collapses multi-KB conditions to a few Ids.
+    """
+    parts = _flatten_op(expr, "&")
+    if len(parts) < 2:
+        return None
+    id_names = {p.name for p in parts if isinstance(p, Id)}
+    out: list[Expr] = []
+    seen_ids: set[str] = set()
+    changed = False
+    for p in parts:
+        if isinstance(p, Id):
+            if p.name in seen_ids:
+                changed = True
+                continue
+            seen_ids.add(p.name)
+            out.append(p)
+            continue
+        if id_names and isinstance(p, BinOp) and p.op == "|":
+            leaves = _flatten_op(p, "|")
+            if any(isinstance(x, Id) and x.name in id_names for x in leaves):
+                changed = True
+                continue
+        out.append(p)
+    if not changed or not out:
+        return None
+    if len(out) == 1:
+        return out[0]
+    return _and_chain(out)
 
 
 def _and_chain(parts: list[Expr]) -> Expr:
