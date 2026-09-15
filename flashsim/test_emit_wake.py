@@ -199,6 +199,48 @@ def test_promote_bulky_gated_cones() -> None:
     assert "system_computeUnits_0_t_tiny" not in cached
 
 
+def test_promote_bulky_gated_cones_with_else() -> None:
+    """Merged same-cond holds keep else; then-arm cones must still promote."""
+    from flashsim.emit import _BULKY_TMP_NODES, _promote_bulky_gated_cones
+    from flashsim.ir import BinOp, Const, Id, If, NbAssign
+
+    assigns: dict = {}
+    then_assigns = []
+    for i in range(60):
+        expr: object = Id("en")
+        for _ in range(_BULKY_TMP_NODES):
+            expr = BinOp("&", expr, Const(1, 1))
+        assigns[f"system_computeUnits_0_t{i}"] = expr
+        then_assigns.append(NbAssign(f"r{i}", Id(f"system_computeUnits_0_t{i}")))
+    body = [If(Id("en"), then_assigns, [NbAssign("z", Const(0, 1))])]
+    cached: set[str] = set()
+    _promote_bulky_gated_cones(body, assigns, cached, stop={"en"})
+    assert "system_computeUnits_0_t0" in cached
+
+
+def test_promote_mega_gated_lowers_node_threshold() -> None:
+    """≥256 SSA locals under a gate: promote even shallow temps (coalescer)."""
+    from flashsim.emit import _MEGA_GATED_CONE, _promote_bulky_gated_cones
+    from flashsim.ir import BinOp, Const, Id, If, NbAssign
+
+    assigns: dict = {}
+    then_assigns = []
+    n = _MEGA_GATED_CONE + 10
+    for i in range(n):
+        # 3-node expr: below normal bulky threshold, above mega threshold.
+        assigns[f"system_computeUnits_0_core_vectorCoalescer_t{i}"] = BinOp(
+            "&", BinOp("&", Id("en"), Const(1, 1)), Const(1, 1)
+        )
+        then_assigns.append(
+            NbAssign(f"r{i}", Id(f"system_computeUnits_0_core_vectorCoalescer_t{i}"))
+        )
+    body = [If(Id("en"), then_assigns, [NbAssign("z", Const(0, 1))])]
+    cached: set[str] = set()
+    _promote_bulky_gated_cones(body, assigns, cached, stop={"en"})
+    assert "system_computeUnits_0_core_vectorCoalescer_t0" in cached
+    assert len(cached) >= 64
+
+
 def test_extract_deep_mux_chunks() -> None:
     from flashsim.emit import (
         _DEEP_MUX_CHUNK,
@@ -355,6 +397,8 @@ if __name__ == "__main__":
     test_stmt_bucket_key_prefers_write_partition()
     test_promote_large_gpu_ssa()
     test_promote_bulky_gated_cones()
+    test_promote_bulky_gated_cones_with_else()
+    test_promote_mega_gated_lowers_node_threshold()
     test_extract_deep_mux_chunks()
     test_branch_hoist_shared_ssa()
     test_emit_ternary_else_if_flatten()

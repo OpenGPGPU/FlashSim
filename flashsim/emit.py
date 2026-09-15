@@ -154,6 +154,11 @@ _LARGE_SSA_PROMOTE_CAP = 16384
 _BULKY_GATED_CONE = 48
 # One-hot compares are cheaper as locals; only promote richer SSA temps.
 _BULKY_TMP_NODES = 12
+# Mega hold arms (merged coalescer cones) are almost all tiny compares — still
+# promote mid fan-out temps so skip-cache can sleep across busy hold re-entries.
+_MEGA_GATED_CONE = 256
+_MEGA_TMP_NODES = 3
+_MEGA_REGION_PROMOTE_CAP = 512
 # Right-nested priority muxes this deep become separate skip-cached chunk evals
 # (commandRouter completions / opcode decode). Early arms skip later chunks.
 _DEEP_MUX_SPLIT = 64
@@ -243,7 +248,7 @@ def _promote_bulky_gated_cones(
     def add_needed(expr: Expr) -> set[str]:
         return set(_uncached_needed(expr, assigns, cached, stop))
 
-    def region_temps(stmts: list[Stmt]) -> list[str]:
+    def region_temps(stmts: list[Stmt], min_nodes: int) -> list[str]:
         needed: set[str] = set()
 
         def gather(ss: list[Stmt]) -> None:
@@ -262,7 +267,7 @@ def _promote_bulky_gated_cones(
         for n in needed:
             if n in cached or not _is_ssa_temp(n) or not _is_gpu_hot_ssa(n):
                 continue
-            if _expr_node_count(assigns[n]) < _BULKY_TMP_NODES:
+            if _expr_node_count(assigns[n]) < min_nodes:
                 continue
             out.append(n)
         return out
@@ -270,12 +275,9 @@ def _promote_bulky_gated_cones(
     def walk(stmts: list[Stmt], gated: bool) -> None:
         for stmt in stmts:
             if isinstance(stmt, If):
-                if stmt.else_body:
-                    walk(stmt.then_body, gated)
-                    walk(stmt.else_body, gated)
-                else:
-                    # Use full uncached cone size for the bulkiness test.
-                    raw = set()
+                def note_arm(arm: list[Stmt]) -> None:
+                    raw: set[str] = set()
+
                     def gather(ss: list[Stmt]) -> None:
                         for s in ss:
                             if isinstance(s, NbAssign):
@@ -284,33 +286,58 @@ def _promote_bulky_gated_cones(
                                 raw.update(add_needed(s.cond))
                                 gather(s.then_body)
                                 gather(s.else_body)
-                    gather(stmt.then_body)
+
+                    gather(arm)
                     raw_ssa = [
                         n
                         for n in raw
                         if _is_ssa_temp(n) and _is_gpu_hot_ssa(n) and n not in cached
                     ]
                     if len(raw_ssa) >= _BULKY_GATED_CONE:
-                        regions.append((len(raw_ssa), region_temps(stmt.then_body)))
-                    walk(stmt.then_body, True)
+                        min_nodes = (
+                            _MEGA_TMP_NODES
+                            if len(raw_ssa) >= _MEGA_GATED_CONE
+                            else _BULKY_TMP_NODES
+                        )
+                        regions.append((len(raw_ssa), region_temps(arm, min_nodes)))
+
+                # Both arms can host mega cones (merged same-cond holds keep
+                # else). Promote either arm when it would inline a bulky SSA set.
+                note_arm(stmt.then_body)
+                if stmt.else_body:
+                    note_arm(stmt.else_body)
+                walk(stmt.then_body, True)
+                if stmt.else_body:
+                    walk(stmt.else_body, True)
             elif isinstance(stmt, NbAssign):
                 if gated:
-                    temps = region_temps([stmt])
                     raw = [
                         n
                         for n in add_needed(stmt.rhs)
                         if _is_ssa_temp(n) and _is_gpu_hot_ssa(n) and n not in cached
                     ]
                     if len(raw) >= _BULKY_GATED_CONE:
-                        regions.append((len(raw), temps))
+                        min_nodes = (
+                            _MEGA_TMP_NODES
+                            if len(raw) >= _MEGA_GATED_CONE
+                            else _BULKY_TMP_NODES
+                        )
+                        regions.append((len(raw), region_temps([stmt], min_nodes)))
             else:
                 raise TypeError(stmt)
 
     walk(body, False)
     regions.sort(key=lambda rt: rt[0], reverse=True)
     added = 0
-    for _size, temps in regions:
-        for tmp in temps:
+    for size, temps in regions:
+        # Prefer larger exprs first within a region.
+        ranked = sorted(
+            temps, key=lambda n: _expr_node_count(assigns[n]), reverse=True
+        )
+        region_cap = (
+            _MEGA_REGION_PROMOTE_CAP if size >= _MEGA_GATED_CONE else len(ranked)
+        )
+        for tmp in ranked[:region_cap]:
             if added >= _LARGE_SSA_PROMOTE_CAP:
                 return
             if tmp in cached:
