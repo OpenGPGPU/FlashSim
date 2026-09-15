@@ -276,6 +276,25 @@ def test_extract_deep_mux_chunks() -> None:
     assert isinstance(default, Id) and default.name in cached
 
 
+def test_top_gate_demands_skip_nested_ssa() -> None:
+    """Hold-entry hoist must not pull cached SSA only used under nested gates."""
+    from flashsim.emit import _collect_top_gate_demands
+    from flashsim.ir import Id, If, NbAssign
+
+    assigns = {"gate": Id("leaf_g"), "ssa": Id("leaf_s")}
+    stmts = [
+        If(
+            Id("gate"),
+            [If(Id("ssa"), [NbAssign("r", Id("ssa"))])],
+        )
+    ]
+    stop = {"leaf_g", "leaf_s", "r"}
+    cached = {"gate", "ssa"}
+    top = _collect_top_gate_demands(stmts, cached, assigns, stop)
+    assert "gate" in top
+    assert "ssa" not in top
+
+
 def test_branch_hoist_shared_ssa() -> None:
     """Then/else arms must not each re-bind the same SSA temp."""
     from flashsim.emit import _emit_nba_tree
@@ -400,6 +419,7 @@ if __name__ == "__main__":
     test_promote_bulky_gated_cones_with_else()
     test_promote_mega_gated_lowers_node_threshold()
     test_extract_deep_mux_chunks()
+    test_top_gate_demands_skip_nested_ssa()
     test_branch_hoist_shared_ssa()
     test_emit_ternary_else_if_flatten()
     test_mem_write_enable_gates_data_evals()

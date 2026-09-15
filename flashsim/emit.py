@@ -692,13 +692,18 @@ def _emit_branch_hoist(
         )
 
 
-def _collect_cached_demands(
+def _collect_top_gate_demands(
     stmts: list[Stmt],
     cached: set[str],
     assigns: dict[str, Expr],
     stop: set[str],
 ) -> set[str]:
-    """Cached wires demanded anywhere in an NBA stmt tree."""
+    """Cached wires needed only by top-level hold stmt gates / bare NBAs.
+
+    Mega coalescer SSA under nested `if (arbiter)` stays out of the hold-entry
+    eval list so a false outer gate does not pay hundreds of `__ok` checks;
+    `_emit_nba_tree` still CSE-s those evals at first use inside the arm.
+    """
     demand: set[str] = set()
 
     def note_expr(expr: Expr) -> None:
@@ -710,20 +715,14 @@ def _collect_cached_demands(
                 if dep in cached:
                     demand.add(dep)
 
-    def walk(ss: list[Stmt]) -> None:
-        for stmt in ss:
-            if isinstance(stmt, NbAssign):
-                note_expr(stmt.rhs)
-            elif isinstance(stmt, If):
-                note_expr(stmt.cond)
-                walk(stmt.then_body)
-                walk(stmt.else_body)
-            else:
-                raise TypeError(stmt)
-
-    walk(stmts)
+    for stmt in stmts:
+        if isinstance(stmt, NbAssign):
+            note_expr(stmt.rhs)
+        elif isinstance(stmt, If):
+            note_expr(stmt.cond)
+        else:
+            raise TypeError(stmt)
     return demand
-
 
 
 def internal_cone(
@@ -1611,9 +1610,9 @@ def emit_cpp(mod: Module) -> str:
             lines.append(f"    _h_need[{word}] &= ~{mask};")
             lines.append(f"    _h_busy[{word}] &= ~{mask};")
             _HOLD_TAKEN = f"_h_busy[{word}] |= {mask};"
-            # Hoist unique cached demands once per hold — sibling if-arms would
-            # otherwise re-emit the same __ok checks dozens of times.
-            demanded = _collect_cached_demands(stmts, cached, assigns, stop)
+            # Hoist only top-level gate/NBA demands. Full-tree hoist forced mega
+            # coalescer skip-evals even when outer enables were false.
+            demanded = _collect_top_gate_demands(stmts, cached, assigns, stop)
             for dep in sorted(demanded):
                 lines.append(_eval_invoke(dep, 4))
             _emit_nba_tree(
