@@ -24,12 +24,40 @@ so idle ticks do not memcpy, re-clear, or scan hundreds of skip flags. Do
 not fork CIRCT unless a pass must land in-tree. `--frontend native` is a
 Verilog-subset fallback when CIRCT is not installed.
 
-ARTI A/B (needs a probe initramfs under `$WORK`):
+ARTI A/B (needs a probe initramfs under `$WORK/initramfs.cpio.gz`; build via
+`arti-work` probe setup or copy from a prior run):
 
 ```bash
 ./scripts/bench_arti_backends.sh
+ROUNDS=3 ./scripts/bench_arti_backends.sh              # quieter mean wall
 ARTI_MODEL_STATS=1 ./scripts/bench_arti_backends.sh   # tick/active counters
+FLASHSIM_QEMU=/tmp/qemu-fs-new ./scripts/bench_arti_backends.sh
 ```
+
+**GpuHostSystemAxi / OpenGPU probe** (real QEMU/Linux MMIO + job-queue self-test;
+this is the go/no-go wall clock, not microbench MHz):
+
+| Backend | Typical mean wall (ROUNDS=3) | Notes |
+|---|---|---|
+| FlashSim | ~5.0–5.5 s | guest self-test ~3.0–3.3 s |
+| Verilator-linked QEMU | ~19–21 s | guest self-test ~11–12 s |
+| Speedup | ~3.5–4× | vs Verilator wall |
+
+Recent GPU emit/opt wins on this path (all correctness-checked vs Verilator on
+unit benches; ARTI numbers are noisy — re-run `ROUNDS=3` before claiming a
+regression):
+
+- **Top-gate demand hoist** — hold entry evals only wires needed by outer
+  gates/NBAs; mega coalescer SSA stays inside the arm.
+- **Absorb `v & (…\|v\|…)`** — instruction-cache one-hot gates (~7 KB → ~110 B).
+- **Sibling `&`/`\|` prefix CSE** — L2 long-if spines (12k → 2.5k nodes).
+- **Mux chunk on NBA RHS** — coalescer `readData` is 8×63-deep priority muxes
+  inline in holds; split into skip-cached `_dmux` chunks (CHUNK=16) so early
+  arms skip later evals.
+
+Tried and **reverted** (no net win on quiet ARTI): cond-ranked mega promote,
+hold-bucket 64, fanout-ranked promote, SETTLE_MIN=128 default, noinline outline
+of coalescer hold arms (call overhead / I-cache).
 
 ## Setup
 

@@ -160,9 +160,11 @@ _MEGA_GATED_CONE = 256
 _MEGA_TMP_NODES = 3
 _MEGA_REGION_PROMOTE_CAP = 512
 # Right-nested priority muxes this deep become separate skip-cached chunk evals
-# (commandRouter completions / opcode decode). Early arms skip later chunks.
-_DEEP_MUX_SPLIT = 64
-_DEEP_MUX_CHUNK = 64
+# (commandRouter / coalescer readData). Early arms skip later chunks.
+# Coalescer line-match then-arms are ~63-deep; CHUNK must be < that so we get
+# ≥2 chunks (else the whole mux stays one inline eval).
+_DEEP_MUX_SPLIT = 32
+_DEEP_MUX_CHUNK = 16
 _DEEP_MUX_CAP = 4096
 # Flatten right-nested ternaries to else-if when at least this many arms and
 # conditions are pure expressions (no demand stmts between else / if).
@@ -457,11 +459,13 @@ def _extract_deep_mux_chunks(
     assigns: dict[str, Expr],
     sigs: dict[str, Signal],
     cached: set[str],
-) -> int:
+    body: list[Stmt] | None = None,
+) -> tuple[int, list[Stmt] | None]:
     """Split mega priority-mux evals into skip-cached chunk methods.
 
-    Returns the number of new chunk wires created. Early mux arms skip later
-    chunk `eval_*` calls (demand sits in the else path).
+    Returns (new_chunk_count, rewritten_body). Early mux arms skip later
+    chunk `eval_*` calls (demand sits in the else path). Also rewrites mega
+    NBA RHS (coalescer readData Concat trees) which never sit in `cached`.
     """
     budget = [_DEEP_MUX_CAP]
     counter = [0]
@@ -483,7 +487,48 @@ def _extract_deep_mux_chunks(
             cached=cached,
             budget=budget,
         )
-    return before - budget[0]
+
+    new_body: list[Stmt] | None = None
+    if body is not None:
+
+        def walk(stmts: list[Stmt]) -> list[Stmt]:
+            out: list[Stmt] = []
+            for stmt in stmts:
+                if isinstance(stmt, NbAssign):
+                    if (
+                        _is_gpu_hot_ssa(stmt.lhs)
+                        and _max_ternary_nesting(stmt.rhs) >= _DEEP_MUX_SPLIT
+                    ):
+                        out.append(
+                            NbAssign(
+                                stmt.lhs,
+                                _rewrite_deep_mux_expr(
+                                    stmt.rhs,
+                                    prefix=stmt.lhs,
+                                    counter=counter,
+                                    assigns=assigns,
+                                    sigs=sigs,
+                                    cached=cached,
+                                    budget=budget,
+                                ),
+                            )
+                        )
+                    else:
+                        out.append(stmt)
+                elif isinstance(stmt, If):
+                    out.append(
+                        If(
+                            stmt.cond,
+                            walk(stmt.then_body),
+                            walk(stmt.else_body),
+                        )
+                    )
+                else:
+                    out.append(stmt)
+            return out
+
+        new_body = walk(body)
+    return before - budget[0], new_body
 
 
 def _ternary_chain_flat_ok(
@@ -1264,7 +1309,11 @@ def emit_cpp(mod: Module) -> str:
     stop = set(regs) | set(collect_inputs(mod)) | set(mems)
     writes = always_writes(mod.always.body)
     cached = cached_wires(mod, assigns)
-    _extract_deep_mux_chunks(assigns, sigs, cached)
+    _, always_body = _extract_deep_mux_chunks(
+        assigns, sigs, cached, body=mod.always.body
+    )
+    if always_body is None:
+        always_body = mod.always.body
     wire_deps = {w: cone_leaves(w, assigns, stop) for w in cached}
     wire_part, leaf_parts, nparts = _partition_maps(cached, wire_deps)
     inv_tables = _invalidation_tables(leaf_parts)
@@ -1279,7 +1328,7 @@ def emit_cpp(mod: Module) -> str:
         # already in the register. Statements with an else arm behave the
         # same way, so they are bucketed too.
         grouped: dict[str, list[Stmt]] = defaultdict(list)
-        for stmt in mod.always.body:
+        for stmt in always_body:
             grouped[_stmt_bucket_key(stmt)].append(stmt)
         hold_buckets = []
         for key, stmts in sorted(grouped.items()):
@@ -1672,7 +1721,7 @@ def emit_cpp(mod: Module) -> str:
     # Posedge body without re-scanning inputs (hosts may poke first).
     lines.append("  void tick_nba() {")
     lines.append("    _chg = 0;")
-    seq_body = live_stmts if large else mod.always.body
+    seq_body = live_stmts if large else always_body
     seq_cached = always_cond_reads(seq_body) & cached
     for wr in mod.mem_writes:
         seq_cached |= expr_ids(wr.enable) & cached
@@ -1719,7 +1768,7 @@ def emit_cpp(mod: Module) -> str:
                 lines.append(f"    uint8_t {name}__w = 0;")
         tick_scratch = [0]
         _emit_nba_tree(
-            mod.always.body,
+            always_body,
             cached,
             assigns,
             stop,

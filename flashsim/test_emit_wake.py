@@ -248,7 +248,7 @@ def test_extract_deep_mux_chunks() -> None:
         _extract_deep_mux_chunks,
         _right_ternary_arms,
     )
-    from flashsim.ir import Const, Id, Signal, Ternary
+    from flashsim.ir import Const, Id, NbAssign, Signal, Ternary
 
     # Build a right-nested priority mux deeper than the split threshold.
     n = _DEEP_MUX_SPLIT + _DEEP_MUX_CHUNK
@@ -265,7 +265,7 @@ def test_extract_deep_mux_chunks() -> None:
         # Const arms need no extra sigs; conditions are Ids already in sigs.
         pass
     cached = {root}
-    n_new = _extract_deep_mux_chunks(assigns, sigs, cached)  # type: ignore[arg-type]
+    n_new, _ = _extract_deep_mux_chunks(assigns, sigs, cached)
     assert n_new >= 2
     assert isinstance(assigns[root], Id)
     top = assigns[root].name
@@ -274,6 +274,38 @@ def test_extract_deep_mux_chunks() -> None:
     arms, default = _right_ternary_arms(assigns[top])
     assert len(arms) <= _DEEP_MUX_CHUNK
     assert isinstance(default, Id) and default.name in cached
+
+
+def test_extract_deep_mux_from_nba_rhs() -> None:
+    """Mega coalescer-style NBA RHS (not a cached wire) also gets dmux chunks."""
+    from flashsim.emit import (
+        _DEEP_MUX_CHUNK,
+        _DEEP_MUX_SPLIT,
+        _extract_deep_mux_chunks,
+        _right_ternary_arms,
+    )
+    from flashsim.ir import Const, Id, NbAssign, Signal, Ternary
+
+    n = _DEEP_MUX_SPLIT + _DEEP_MUX_CHUNK
+    expr: object = Const(0, 32)
+    for i in reversed(range(n)):
+        expr = Ternary(Id(f"c{i}"), Const(i, 32), expr)  # type: ignore[arg-type]
+    lhs = "system_computeUnits_0_core_vectorCoalescer_outputBits_readData_0"
+    assigns: dict = {}
+    sigs = {
+        lhs: Signal(name=lhs, width=32, kind="reg"),
+        **{f"c{i}": Signal(name=f"c{i}", width=1, kind="wire") for i in range(n)},
+    }
+    body = [NbAssign(lhs, expr)]  # type: ignore[arg-type]
+    cached: set[str] = set()
+    n_new, new_body = _extract_deep_mux_chunks(assigns, sigs, cached, body=body)
+    assert n_new >= 2 and new_body is not None
+    assert isinstance(new_body[0], NbAssign)
+    assert isinstance(new_body[0].rhs, Id)
+    top = new_body[0].rhs.name
+    assert top in cached and "_dmux" in top
+    arms, default = _right_ternary_arms(assigns[top])
+    assert len(arms) <= _DEEP_MUX_CHUNK
 
 
 def test_top_gate_demands_skip_nested_ssa() -> None:
@@ -419,6 +451,7 @@ if __name__ == "__main__":
     test_promote_bulky_gated_cones_with_else()
     test_promote_mega_gated_lowers_node_threshold()
     test_extract_deep_mux_chunks()
+    test_extract_deep_mux_from_nba_rhs()
     test_top_gate_demands_skip_nested_ssa()
     test_branch_hoist_shared_ssa()
     test_emit_ternary_else_if_flatten()
