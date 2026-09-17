@@ -35,29 +35,42 @@ FLASHSIM_QEMU=/tmp/qemu-fs-new ./scripts/bench_arti_backends.sh
 ```
 
 **GpuHostSystemAxi / OpenGPU probe** (real QEMU/Linux MMIO + job-queue self-test;
-this is the go/no-go wall clock, not microbench MHz):
+this is the go/no-go wall clock, not microbench MHz).
 
-| Backend | Typical mean wall (ROUNDS=3) | Notes |
-|---|---|---|
-| FlashSim | ~5.0–5.5 s | guest self-test ~3.0–3.3 s |
-| Verilator-linked QEMU | ~19–21 s | guest self-test ~11–12 s |
-| Speedup | ~3.5–4× | vs Verilator wall |
+Measured 2026-09-17, quiet machine, `ROUNDS=3`,
+`FLASHSIM_QEMU=/tmp/qemu-fs-new` (dmux-chunk embed at `b658f9b`) vs
+`qemu-system-aarch64.verilator`:
 
-Recent GPU emit/opt wins on this path (all correctness-checked vs Verilator on
-unit benches; ARTI numbers are noisy — re-run `ROUNDS=3` before claiming a
-regression):
+| Backend | Mean wall | Per-round wall | Guest self-test |
+|---|---|---|---|
+| FlashSim | **6.3 s** | 8 / 6 / 5 s | 4.57 / 3.38 / 3.55 s |
+| Verilator-linked QEMU | **19.0 s** | 19 / 19 / 19 s | 11.22 / 11.61 / 11.02 s |
+| Speedup | **3.0×** | (VL wall / FS wall) | |
+
+First FlashSim round is often cold (I-cache / codesign); warm rounds land
+around 5–6 s wall / ~3.4–3.6 s guest (~3.2–3.8×). Re-run `ROUNDS=3` before
+claiming a regression — single-run noise is ±1 s.
+
+Recent GPU emit/opt wins on this path (correctness-checked vs Verilator on
+unit benches):
 
 - **Top-gate demand hoist** — hold entry evals only wires needed by outer
   gates/NBAs; mega coalescer SSA stays inside the arm.
 - **Absorb `v & (…\|v\|…)`** — instruction-cache one-hot gates (~7 KB → ~110 B).
 - **Sibling `&`/`\|` prefix CSE** — L2 long-if spines (12k → 2.5k nodes).
 - **Mux chunk on NBA RHS** — coalescer `readData` is 8×63-deep priority muxes
-  inline in holds; split into skip-cached `_dmux` chunks (CHUNK=16) so early
-  arms skip later evals.
+  inline in holds; split into skip-cached `_dmux` chunks (SPLIT=32 / CHUNK=16)
+  so early arms skip later evals.
 
 Tried and **reverted** (no net win on quiet ARTI): cond-ranked mega promote,
 hold-bucket 64, fanout-ranked promote, SETTLE_MIN=128 default, noinline outline
-of coalescer hold arms (call overhead / I-cache).
+of coalescer hold arms, global dmux SPLIT=16 / CHUNK=8, Concat-part-only hoist
+of vectorTlb `writeData` 16-deep lanes, heavy-hold isolation by ternary size,
+threading `demanded` through wide/ternary emit (I-cache only), deferring deep
+mux select demands out of `_emit_compute` / Concat entry (noisy win, quiet lose),
+vectorDataCache 32-bucket skip partitions (+1.0 s wall vs dmux baseline),
+L2 SSA shard colocation by `tid%65` (wall tie), L2 `always_inline` (clang -O2 hang),
+vector ALU 32-bucket skip partitions (multiplyAlu/…; +1.0 s wall).
 
 ## Setup
 
@@ -129,36 +142,36 @@ GPU slices from `rtl/gpu/` (Chisel → SystemVerilog, still compared to Verilato
 must not be slower than 0.8× 1-thread. All must match Verilator at the dumped
 ports.
 
-Measured on this machine (CIRCT `firtool-1.158.0`, Verilator 5.050, Apple clang
-`-O3`, 12 stages × 8 mix rounds, 1e6 cycles, ports match for 4096 cycles).
-GPU rows include vs 4-thread Verilator where measured:
+Measured on this machine 2026-09-17 (CIRCT `firtool-1.158.0`, Verilator 5.050,
+Apple clang `-O3`, 12 stages × 8 mix rounds, 1e6 cycles, ports match for 4096
+cycles). GPU rows include vs 4-thread Verilator:
 
 | bench | vs vlt 1T | vs vlt 4T | note |
 |---|---|---|---|
-| gated_pipe | ~6.7× | n/a (tiny DUT; threads add overhead) | mix only runs when valid |
-| sticky_input | ~3.1× | n/a | mix skipped while `din` is unchanged |
-| busy_alu | ~1.2× | n/a | every mixer live every cycle |
-| counter | ~50× | n/a | tiny DUT |
-| sync_fifo | ~4.0× | | idle cycles skip the write cone |
-| cmp_acc | ~11× | | compares and gated updates |
-| hier_pipe | ~28× | | inlined `add1` instance |
-| mini_rf | ~8.6× | | sticky reads skip the file |
-| DrawContextFifo | ~1.6× | | GPU slice; gated enq/retire |
-| TriangleRasterizer | ~2.7× | | GPU slice; idle setup vs scan |
-| WarpScheduler | ~2.6× | | SIMT issue idle when no eligible warp |
-| GpuCommandRouter | ~1.3× | | packed queues; skip while engines idle |
-| BankedSharedMemory | ~1.4× | | 4-lane 256 B SRAM + atomics |
-| GpuFrontend | ~1.1× | | launch / fetch / decode; gated payload cones |
-| InstructionCache | ~1.1× | | 16×2 fetch cache; 1-bit valid bits lowered to `if` |
-| ScalarBackend | ~2.7× | | integer execute / RF / scoreboard; 512-bit cache ports idle |
-| FrontendICache | ~1.3× | | frontend fetch wired to 16×2 I$; open-loop line refill |
-| VectorBackend | ~2.5× | | RVV execute / vector RF / integer+FPU ALUs; memory idle |
-| FpuBackend | ~2.0× | | scalar FP32 issue / FMA / exact; 512-bit cache ports idle |
-| FrontendScalar | ~1.2× | | frontend+I$ closed through scalar ALU/redirect |
-| FrontendScalarFpu | ~2.5× | | same loop plus scalar FP32 FMA; mixed addi/fadd IMEM |
-| Gpu | ~69× | | closed CU; idle after warp finish (8T Verilator was slower than 1T) |
-| GpuSystem | ~53× | **~43×** | 1 CU + L2 + DMA; FlashSim ~5.9 MHz vs 1T 0.11 / 4T 0.14 MHz |
-| GpuHostAxi | ~22× | **~167×** | AXI ID read, then idle; FlashSim ~39 MHz vs 1T 1.7 / 4T 0.23 MHz |
+| gated_pipe | **5.1×** | (tiny; MT overhead) | mix only runs when valid |
+| sticky_input | **5.7×** | (tiny; MT overhead) | mix skipped while `din` unchanged |
+| busy_alu | **1.2×** | | every mixer live every cycle |
+| counter | **14×** | | tiny DUT |
+| sync_fifo | **3.0×** | | idle cycles skip the write cone |
+| cmp_acc | **3.7×** | | compares and gated updates |
+| hier_pipe | **14×** | | inlined `add1` instance |
+| mini_rf | **10×** | | sticky reads skip the file |
+| DrawContextFifo | **1.4×** | | GPU slice; gated enq/retire |
+| TriangleRasterizer | **2.4×** | | GPU slice; idle setup vs scan |
+| WarpScheduler | **2.4×** | | SIMT issue idle when no eligible warp |
+| GpuCommandRouter | **1.1×** | | packed queues; skip while engines idle |
+| BankedSharedMemory | **1.3×** | | 4-lane 256 B SRAM + atomics |
+| GpuFrontend | **1.5×** | | launch / fetch / decode; gated payload cones |
+| InstructionCache | **1.0×** | | 16×2 fetch cache; 1-bit valid bits → `if` |
+| FrontendICache | **1.7×** | | frontend fetch wired to 16×2 I$ |
+| ScalarBackend | **3.6×** | | integer execute / RF / scoreboard; wide ports idle |
+| VectorBackend | **38×** | | RVV execute / vector RF / ALUs; memory idle |
+| FpuBackend | **11×** | | scalar FP32 issue / FMA / exact; wide ports idle |
+| FrontendScalar | **11×** | | frontend+I$ closed through scalar ALU/redirect |
+| FrontendScalarFpu | **16×** | | same loop plus scalar FP32 FMA |
+| Gpu | **87×** | | closed CU; idle after warp finish |
+| GpuSystem | **77×** | **364×** | 1 CU + L2 + DMA; FS ~5.5 MHz vs 1T 0.07 / 4T 0.015 MHz |
+| GpuHostAxi | **17×** | **144×** | AXI ID read, then idle; FS ~32 MHz vs 1T 1.8 / 4T 0.22 MHz |
 
 ```bash
 python3 -m flashsim compile build/benches/counter.v -o /tmp/counter.h
