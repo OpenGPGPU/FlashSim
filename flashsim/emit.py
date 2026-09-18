@@ -2073,7 +2073,16 @@ def _emit_eval_method(
     depth = sigs[name].depth if name in sigs else 0
     mask = None if depth else mask_expr(width)
     scratch = [0]
-    lines.append(f"  void eval_{name}() {{")
+    # Always inline hot L2 leaf evals to eliminate call overhead
+    always_inline = (
+        "l2_slices_" in name
+        and part is not None
+        and not depth
+        and not is_wide(width)
+        and len(cached_deps(name, assigns, cached, stop)) == 0
+    )
+    inline_attr = "[[gnu::always_inline]] " if always_inline else ""
+    lines.append(f"  {inline_attr}void eval_{name}() {{")
     lines.append(f"    if ({name}__ok == _pg[{part}]) return;")
     for dep in cached_deps(name, assigns, cached, stop):
         lines.append(f"    eval_{dep}();")
