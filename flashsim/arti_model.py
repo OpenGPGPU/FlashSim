@@ -639,6 +639,11 @@ static void combo(void)
 
 // Hot path for settle / IRQ pump: the control slave is idle, so skip the
 // s_axi eval cone. Master + IRQ still update every cycle for memoryAXI.
+static unsigned g_hold_boost;
+static bool g_slave_idle = true;
+
+// Hot path for settle / IRQ pump: the control slave is idle, so skip the
+// s_axi eval cone. Master + IRQ still update every cycle for memoryAXI.
 static void combo_pump_eval(void)
 {
   combo_master();
@@ -647,6 +652,20 @@ static void combo_pump_eval(void)
 
 static void combo_pump(void)
 {
+  // Skip poke_inputs() when control slave is idle (no s_axi activity).
+  // During settle/IRQ pump, the control slave is often idle.
+  bool slave_active = g_rtl->io_s_axi_awvalid || g_rtl->io_s_axi_wvalid ||
+                      g_rtl->io_s_axi_arvalid || g_rtl->io_s_axi_bready ||
+                      g_rtl->io_s_axi_rready;
+  
+  if (!slave_active) {
+    g_slave_idle = true;
+    // Skip poke_inputs() when slave is idle - inputs haven't changed.
+    combo_pump_eval();
+    return;
+  }
+  
+  g_slave_idle = false;
   g_rtl->poke_inputs();
   combo_pump_eval();
 }
