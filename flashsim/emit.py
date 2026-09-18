@@ -2076,7 +2076,7 @@ def _emit_eval_method(
     lines.append(f"  void eval_{name}() {{")
     lines.append(f"    if ({name}__ok == _pg[{part}]) return;")
     for dep in cached_deps(name, assigns, cached, stop):
-        lines.append(_eval_invoke(dep, 4))
+        lines.append(f"    eval_{dep}();")
     for tmp in internal_cone(name, assigns, cached, stop):
         tw = sigs[tmp].width if tmp in sigs else 32
         td = sigs[tmp].depth if tmp in sigs else 0
