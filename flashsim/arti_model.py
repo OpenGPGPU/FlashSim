@@ -639,7 +639,6 @@ static void combo(void)
 
 // Hot path for settle / IRQ pump: the control slave is idle, so skip the
 // s_axi eval cone. Master + IRQ still update every cycle for memoryAXI.
-static unsigned g_hold_boost;
 static bool g_slave_idle = true;
 
 // Hot path for settle / IRQ pump: the control slave is idle, so skip the
