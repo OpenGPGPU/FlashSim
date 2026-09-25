@@ -322,6 +322,21 @@ cd "$SCRIPT_DIR"
 [ -f dut.h ] || { echo "missing dut.h (run flashsim arti-model first)" >&2; exit 1; }
 [ -f arti_rtl_model.cpp ] || { echo "missing arti_rtl_model.cpp" >&2; exit 1; }
 
+# Prefer ccache compiler wrappers when present (Homebrew libexec or Linux
+# distro /usr/lib/ccache). Keeps the plain `c++` invocations below cached.
+for _ccache_libexec in \
+    /opt/homebrew/opt/ccache/libexec \
+    /usr/local/opt/ccache/libexec \
+    /usr/lib/ccache \
+    /usr/lib64/ccache; do
+  if [ -d "$_ccache_libexec" ]; then
+    export PATH="$_ccache_libexec:$PATH"
+    echo "ccache     : $_ccache_libexec"
+    break
+  fi
+done
+unset _ccache_libexec
+
 # Split DUT shards (dut_*.cpp) compile at -O2 in parallel. The thin ARTI
 # wrapper stays -O1-compatible; without shards we keep -O1 on the monolith
 # because clang -O2 never finishes on a ~300MB single TU.
@@ -638,11 +653,7 @@ static void combo(void)
 }
 
 // Hot path for settle / IRQ pump: the control slave is idle, so skip the
-// s_axi eval cone. Master + IRQ still update every cycle for memoryAXI.
-static bool g_slave_idle = true;
-
-// Hot path for settle / IRQ pump: the control slave is idle, so skip the
-// s_axi eval cone. Master + IRQ still update every cycle for memoryAXI.
+// s_axi eval cone. Master + IRQ still update every cycle for memory AXI.
 static void combo_pump_eval(void)
 {
   combo_master();
@@ -651,20 +662,11 @@ static void combo_pump_eval(void)
 
 static void combo_pump(void)
 {
-  // Skip poke_inputs() when control slave is idle (no s_axi activity).
-  // During settle/IRQ pump, the control slave is often idle.
-  bool slave_active = g_rtl->io_s_axi_awvalid || g_rtl->io_s_axi_wvalid ||
-                      g_rtl->io_s_axi_arvalid || g_rtl->io_s_axi_bready ||
-                      g_rtl->io_s_axi_rready;
-  
-  if (!slave_active) {
-    g_slave_idle = true;
-    // Skip poke_inputs() when slave is idle - inputs haven't changed.
-    combo_pump_eval();
-    return;
-  }
-  
-  g_slave_idle = false;
+  // mem_drive() always runs immediately before this and may change m_axi_*
+  // ready/valid inputs. Always poke so the DUT sees those updates even when
+  // the control slave is idle. Skipping poke here left write-through depth
+  // stores invisible to the next DEPTH_LOAD submission under FlashSim while
+  // Verilator (always-poke eval) passed.
   g_rtl->poke_inputs();
   combo_pump_eval();
 }
