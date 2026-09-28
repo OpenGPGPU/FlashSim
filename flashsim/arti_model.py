@@ -357,8 +357,13 @@ if ((${#SHARDS[@]} > 0)); then
   # or clang hangs for tens of minutes at 0% CPU on arti_rtl_model.cpp.
   # (Tiny in-header evals are capped via _SPLIT_INLINE_MAX_BYTES so dut_0's
   # tick_nba still finishes under -O2.)
-  # dut_commit.cpp holds the dirty-list switch (~2MB); clang -O1/-O2 can take
-  # hours on it, so compile that TU at -O0.
+  # dut_commit.cpp holds the dirty-list switch (~3MB for a 707-page top), so it
+  # stays at -O0 to keep that one TU's compile time bounded. It is NOT the
+  # reason the active settle rate is low: -O1 there compiles in 1m52s and
+  # measures neutral, because the dirty list runs ~6 entries wide on a live
+  # design and the switch is never entered deeply. If you are chasing a slow
+  # active settle, look at the page-gate pruning in tick_nba (707 pages, ~453
+  # re-evaluating per quiescent cycle), not at this -O0.
   for src in "${SHARDS[@]}"; do
     obj="${src%.cpp}.o"
     OBJS+=("$obj")
