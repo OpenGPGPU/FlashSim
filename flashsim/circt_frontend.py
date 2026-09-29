@@ -462,11 +462,25 @@ def _rename_stmt(stmt, rename: dict[str, str]):
     raise TypeError(stmt)
 
 
+def _is_assertion_only(path: Path) -> bool:
+    """Assertion-binding modules, not design logic.
+
+    The gpu build drops a `<Module>_Verification_Assert.sv` beside each
+    elaborated module. They only contain `bind`-style hierarchical references
+    (`SomeModule.io_...`), so circt-verilog cannot resolve them without the
+    whole design and Verilator's build never passes them either. Some output
+    trees include them (63 in arti-work/.../generated/rtl) and some do not, so
+    filter rather than rely on the caller.
+    """
+    return path.name.endswith("_Verification_Assert.sv")
+
+
 def verilog_sources(path: Path) -> list[Path]:
     """Synthesizable SystemVerilog for `path`.
 
     Prefer a sibling `filelist.f` (the Chisel emit list). Otherwise take
-    `*.sv` next to the top. Skip `verification/` layers in both cases.
+    `*.sv` next to the top. Skip `verification/` layers and assertion-only
+    modules in both cases.
     """
     path = path.resolve()
     listed = path.parent / "filelist.f"
@@ -482,6 +496,8 @@ def verilog_sources(path: Path) -> list[Path]:
             candidate = (path.parent / line).resolve()
             if not candidate.is_file() or candidate in seen:
                 continue
+            if _is_assertion_only(candidate):
+                continue
             seen.add(candidate)
             files.append(candidate)
         if path not in seen and path.is_file():
@@ -489,7 +505,9 @@ def verilog_sources(path: Path) -> list[Path]:
         if files:
             return files
     files = sorted(
-        p for p in path.parent.glob("*.sv") if p.is_file() and p.name != "filelist.f"
+        p
+        for p in path.parent.glob("*.sv")
+        if p.is_file() and p.name != "filelist.f" and not _is_assertion_only(p)
     )
     return files if files else [path]
 
