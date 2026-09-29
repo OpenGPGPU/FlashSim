@@ -25,11 +25,14 @@ def compile_verilog(
     if kind == "circt":
         if path is None:
             raise CirctError("CIRCT frontend needs a Verilog file path")
-        if mlir_path is None or not _mlir_fresh(mlir_path, path):
+        if mlir_path is None or not (
+            _mlir_fresh(mlir_path, path) and _mlir_matches(mlir_path, path)
+        ):
             mlir = circt_verilog_to_mlir(path)
             if mlir_path is not None:
                 mlir_path.parent.mkdir(parents=True, exist_ok=True)
                 mlir_path.write_text(mlir)
+                mlir_path.with_suffix(".mlir.top").write_text(path.stem)
         else:
             mlir = mlir_path.read_text()
         mod = parse_hw_mlir(mlir, top=path.stem)
@@ -83,3 +86,21 @@ def _resolve_frontend(frontend: str) -> str:
     if frontend not in {"circt", "native"}:
         raise ValueError(f"unknown frontend {frontend}")
     return frontend
+
+
+def _mlir_matches(mlir_path: Path, verilog: Path) -> bool:
+    """Whether the cached MLIR was produced from *this* Verilog top.
+
+    Freshness by mtime alone is not enough: the cache lives in the output
+    directory, so compiling a second design into a directory that already
+    holds a cache finds every source older than the cache and silently reuses
+    the wrong design — the emitter then compiles the previous DUT. The top
+    name is recorded in a sidecar rather than scanned for in the MLIR, because
+    CIRCT emits submodules first and the top can sit megabytes into the file.
+    A cache with no sidecar predates this check and is treated as stale, so
+    the next run regenerates it once and every run after that reuses it.
+    """
+    try:
+        return mlir_path.with_suffix(".mlir.top").read_text().strip() == verilog.stem
+    except OSError:
+        return False

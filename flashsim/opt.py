@@ -100,8 +100,13 @@ def optimize(mod: Module) -> Module:
     for wr in mem_writes:
         referred |= expr_ids(wr.addr) | expr_ids(wr.data) | expr_ids(wr.enable)
         referred.add(wr.mem)
+    # Sorted, not set order: `keep | referred` is a set union, so iterating it
+    # directly makes the signal order (and therefore the generated struct
+    # layout) depend on PYTHONHASHSEED. Two runs on the same input then emit
+    # different C++, which guarantees a ccache miss on every 280 MB ARTI
+    # rebuild and makes a binary unreproducible from source.
     new_sigs: dict[str, Signal] = {
-        n: sigs[n] for n in (keep | referred) if n in sigs
+        n: sigs[n] for n in sorted(keep | referred) if n in sigs
     }
     for name, expr in assigns.items():
         if name in new_sigs:

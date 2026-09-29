@@ -1,7 +1,34 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
+
+
+def _hot() -> bool:
+    """FLASHSIM_HOT=1 turns the GPU benches into sustained-activity benches.
+
+    The stock GPU stimulus launches one kernel and then leaves the DUT idle for
+    the rest of the run, which is what the activity-skipping speedup numbers
+    are measured on — it says nothing about the cost of a cycle when the GPU
+    is actually working, and that is the regime the ARTI raster/scanout path
+    lives in. Hot mode keeps resubmitting the same kernel so the command
+    processor, CU, frontend and L2 stay busy for every measured cycle.
+
+    The stimulus stays a pure function of `i`, so the Verilator byte-diff
+    still applies and a hot run is correctness-checked exactly like a cold one.
+    """
+    return os.environ.get("FLASHSIM_HOT") == "1"
+
+
+def _kernel_window() -> str:
+    """Command-valid window: one-shot for the cold bench, continuous if hot."""
+    if _hot():
+        # Hold valid high after warmup. The command processor's own ready
+        # decides what is accepted, so this saturates its input; the payload is
+        # constant, so the stream stays a pure function of `i`.
+        return "((i >= 8))"
+    return "((i >= 8) && (i < 40))"
 
 
 @dataclass(frozen=True)
@@ -798,8 +825,9 @@ def _frontend_scalar_io() -> BenchIO:
 
 def _gpu_io() -> BenchIO:
     # One workgroup / one warp. Mixed IMEM: addi x1, x1, 1 then fadd.s f3, f1, f2.
-    # Finish the resident warp after the burst so 1e6-cycle perf is mostly idle.
-    kernel = "((i >= 8) && (i < 40))"
+    # Finish the resident warp after the burst so 1e6-cycle perf is mostly idle
+    # (FLASHSIM_HOT=1 keeps resubmitting instead; see _hot).
+    kernel = _kernel_window()
     init_f1 = "((i >= 6) && (i < 7))"
     init_f2 = "((i >= 7) && (i < 8))"
     init_f = f"({init_f1} || {init_f2})"
@@ -902,8 +930,9 @@ def _gpu_host_axi_io() -> BenchIO:
 def _gpu_system_io() -> BenchIO:
     # One CU behind L2. IMEM line is addi, fadd.s, cease so the kernel finishes
     # and the 1e6-cycle run is mostly idle. DRAM responses are delayed one
-    # cycle and echo the interconnect transaction id.
-    kernel = "((i >= 8) && (i < 40))"
+    # cycle and echo the interconnect transaction id. FLASHSIM_HOT=1 resubmits
+    # the kernel for the whole run; see _hot.
+    kernel = _kernel_window()
     base = _fields_io(
         [
             ("reset", 1, "(uint8_t)(i < 4)"),

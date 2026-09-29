@@ -85,9 +85,15 @@ def _run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess
 
 
 def verilator_thread_count() -> int:
-    """Typical standalone Verilator setting. More than 4 often slows this GPU."""
-    n = os.cpu_count() or 1
-    return max(1, min(4, n))
+    """Eval-region target for the Verilator reference build.
+
+    This is a *codegen* knob, not a runtime thread count: Verilator picks its
+    own pool size at runtime (`VerilatedContext::m_threads =
+    getProcessDefaultParallelism()`), so `--threads N` here only controls how
+    the model is partitioned. It must match what the ARTI build requests, or
+    the "vs N T" column compares against a configuration nobody runs.
+    """
+    return 8
 
 
 def _need(name: str) -> str:

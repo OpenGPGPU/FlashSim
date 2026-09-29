@@ -134,8 +134,25 @@ def signal_map(mod: Module) -> dict[str, Signal]:
     return mod.signals
 
 
-def expr_ids(expr: Expr) -> set[str]:
-    return set(expr_id_counts(expr))
+class IdSet(set):
+    """A set of signal names that iterates in a canonical (sorted) order.
+
+    Plain `set` iteration over strings follows PYTHONHASHSEED, and the order
+    leaks into the emitted C++: dep lists drive the order of `eval_*` calls
+    inside a method and the order of struct fields. Two runs on identical
+    input then produce different C++, which guarantees a ccache miss on every
+    ARTI rebuild and makes a binary unreproducible from source. Sorting here
+    fixes every current and future call site at once; set semantics are
+    unchanged. Note that set *operators* return a plain `set`, so callers that
+    combine two IdSets and then iterate still need their own `sorted(...)`.
+    """
+
+    def __iter__(self):
+        return iter(sorted(set.__iter__(self)))
+
+
+def expr_ids(expr: Expr) -> IdSet:
+    return IdSet(expr_id_counts(expr))
 
 
 def expr_id_counts(expr: Expr) -> dict[str, int]:

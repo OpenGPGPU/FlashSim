@@ -54,23 +54,189 @@ claiming a regression — single-run noise is ±1 s.
 Recent GPU emit/opt wins on this path (correctness-checked vs Verilator on
 unit benches):
 
+- **O(dirty) dirty-flag reset** — the write worklist cleared its whole flag
+  array every tick (`memset(_w, 0, 13369)` on `GpuHostSystemAxi`) to consume
+  the one or two slots a live tick actually dirties. Resetting by walking the
+  previous tick's list instead is O(dirty), not O(signals). Measured: idle
+  ARTI path 328 → 175 ns/tick, scanout-active 540 → 426 ns/tick, unit benches
+  +1.32x geomean (Gpu 1.44x, VectorBackend 1.32x, GpuHostAxi 1.33x,
+  GpuSystem 1.18x).
 - **Top-gate demand hoist** — hold entry evals only wires needed by outer
   gates/NBAs; mega coalescer SSA stays inside the arm.
-- **Absorb `v & (…\|v\|…)`** — instruction-cache one-hot gates (~7 KB → ~110 B).
-- **Sibling `&`/`\|` prefix CSE** — L2 long-if spines (12k → 2.5k nodes).
+- **Absorb `v & (…|v|…)`** — instruction-cache one-hot gates (~7 KB → ~110 B).
+- **Sibling `&`/`|` prefix CSE** — L2 long-if spines (12k → 2.5k nodes).
 - **Mux chunk on NBA RHS** — coalescer `readData` is 8×63-deep priority muxes
   inline in holds; split into skip-cached `_dmux` chunks (SPLIT=32 / CHUNK=16)
   so early arms skip later evals.
 
-Tried and **reverted** (no net win on quiet ARTI): cond-ranked mega promote,
-hold-bucket 64, fanout-ranked promote, SETTLE_MIN=128 default, noinline outline
-of coalescer hold arms, global dmux SPLIT=16 / CHUNK=8, Concat-part-only hoist
-of vectorTlb `writeData` 16-deep lanes, heavy-hold isolation by ternary size,
-threading `demanded` through wide/ternary emit (I-cache only), deferring deep
-mux select demands out of `_emit_compute` / Concat entry (noisy win, quiet lose),
-vectorDataCache 32-bucket skip partitions (+1.0 s wall vs dmux baseline),
-L2 SSA shard colocation by `tid%65` (wall tie), L2 `always_inline` (clang -O2 hang),
-vector ALU 32-bucket skip partitions (multiplyAlu/…; +1.0 s wall).
+### Measuring the active phase
+
+The unit benches and the ARTI wall clock are different machines. Every
+speedup number above comes from a stimulus that leaves the GPU idle, and
+holding the command stream open does not change that: `FLASHSIM_HOT=1`
+resubmits the same kernel every cycle and measures 0.99–1.02x cold, because one
+CU running `addi; fadd.s; cease` idles between launches either way. The
+fixed-function scanout is what dominates the ARTI present phase, and it is
+free-running by construction.
+
+`arti_rtl_model_skip_stats()` exposes per-tick skip traffic (ticks, commit
+slots, hold invocations, holds that wrote) so a driver can separate "the commit
+path is expensive" from "the wake set is too wide to skip anything" without
+knowing anything about the design. Driving the scanout registers over the
+model's own MMIO path with it gives, on this machine:
+
+| phase | ns/tick | commit/tick | holds/tick | holds that wrote/tick |
+|---|---|---|---|---|
+| quiescent | 152 | 0.00 | 0.00 | 0.00 |
+| scanout running (64×64) | 385 | 1.00 | 2.00 | 1.00 |
+
+Note the skip kernel is doing its job in the active phase — 2 hold
+invocations and 1 commit per tick while the scanout runs — so the active cost
+is the tick skeleton, not wasted re-evaluation.
+
+### Where the ARTI wall clock is actually lost
+
+Both ARTI backends expose the same C API and were built from the same RTL, so
+linking one driver against each gives a like-for-like per-tick cost. Measured
+on the scanout workload above (`TICKS` advanced exactly, not by timing
+`check_irq`, which advances one tick on the Verilator backend but up to
+`ARTI_MODEL_IRQ_PUMP` on this one):
+
+| workload | FlashSim | Verilator (8 regions) | ratio |
+|---|---|---|---|
+| scanout running | **405 ns/tick** | 11,492 ns/tick | **~28×** |
+| scanout disabled | **153 ns/tick** | 14,737 ns/tick | **~96×** |
+
+The Verilator figure is the ARTI backend built by the normal flow, so it has 8
+compiled eval regions; its runtime pool defaults to all cores
+(`VerilatedContext::m_threads = getProcessDefaultParallelism()`), not to
+`ARTI_VERILATOR_THREADS`, which only affects codegen.
+
+Verilator's cost is flat at ~11.5 µs whether or not the GPU is doing anything,
+because it re-evaluates the whole cone every cycle; FlashSim varies 3× with
+activity. **So the end-to-end ARTI loss is not per-tick cost** — it is the
+number of cycles advanced per host access. One guest MMIO read advances:
+
+| scanout | ticks per MMIO read |
+|---|---|
+| disabled | 258 (settle early-exits at `SETTLE_MIN`) |
+| running | 500,002 (the full `ARTI_MODEL_MMIO_ADVANCE_CYCLES` cap) |
+
+`gpu_active()` was true whenever `_chg != 0`, and a free-running scanout commits
+one state element per tick and issues **zero** AXI traffic, so activity never
+went false and **every** settle burned its full 500k budget. Activity is now
+`axi_busy() || (_chg && tail < ARTI_MODEL_CHG_TAIL)`: externally visible AXI
+traffic keeps a real job alive indefinitely, while state changes get only a
+bounded, per-settle budget to drain. The budget is reset at the start of every
+settle — leaving it global lets it saturate once and starve every later settle,
+silently capping a long AXI-free job at `SETTLE_MIN`.
+
+| ticks advanced per guest MMIO read | before | after |
+|---|---|---|
+| scanout disabled | 258 | 258 (unchanged) |
+| scanout running | 500,002 | **4,114** (122×) |
+
+`ARTI_MODEL_SETTLE_NS` (default 0) additionally bounds one settle in wall-clock
+time, so no activity policy can hold QEMU's BQL for a whole tick cap.
+
+Note what this does and does not buy: it cuts *latency per host read* and the
+per-read tick count, not the total simulated cycles a job needs. Total wall
+clock is still (cycles the job needs) × (ns/tick), so the present phase still
+has to be re-measured end to end before any claim is made about it.
+
+### Where the tick actually goes
+
+Profiling the ARTI model under `sample` (scanout registers driven over MMIO,
+same RTL as the integration build):
+
+| | total samples | `tick_nba` | `host_host_*` evals |
+|---|---|---|---|
+| scanout running | 6614 | 33.3% | **52.3%** |
+| scanout disabled | 6822 | 79.9% | **0.0%** |
+
+The fixed-function cone is `host_host_core_rp_*` (ROP / clipper / texture).
+`skip_partition_key` bucketed it by `host_host` alone, so **91 wires shared one
+generation counter**: every leaf the display path touches invalidated all 91
+`eval_*` methods, every tick. Switch the scanout off and they skip perfectly.
+Splitting that cone by submodule plus a hash bucket takes the largest partition
+from 91 wires to 23, costs 18 extra entries in the per-tick guard walk
+(94 -> 112 partitions), and measured 1.32x on the scanout-active path and 1.73x
+idle — but re-profiling moved `host_host_*` only 52.3% -> 47.6%, so the bucket
+size was a symptom, not the cause. Those wires read a common set of leaves, so
+one scanout state change invalidates every sub-bucket: the cone is genuinely
+recomputing wide pixel work each cycle, and the lever there is the code the
+compiler sees, not the invalidation granularity.
+
+### Attributing the tick skeleton
+
+`tick_nba` is 33% of a scanout-active tick and 80% of an idle one. Rebuilt one
+shard with line tables and re-profiled; the self time resolves to:
+
+| share of tick_nba | what |
+|---|---|
+| 15.6% | the hold dispatch scan: `for (w = 0; w < 70u; w++) bits = _h_need[w] \| _h_busy[w];` — every word, every tick, for a design that dispatches ~0.8 holds per tick |
+| ~7% | guarded eval sites `if (X__ok != _pg[p]) eval_X();` |
+| 4.7% | `if (__we0 \| __we1 \| ... \| __we108)` — a 109-way OR of mem-write enables, evaluated unconditionally before knowing whether any write can fire |
+| 2.2% | `_commit()` |
+| 0.6% | the O(dirty) dirty-flag reset |
+
+The dispatch scan is now a summary-of-words bitmap (`_h_any`, one bit per hold
+word), so the loop runs `ceil(nw/64)` iterations — 2 instead of 70 — and a word
+is only touched when awake. Measured 1.13x idle, 1.05x scanout-active.
+
+That change also exposed a gap in the test suite worth recording: the 14-bench
+Verilator byte-diff **passed 14/14 on a build where the inline wake path
+updated `_h_need` without arming `_h_any`** — every hold woken through a set of
+at most `_BUMP_INLINE` holds simply never ran, and the ARTI scanout reported
+inactive. The unit benches never wake a hold that way. `test_emit_wake.py` now
+asserts the invariant directly (and the assertion is checked to fail when the
+fix is removed).
+
+Tried and **reverted** (no net win, measured not guessed):
+
+- **Guard-homogeneous hold fusion.** Buckets are split by write partition but
+  woken by guard partition, and on `GpuHostSystemAxi` 4334 hold methods share
+  only 742 guard signatures (one signature is shared by 1024 methods), so
+  fusing them cut the method count to 1432 and the wake-edge count 3.3x — and
+  measured 0.97x geomean over 15 interleaved rounds (Gpu 0.93x, GpuSystem
+  1.04x, GpuHostAxi 0.91x, VectorBackend 0.99x). Waking one statement then
+  re-runs its whole fused bucket, and that coarser granularity costs more than
+  the saved calls. The mismatch is real; a coarser bucket is the wrong lever.
+- **Packed 64-bit word wake masks** (`FLASHSIM_WAKE_PACK`, off by default) —
+  3.5x fewer wake-construction ops, measured 1.003x geomean, because commit
+  only runs ~1 slot per tick so the whole path is under 1% of a cycle.
+- **`-O2` for `dut_commit.cpp`** — `-O1`/`-O2` there compile in 50/70s, not
+  "hours", so the stated rationale for the `-O0` is wrong. But it is measured
+  neutral: commit runs 0.67 slots/tick on a live design. The `-O0` stays.
+- cond-ranked mega promote, hold-bucket 64, fanout-ranked promote, SETTLE_MIN=128 default, noinline outline
+  of coalescer hold arms, global dmux SPLIT=16 / CHUNK=8, Concat-part-only hoist
+  of vectorTlb `writeData` 16-deep lanes, heavy-hold isolation by ternary size,
+  threading `demanded` through wide/ternary emit (I-cache only), deferring deep
+  mux select demands out of `_emit_compute` / Concat entry (noisy win, quiet lose),
+  vectorDataCache 32-bucket skip partitions (+1.0 s wall vs dmux baseline),
+  L2 SSA shard colocation by `tid%65` (wall tie), L2 `always_inline` (clang -O2 hang),
+  vector ALU 32-bucket skip partitions (multiplyAlu/…; +1.0 s wall).
+
+### Reproducible builds
+
+The emitter used to be **non-deterministic**: two runs on identical input
+produced C++ differing by ~64k lines, because set iteration over strings
+follows `PYTHONHASHSEED` and that order reached the output through the signal
+dict, the SSA-promotion caps, the deep-mux chunk budget, the invalidation
+table indices and `eval_*` emission order. That guarantees a ccache miss on
+every ARTI rebuild and makes a binary unreproducible from source. Fixed at the
+sources (`IdSet` in `ir.py` iterates sorted; explicit `sorted()` at the cap and
+index sites); `Gpu` and `GpuSystem` are now byte-identical across
+`PYTHONHASHSEED=0/999/4242`. Cost of the fix: 0.994x geomean on unit benches,
+with `GpuHostAxi` 0.949x because the promotion cap now breaks ties by name
+instead of arbitrarily.
+
+`hw.mlir` is cached in the *output directory* and freshness was judged by
+source mtime alone, so compiling a second design into a directory that already
+had a cache found every source older than the cache and silently reused the
+wrong design. It is now keyed on the top module via a `hw.mlir.top` sidecar
+(`compile.py:_mlir_matches`).
+
 
 ## Setup
 
@@ -172,6 +338,19 @@ cycles). GPU rows include vs 4-thread Verilator:
 | Gpu | **87×** | | closed CU; idle after warp finish |
 | GpuSystem | **77×** | **364×** | 1 CU + L2 + DMA; FS ~5.5 MHz vs 1T 0.07 / 4T 0.015 MHz |
 | GpuHostAxi | **17×** | **144×** | AXI ID read, then idle; FS ~32 MHz vs 1T 1.8 / 4T 0.22 MHz |
+
+Those 2026-09-17 numbers predate the O(dirty) dirty-flag reset. Re-measured
+2026-09-28 on the same benches (6 stages × 4 mix rounds, so absolute MHz is not
+comparable run-to-run — use the A/B ratios in "Recent GPU emit/opt wins"):
+
+| bench | vs vlt 1T | vs vlt 4T |
+|---|---|---|
+| GpuFrontend | **1.28×** | 15.6× |
+| InstructionCache | **1.07×** | 12.7× |
+| VectorBackend | **38.0×** | 61.9× |
+| Gpu | **94.7×** | 62.3× |
+| GpuSystem | **56.2×** | 67.4× |
+| GpuHostAxi | **20.4×** | 230.9× |
 
 ```bash
 python3 -m flashsim compile build/benches/counter.v -o /tmp/counter.h

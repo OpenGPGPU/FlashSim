@@ -156,6 +156,41 @@ def test_stmt_bucket_key_prefers_write_partition() -> None:
     assert "sharedCachePort" not in key
 
 
+def test_wide_wake_sets_use_word_masks() -> None:
+    """A set wider than the `_h_need` word count must pack, not set bits."""
+    from flashsim.emit import _hold_wake_packed
+
+    nw = 68
+    wide = {"leaf": list(range(2000))}
+    packed = _hold_wake_packed(wide, nw)
+    assert list(packed) == [tuple(range(2000))]
+    # Narrower than one word per element: a bit list is already cheaper.
+    assert _hold_wake_packed({"leaf": list(range(40))}, nw) == {}
+    # At the boundary, packing only pays once fanout exceeds the word count.
+    assert _hold_wake_packed({"leaf": list(range(nw))}, nw) == {}
+    assert _hold_wake_packed({"leaf": list(range(nw + 1))}, nw)
+
+
+def test_packed_wake_mask_covers_exactly_the_woken_holds() -> None:
+    """The generated word mask must be the bit-set of the id list, no wider.
+
+    A mask with a stray bit set wakes a hold whose inputs did not change; a
+    missing bit strands sequential state. Both are silent, so compare the
+    reconstructed mask against the id list.
+    """
+    from flashsim.emit import _hold_wake_packed
+
+    nw = 4
+    holds = (0, 1, 63, 64, 130, 255)
+    assert list(_hold_wake_packed({"leaf": list(holds)}, nw)) == [holds]
+    mask = [0] * nw
+    for k in holds:
+        mask[k >> 6] |= 1 << (k & 63)
+    assert mask == [0x8000000000000003, 0x1, 0x4, 0x8000000000000000]
+    # Every woken hold id is recoverable from the mask alone.
+    assert [w * 64 + b for w in range(nw) for b in range(64) if mask[w] >> b & 1] == list(holds)
+
+
 def test_promote_large_gpu_ssa() -> None:
     from flashsim.emit import _expr_node_count, _promote_large_gpu_ssa
     from flashsim.ir import BinOp, Const, Id
@@ -458,3 +493,45 @@ if __name__ == "__main__":
     test_mem_write_enable_gates_data_evals()
     test_bump_sig_stable_for_commit_batching()
     print("ok")
+
+
+def test_every_hold_wake_arms_the_summary_word() -> None:
+    """Every emitted `_h_need` set must also arm `_h_any`.
+
+    The dispatch loop walks `_h_any` (one bit per hold word) instead of
+    scanning `_h_need` directly, so a site that sets `_h_need` on its own leaves
+    the hold asleep forever. This was a real bug: the inline path for small
+    wake sets (at most `_BUMP_INLINE` holds) updated only `_h_need`, and the
+    14-bench Verilator byte-diff still passed 14/14 -- the unit benches never
+    woke a hold through that path. Only driving the ARTI scanout over MMIO
+    exposed it (the engine reported inactive).
+    """
+    import flashsim.emit as emit
+
+    emit._HOLD_WAKE_TABLES = {}
+    emit._HOLD_WAKE_PACKED = {}
+    emit._WAKE_PACK_WORDS = 64
+
+    def arms_all(lines: list[str]) -> bool:
+        need = [ln for ln in lines if "_h_need[" in ln]
+        any_ = [ln for ln in lines if "_h_any[" in ln]
+        return len(need) == len(any_)
+
+    # Inline path: a handful of hold ids, one per 64-bit word.
+    lines: list[str] = []
+    emit._emit_bump_sig((), (0, 1, 63, 64, 130), {}, lines, 4)
+    assert lines, "no inline wake emitted"
+    assert arms_all(lines), lines
+
+    # Packed word-mask path.
+    emit._HOLD_WAKE_PACKED = {(0,) * 65: 0}
+    lines = []
+    emit._emit_bump_sig((), (0,) * 65, {}, lines, 4)
+    assert any("fs_wake_mask(_h_need, _h_any," in ln for ln in lines), lines
+
+    # Bit-list path.
+    emit._HOLD_WAKE_PACKED = {}
+    emit._HOLD_WAKE_TABLES = {tuple(range(10)): 0}
+    lines = []
+    emit._emit_bump_sig((), tuple(range(10)), {}, lines, 4)
+    assert any("fs_wake(_h_need, _h_any," in ln for ln in lines), lines

@@ -32,6 +32,19 @@ typedef int (*arti_mem_read_cb)(uint64_t addr, uint8_t *data, unsigned size, uin
 typedef int (*arti_mem_write_cb)(uint64_t addr, const uint8_t *data, unsigned size, uint64_t byte_mask, uint64_t transaction_id);
 void arti_rtl_model_set_memory_callbacks(arti_mem_read_cb read_cb, arti_mem_write_cb write_cb);
 int arti_rtl_model_check_irq(unsigned index);
+// Advance exactly `n` posedges with the same per-tick work a settle does.
+// Exists so a benchmark can drive a fixed tick count: `check_irq` advances one
+// tick on the Verilator backend but up to ARTI_MODEL_IRQ_PUMP on this one, so
+// timing "one call" on each measures different amounts of simulation. QEMU
+// never calls this.
+void arti_rtl_model_tick_n(unsigned n);
+// Skip-kernel traffic, read without stopping the model. Lets a driver time a
+// specific phase (e.g. the free-running scanout) and see commit slots per tick
+// and hold invocations per tick, which is what separates "the commit path is
+// expensive" from "the wake set is too wide to skip anything". Design
+// independent; the pointers may be NULL.
+void arti_rtl_model_skip_stats(uint64_t *ticks, uint64_t *commits,
+                               uint64_t *holds, uint64_t *holds_wrote);
 #ifdef __cplusplus
 }
 #endif
@@ -458,20 +471,45 @@ static constexpr unsigned M_AXI_BYTES = 8;
 #ifndef ARTI_MODEL_HOLD_BOOST
 #define ARTI_MODEL_HOLD_BOOST 0
 #endif
+#ifndef ARTI_MODEL_CHG_TAIL
+// Ticks of continued state change that still count as "busy" after the last
+// externally visible event. This is what stops a free-running display counter
+// (one state commit per tick, zero AXI traffic) from pinning every MMIO settle
+// at the full tick cap. Raise it if a job that finishes entirely inside the
+// DUT ever needs more than this to drain; the guest still makes progress in
+// slices either way, because each poll advances a fresh settle.
+#define ARTI_MODEL_CHG_TAIL 4096
+#endif
+#ifndef ARTI_MODEL_SETTLE_NS
+// Wall-clock ceiling on one MMIO settle, 0 = only the tick cap applies. Keeps a
+// never-quiescing design from pinning QEMU's BQL for the whole tick budget on
+// every guest register access.
+#define ARTI_MODEL_SETTLE_NS 0
+#endif
 
 // Optional: ARTI_MODEL_STATS=1 prints settle/irq-pump tick and activity counts
 // so business-path A/B can separate "cycles advanced" from "wall time".
+// ARTI_MODEL_STATS=2 additionally drops the print throttle, which is what you
+// want when reading per-tick skip traffic off a real workload: the throttled
+// samples miss whole phases (e.g. the raster/scanout burst) entirely.
 static uint64_t g_stat_ticks;
 static uint64_t g_stat_active_ticks;
 static uint64_t g_stat_settles;
 static uint64_t g_stat_irq_pumps;
 
-static int stats_enabled(void)
+static int stats_level(void)
 {
   static int v = -1;
-  if (v < 0)
-    v = getenv("ARTI_MODEL_STATS") ? 1 : 0;
+  if (v < 0) {
+    const char *e = getenv("ARTI_MODEL_STATS");
+    v = e ? (int)strtol(e, nullptr, 0) : 0;
+  }
   return v;
+}
+
+static int stats_enabled(void)
+{
+  return stats_level() > 0;
 }
 
 static void stats_report(const char *why)
@@ -483,16 +521,30 @@ static void stats_report(const char *why)
   static uint64_t last_ticks;
   static unsigned calls;
   calls++;
-  if ((calls & 255u) != 0 && g_stat_ticks - last_ticks < 50000ull)
+  if (stats_level() < 2 &&
+      (calls & 255u) != 0 && g_stat_ticks - last_ticks < 50000ull)
     return;
   last_ticks = g_stat_ticks;
+  // Skip-kernel traffic per tick: commit slots and hold invocations separate
+  // "the commit/bump path costs too much" from "the wake set is too wide to
+  // skip anything". Both are cumulative and design-independent.
+  const uint64_t nt = g_rtl ? g_rtl->_nt : 0;
+  const uint64_t cc = g_rtl ? g_rtl->_cc : 0;
+  const uint64_t hc = g_rtl ? g_rtl->_hc : 0;
+  const uint64_t hb = g_rtl ? g_rtl->_hb : 0;
   fprintf(stderr,
-          "[artistats] %s ticks=%llu active=%llu settles=%llu irq_pumps=%llu\n",
+          "[artistats] %s ticks=%llu active=%llu settles=%llu irq_pumps=%llu "
+          "cmt=%llu holds=%llu wrote=%llu per_tick=%.2f/%.2f/%.2f\n",
           why,
           (unsigned long long)g_stat_ticks,
           (unsigned long long)g_stat_active_ticks,
           (unsigned long long)g_stat_settles,
-          (unsigned long long)g_stat_irq_pumps);
+          (unsigned long long)g_stat_irq_pumps,
+          (unsigned long long)cc, (unsigned long long)hc,
+          (unsigned long long)hb,
+          nt ? (double)cc / (double)nt : 0.0,
+          nt ? (double)hc / (double)nt : 0.0,
+          nt ? (double)hb / (double)nt : 0.0);
 }
 
 static unsigned env_u(const char *name, unsigned defv)
@@ -530,6 +582,29 @@ static unsigned mmio_advance(void)
   static int once;
   if (!once) {
     v = env_u("ARTI_MODEL_MMIO_ADVANCE", ARTI_MODEL_MMIO_ADVANCE_CYCLES);
+    once = 1;
+  }
+  return v;
+}
+
+static unsigned chg_tail(void)
+{
+  static unsigned v;
+  static int once;
+  if (!once) {
+    v = env_u("ARTI_MODEL_CHG_TAIL", ARTI_MODEL_CHG_TAIL);
+    once = 1;
+  }
+  return v;
+}
+
+static long settle_ns(void)
+{
+  static long v;
+  static int once;
+  if (!once) {
+    const char *e = getenv("ARTI_MODEL_SETTLE_NS");
+    v = e ? strtol(e, nullptr, 0) : ARTI_MODEL_SETTLE_NS;
     once = 1;
   }
   return v;
@@ -760,6 +835,10 @@ static void mem_capture(void)
 }
 
 static unsigned g_hold_boost;
+// Budget, in ticks, that state changes may spend keeping the model "busy"
+// after the last externally visible event. Refilled by any AXI beat. See
+// gpu_active().
+static unsigned g_chg_tail;
 
 // Busy detection is design-independent: the DUT is live while it still
 // changes state (FlashSim's _chg counts state elements written last tick) or
@@ -767,15 +846,33 @@ static unsigned g_hold_boost;
 // DUT-internal instance path is referenced, so GPU RTL changes cannot break
 // it. The hold boost is deliberately not counted as busy: making it busy
 // pins every settle to its full tick budget.
-static int gpu_active(void)
+// Externally visible work in flight: AXI traffic on either side of the
+// boundary. Design independent — no DUT register or instance name is touched.
+static int axi_busy(void)
 {
-  if (g_rtl->_chg)
-    return 1;
   if (g_aw_active || !g_wbeats.empty() || !g_bresp.empty() || !g_rresp.empty())
     return 1;
-  if (g_rtl->io_m_axi_arvalid || g_rtl->io_m_axi_awvalid || g_rtl->io_m_axi_wvalid)
+  return g_rtl->io_m_axi_arvalid || g_rtl->io_m_axi_awvalid ||
+         g_rtl->io_m_axi_wvalid;
+}
+
+static int gpu_active(void)
+{
+  if (axi_busy())
     return 1;
-  return 0;
+  // `_chg` on its own means "a flop moved", not "the GPU owes us work". A
+  // free-running scanout commits one state element per tick and issues no AXI
+  // traffic at all, so treating it as busy pinned every settle at the full
+  // MMIO_ADVANCE cap: measured 500002 ticks per guest MMIO read with the
+  // scanout running versus 258 with it off, a 1940x penalty per host read that
+  // the guest's vblank polling loop then pays thousands of times. Let state
+  // changes hold the model open only for a bounded tail after the last
+  // externally visible event (AXI beat, master valid), so a job still drains
+  // but a free-running counter cannot.
+  // Both conditions matter. Without the tail a free-running counter pins every
+  // settle at the cap; without the `_chg` term a model that has simply gone
+  // quiet would still burn its whole tail before the idle grace could fire.
+  return g_rtl->_chg != 0 && g_chg_tail < chg_tail();
 }
 
 // Safety net for skip-eval wake edges: for a bounded number of ticks after
@@ -791,6 +888,11 @@ static void force_hold_boost(void)
       (unsigned)(sizeof(g_rtl->_h_busy) / sizeof(g_rtl->_h_busy[0]));
   for (unsigned i = 0; i < n; i++)
     g_rtl->_h_busy[i] = ~0ull;
+  // The dispatch loop walks _h_any (one bit per hold word), so force-busting
+  // _h_busy alone would leave every hold asleep.
+  const unsigned na = (unsigned)(sizeof(g_rtl->_h_any) / sizeof(g_rtl->_h_any[0]));
+  for (unsigned i = 0; i < na; i++)
+    g_rtl->_h_any[i] = ~0ull;
   const unsigned np =
       (unsigned)(sizeof(g_rtl->_pg) / sizeof(g_rtl->_pg[0]));
   for (unsigned i = 0; i < np; i++)
@@ -818,6 +920,16 @@ static void tick_with(void (*combo_fn)(void), void (*eval_fn)(void))
     g_bresp.pop_front();
   if (r_fire && !g_rresp.empty())
     g_rresp.pop_front();
+  {
+    // The tail counts down ticks with no externally visible event. It must
+    // advance on every such tick, not only while `_chg` is set: gating it on
+    // `_chg` makes the limit unreachable exactly when the design goes quiet,
+    // which is when the settle most needs to exit.
+    if (axi_busy())
+      g_chg_tail = 0;
+    else if (g_chg_tail < chg_tail())
+      g_chg_tail++;
+  }
   if (gpu_active()) {
     g_arti_idle = 0;
     g_stat_active_ticks++;
@@ -843,6 +955,11 @@ static void arti_model_settle(void)
   if (g_arti_debug < 0)
     g_arti_debug = getenv("ARTI_MODEL_DEBUG") ? 1 : 0;
   g_arti_idle = 0;
+  // The `_chg` budget is scoped to one settle: "may I keep pumping?" is a
+  // question about this burst, so every settle starts with a full budget.
+  // Leaving it global lets it saturate during the first burst and then starve
+  // every later one, which silently caps a long AXI-free job at SETTLE_MIN.
+  g_chg_tail = 0;
   g_hold_boost = hold_boost_ticks();
   unsigned i;
   g_stat_settles++;
@@ -850,10 +967,24 @@ static void arti_model_settle(void)
   // would abort UCMD_SUBMIT/doorbell before fill/draw FSMs go live.
   // Completion is visible once gpu_active() drops and idle grace expires;
   // QEMU samples the pin after MMIO and on the IRQ poll timer.
+  const long ns_budget = settle_ns();
+  struct timespec s0, s1;
+  if (ns_budget > 0)
+    clock_gettime(CLOCK_MONOTONIC, &s0);
   for (i = 0; i < mmio_advance(); i++) {
     tick_pump();
     if (i + 1 >= settle_min() && g_arti_idle > idle_grace())
       break;
+    // Wall-clock bound, independent of the activity policy. A pathological
+    // design that never quiesces would otherwise hold QEMU's BQL for the whole
+    // tick cap on every MMIO access.
+    if (ns_budget > 0 && (i & 0x3fu) == 0x3fu) {
+      clock_gettime(CLOCK_MONOTONIC, &s1);
+      const long ns = (s1.tv_sec - s0.tv_sec) * 1000000000L +
+                      (s1.tv_nsec - s0.tv_nsec);
+      if (ns > ns_budget)
+        break;
+    }
   }
   if (g_arti_debug)
     fprintf(stderr,
@@ -870,6 +1001,7 @@ extern "C" void arti_rtl_model_init(void)
   if (g_rtl)
     return;
   g_rtl = new GpuHostSystemAxiDut();
+  g_chg_tail = 0;
   idle_slave();
   mem_drive();
   g_rtl->io_s_axi_aresetn = 0;
@@ -979,6 +1111,30 @@ extern "C" int arti_rtl_model_read(uint64_t addr, uint64_t *data, unsigned size)
   return 0;
 }
 
+extern "C" void arti_rtl_model_tick_n(unsigned n)
+{
+  if (!g_rtl)
+    return;
+  for (unsigned i = 0; i < n; i++)
+    tick();
+}
+
+extern "C" void arti_rtl_model_skip_stats(uint64_t *ticks, uint64_t *commits,
+                                          uint64_t *holds,
+                                          uint64_t *holds_wrote)
+{
+  if (!g_rtl)
+    return;
+  if (ticks)
+    *ticks = g_rtl->_nt;
+  if (commits)
+    *commits = g_rtl->_cc;
+  if (holds)
+    *holds = g_rtl->_hc;
+  if (holds_wrote)
+    *holds_wrote = g_rtl->_hb;
+}
+
 extern "C" int arti_rtl_model_check_irq(unsigned index)
 {
   if (!g_rtl || index != 0)
@@ -998,6 +1154,7 @@ extern "C" int arti_rtl_model_check_irq(unsigned index)
               cap, g_rtl->_chg, (unsigned)g_rtl->io_m_axi_arvalid,
               (unsigned)g_rtl->io_m_axi_awvalid, g_rresp.size());
     g_hold_boost = hold_boost_ticks();
+    g_chg_tail = 0;  // same scoping as arti_model_settle
     g_stat_irq_pumps++;
     for (unsigned i = 0; i < cap && gpu_active(); i++) {
       tick_pump();

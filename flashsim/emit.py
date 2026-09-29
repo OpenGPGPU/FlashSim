@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
 import sys
 import zlib
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from flashsim.ir import (
     ArrayGet,
@@ -266,7 +267,10 @@ def _promote_bulky_gated_cones(
 
         gather(stmts)
         out: list[str] = []
-        for n in needed:
+        # Sorted: `needed` is a set, and these names are ranked against a
+        # promotion cap below, so set order would make the cap pick a
+        # different subset on every run.
+        for n in sorted(needed):
             if n in cached or not _is_ssa_temp(n) or not _is_gpu_hot_ssa(n):
                 continue
             if _expr_node_count(assigns[n]) < min_nodes:
@@ -329,13 +333,12 @@ def _promote_bulky_gated_cones(
                 raise TypeError(stmt)
 
     walk(body, False)
-    regions.sort(key=lambda rt: rt[0], reverse=True)
+    # Size desc, then name list, so equal-size regions have a stable order.
+    regions.sort(key=lambda rt: (-rt[0], rt[1]))
     added = 0
     for size, temps in regions:
-        # Prefer larger exprs first within a region.
-        ranked = sorted(
-            temps, key=lambda n: _expr_node_count(assigns[n]), reverse=True
-        )
+        # Prefer larger exprs first within a region; name breaks ties.
+        ranked = sorted(temps, key=lambda n: (-_expr_node_count(assigns[n]), n))
         region_cap = (
             _MEGA_REGION_PROMOTE_CAP if size >= _MEGA_GATED_CONE else len(ranked)
         )
@@ -470,7 +473,10 @@ def _extract_deep_mux_chunks(
     budget = [_DEEP_MUX_CAP]
     counter = [0]
     before = budget[0]
-    for name in list(cached):
+    # Sorted, not set order: this loop spends a global chunk budget, so the
+    # set of muxes that get chunked (and the _dmuxN numbering derived from the
+    # visit order) would otherwise depend on PYTHONHASHSEED.
+    for name in sorted(cached):
         if name not in assigns:
             continue
         if not _is_gpu_hot_ssa(name):
@@ -886,6 +892,22 @@ def skip_partition_key(name: str) -> str:
     # scoreboard leaf does not invalidate the whole CU SSA fanout.
     if toks[0] == "computeUnits" and len(toks) >= 4:
         return "_".join(toks[:4])
+    # `host_host_core_rp_*` is the fixed-function ROP / clipper / texture cone —
+    # the scanout engine, and the hottest thing in the ARTI model. Profiling put
+    # 52% of a scanout-active tick inside its 91 `eval_*` methods (0% with the
+    # scanout off), and they all shared one generation counter. Splitting by
+    # submodule + hash bucket takes the largest partition from 91 wires to 23
+    # and measured 1.32x active / 1.73x idle.
+    #
+    # It does NOT explain the cost, though: re-profiling after the split moved
+    # `host_host_*` only 52.3% -> 47.6%. These wires read a common set of
+    # leaves, so one scanout state change still invalidates every sub-bucket.
+    # The cone is genuinely recomputing wide pixel work each cycle; the lever
+    # for that is the code the compiler sees, not the partition granularity.
+    if toks[0] == "host" and len(toks) >= 4 and toks[1:3] == ["host", "core"]:
+        m = re.search(r"_t(\d+)$", name)
+        b = int(m.group(1)) % 16 if m else (zlib.adler32(name.encode()) & 15)
+        return f"host_host_core_{toks[3]}_b{b}"
     if len(toks) >= 3:
         return "_".join(toks[:3])
     return "_".join(toks)
@@ -900,11 +922,11 @@ def _partition_maps(
             key=lambda s: tuple(sorted(s)),
         )
         part_id = {s: i for i, s in enumerate(uniq_sets)}
-        wire_part = {w: part_id[frozenset(wire_deps[w])] for w in cached}
+        wire_part = {w: part_id[frozenset(wire_deps[w])] for w in sorted(cached)}
     else:
         keys = sorted({skip_partition_key(w) for w in cached})
         part_of = {k: i for i, k in enumerate(keys)}
-        wire_part = {w: part_of[skip_partition_key(w)] for w in cached}
+        wire_part = {w: part_of[skip_partition_key(w)] for w in sorted(cached)}
     leaf_parts: dict[str, set[int]] = defaultdict(set)
     for w, deps in wire_deps.items():
         p = wire_part[w]
@@ -914,12 +936,34 @@ def _partition_maps(
 
 
 _BUMP_INLINE = 6
+# Hold wake sets are the widest invalidation edge in a GPU-sized design: a
+# single L2 / host-bridge leaf can be read by a third of all hold groups, so
+# the fanout runs into the thousands. Setting one bit per woken hold is then
+# the widest invalidation edge in the commit path, and a set wider than the
+# 64-bit word count of `_h_need` is cheaper to apply as a precomputed word
+# mask (3.5x fewer ops on GpuHostSystemAxi, and it vectorises).
+#
+# Off by default: it measured dead neutral (1.003x geomean over 15 interleaved
+# rounds) because commit only runs ~0.7 dirty slots per tick on a live design,
+# so the whole wake-construction path is under 1% of a cycle. FLASHSIM_WAKE_PACK=1
+# enables it; worth revisiting on a workload with real state churn, where that
+# term stops being negligible.
+_WAKE_PACK_WORDS = 0  # hold-word count, set by emit_cpp
+_WAKE_PACK_DEFAULT = "0"
+
+
+def _wake_pack_enabled() -> bool:
+    return os.environ.get("FLASHSIM_WAKE_PACK", _WAKE_PACK_DEFAULT) != "0"
 
 
 def _invalidation_tables(leaf_parts: dict[str, list[int]]) -> dict[tuple[int, ...], int]:
+    # Sorted, not insertion order: leaf_parts is discovered by walking a set of
+    # wire names, so its order follows PYTHONHASHSEED. Numbering the tables by
+    # discovery order makes the emitted C++ differ between two runs of the same
+    # input, which defeats ccache and makes a binary unreproducible from source.
     tables: dict[tuple[int, ...], int] = {}
-    for parts in leaf_parts.values():
-        key = tuple(parts)
+    for leaf in sorted(leaf_parts):
+        key = tuple(leaf_parts[leaf])
         if len(key) > _BUMP_INLINE and key not in tables:
             tables[key] = len(tables)
     return tables
@@ -973,11 +1017,27 @@ def _stmt_stop_leaves(
 
 
 def _hold_wake_tables(leaf_holds: dict[str, list[int]]) -> dict[tuple[int, ...], int]:
+    # Sorted for the same reproducibility reason as _invalidation_tables.
     tables: dict[tuple[int, ...], int] = {}
-    for ks in leaf_holds.values():
-        key = tuple(ks)
+    for leaf in sorted(leaf_holds):
+        key = tuple(leaf_holds[leaf])
         if len(key) > _BUMP_INLINE and key not in tables:
             tables[key] = len(tables)
+    return tables
+
+
+def _hold_wake_packed(
+    leaf_holds: dict[str, list[int]], nw: int
+) -> dict[tuple[int, ...], int]:
+    """Wake sets to store as 64-bit word masks instead of bit lists."""
+    if not nw:
+        return {}
+    tables: dict[tuple[int, ...], int] = {}
+    for leaf in sorted(leaf_holds):
+        key = tuple(leaf_holds[leaf])
+        if len(key) <= nw or key in tables:
+            continue
+        tables[key] = len(tables)
     return tables
 
 
@@ -1006,12 +1066,62 @@ def _emit_bump_sig(
     if not holds:
         return
     if len(holds) <= _BUMP_INLINE:
+        # Must arm _h_any as well: the dispatch loop walks the summary, so a
+        # direct _h_need update that skips it leaves the hold asleep forever.
         for k in holds:
             word, bit = k >> 6, k & 63
             lines.append(f"{sp}_h_need[{word}] |= 1ull << {bit};")
+            lines.append(f"{sp}_h_any[{word >> 6}] |= 1ull << {word & 63};")
+        return
+    packed = _HOLD_WAKE_PACKED.get(holds)
+    if packed is not None:
+        lines.append(f"{sp}fs_wake_mask(_h_need, _h_any, _hwm{packed}, {_WAKE_PACK_WORDS}u);")
         return
     i = _HOLD_WAKE_TABLES[holds]
-    lines.append(f"{sp}fs_wake(_h_need, _hw{i}, {len(holds)}u);")
+    lines.append(f"{sp}fs_wake(_h_need, _h_any, _hw{i}, {len(holds)}u);")
+
+
+def _report_wake_locality(
+    name: str,
+    hold_buckets: list[tuple[str, list[Stmt]]],
+    leaf_holds: dict[str, list[int]],
+    wire_part: dict[str, int],
+    leaf_parts: dict[str, list[int]],
+    always_body: list[Stmt],
+) -> None:
+    """FLASHSIM_WAKE_STATS=1: how much of the wake set is cross-partition.
+
+    A hold is bucketed by its write partition, so a leaf in the same partition
+    is a genuine dependency and a leaf in another one is a candidate false
+    edge. On a GPU every slice also reads the shared interconnect and the
+    host bridge, so the candidate share is the thing that decides whether a
+    partition-scoped wake set is worth building.
+    """
+    if not os.environ.get("FLASHSIM_WAKE_STATS"):
+        return
+    wkeys = {_stmt_bucket_key(s) for s in always_body}
+    hold_part = [skip_partition_key(k) for k, _ in hold_buckets]
+    part_id = {k: i for i, k in enumerate(sorted(set(hold_part)))}
+    same = cross = 0
+    per_hold = Counter()
+    for leaf, hs in leaf_holds.items():
+        lp = part_id.get(skip_partition_key(leaf))
+        for h in hs:
+            if lp is None or lp == part_id[hold_part[h]]:
+                same += 1
+            else:
+                cross += 1
+                per_hold[hold_part[h]] += 1
+    tot = same + cross
+    edges = sum(len(v) for v in leaf_holds.values())
+    print(
+        f"[wakestats] {name}: stmts={len(always_body)} leaves={len(leaf_holds)} "
+        f"distinct-write-keys={len(wkeys)} "
+        f"holds={len(hold_buckets)} wake-edges={edges} "
+        f"same-part={same} ({100.0*same/max(tot,1):.1f}%)"
+    )
+    for k, c in per_hold.most_common(8):
+        print(f"    {k}: {c} cross edges")
 
 
 def _bump_parts(
@@ -1030,12 +1140,12 @@ _WRITE_INDEX: dict[str, int] = {}
 _WRITE_WIDE: set[str] = set()
 _LEAF_HOLDS: dict[str, list[int]] = {}
 _HOLD_WAKE_TABLES: dict[tuple[int, ...], int] = {}
+_HOLD_WAKE_PACKED: dict[tuple[int, ...], int] = {}
 _ARRAY_INDEX: dict[str, int] = {}
 _HOLD_TAKEN = ""
 _LARGE = False
 _LARGE_WRITES = 256
 _HOLD_GROUP = 24
-
 
 def _eval_invoke(name: str, indent: int) -> str:
     sp = " " * indent
@@ -1314,7 +1424,7 @@ def emit_cpp(mod: Module) -> str:
     )
     if always_body is None:
         always_body = mod.always.body
-    wire_deps = {w: cone_leaves(w, assigns, stop) for w in cached}
+    wire_deps = {w: cone_leaves(w, assigns, stop) for w in sorted(cached)}
     wire_part, leaf_parts, nparts = _partition_maps(cached, wire_deps)
     inv_tables = _invalidation_tables(leaf_parts)
     write_flags = [n for n in writes if not sigs[n].depth]
@@ -1327,6 +1437,18 @@ def emit_cpp(mod: Module) -> str:
         # changed since it last ran, re-running it would recommit the value
         # already in the register. Statements with an else arm behave the
         # same way, so they are bucketed too.
+        #
+        # Do NOT also fuse buckets that share a hold-entry *guard* signature.
+        # It looks like a large structural win and is not. On
+        # GpuHostSystemAxi, 4334 hold methods share only 742 guard signatures
+        # and one signature is shared by 1024 methods, so fusing them cut the
+        # method count to 1432 and the wake-edge count 3.3x — and measured
+        # 0.97x geomean over 15 interleaved rounds (Gpu 0.93x, GpuSystem
+        # 1.04x, GpuHostAxi 0.91x, VectorBackend 0.99x). Waking one statement
+        # then re-runs its whole fused bucket, and that coarser granularity
+        # costs more than the saved calls. The mismatch is real and worth
+        # knowing about; it is a dynamic-granularity problem, not a bucketing
+        # one, so a coarser bucket is the wrong lever.
         grouped: dict[str, list[Stmt]] = defaultdict(list)
         for stmt in always_body:
             grouped[_stmt_bucket_key(stmt)].append(stmt)
@@ -1343,16 +1465,24 @@ def emit_cpp(mod: Module) -> str:
                 for leaf in _stmt_stop_leaves(stmt, assigns, stop, wire_deps):
                     holds_map[leaf].add(i)
         leaf_holds = {k: sorted(v) for k, v in holds_map.items()}
+        _report_wake_locality(
+            mod.name, hold_buckets, leaf_holds, wire_part, leaf_parts,
+            always_body,
+        )
     used_inputs = {
         name for name in inputs if name in leaf_parts or name in leaf_holds
     }
     array_writes = [n for n in writes if sigs[n].depth]
-    global _WIRE_PART, _WRITE_INDEX, _WRITE_WIDE, _LEAF_HOLDS, _HOLD_WAKE_TABLES, _ARRAY_INDEX, _HOLD_TAKEN, _LARGE
+    global _WIRE_PART, _WRITE_INDEX, _WRITE_WIDE, _LEAF_HOLDS, _HOLD_WAKE_TABLES, _HOLD_WAKE_PACKED, _ARRAY_INDEX, _HOLD_TAKEN, _LARGE, _WAKE_PACK_WORDS
     _WIRE_PART = wire_part
     _WRITE_INDEX = {n: i for i, n in enumerate(write_flags)} if large else {}
     _WRITE_WIDE = {n for n in write_flags if is_wide(sigs[n].width)} if large else set()
     _LEAF_HOLDS = leaf_holds
     _HOLD_WAKE_TABLES = _hold_wake_tables(leaf_holds)
+    _WAKE_PACK_WORDS = (len(hold_buckets) + 63) // 64 if hold_buckets else 0
+    _HOLD_WAKE_PACKED = (
+        _hold_wake_packed(leaf_holds, _WAKE_PACK_WORDS) if _wake_pack_enabled() else {}
+    )
     _ARRAY_INDEX = {n: i for i, n in enumerate(array_writes)} if large else {}
     _LARGE = large
 
@@ -1548,10 +1678,20 @@ def emit_cpp(mod: Module) -> str:
         "static inline void fs_bump(uint32_t *pg, const uint16_t *ids, unsigned n) {",
         "  for (unsigned i = 0; i < n; i++) pg[ids[i]]++;",
         "}",
-        "static inline void fs_wake(uint64_t *need, const uint16_t *ids, unsigned n) {",
+        "static inline void fs_wake(uint64_t *need, uint64_t *any, const uint16_t *ids,",
+        "                            unsigned n) {",
         "  for (unsigned i = 0; i < n; i++) {",
         "    unsigned k = ids[i];",
         "    need[k >> 6] |= 1ull << (k & 63);",
+        "    any[k >> 12] |= 1ull << ((k >> 6) & 63);",
+        "  }",
+        "}",
+        "static inline void fs_wake_mask(uint64_t *need, uint64_t *any, const uint64_t *m,",
+        "                             unsigned n) {",
+        "  for (unsigned i = 0; i < n; i++) {",
+        "    if (!m[i]) continue;",
+        "    need[i] |= m[i];",
+        "    any[i >> 6] |= 1ull << (i & 63);",
         "  }",
         "}",
     ]
@@ -1561,6 +1701,13 @@ def emit_cpp(mod: Module) -> str:
     for key, idx in sorted(_HOLD_WAKE_TABLES.items(), key=lambda kv: kv[1]):
         inner = ", ".join(str(p) for p in key)
         lines.append(f"static const uint16_t _hw{idx}[] = {{{inner}}};")
+    nwm = _WAKE_PACK_WORDS
+    for key, idx in sorted(_HOLD_WAKE_PACKED.items(), key=lambda kv: kv[1]):
+        mask = [0] * nwm
+        for k in key:
+            mask[k >> 6] |= 1 << (k & 63)
+        words = ", ".join(f"0x{w:016x}ull" for w in mask)
+        lines.append(f"alignas(32) static const uint64_t _hwm{idx}[{nwm}u] = {{{words}}};")
     lines.extend(
         [
         "",
@@ -1606,13 +1753,25 @@ def emit_cpp(mod: Module) -> str:
             nh = len(hold_buckets)
             nw = (nh + 63) // 64
             busy_init = ", ".join("~0ull" for _ in range(nw))
-            lines.append(f"  uint64_t _h_need[{nw}] = {{}};")
+            lines.append(f"  alignas(32) uint64_t _h_need[{nw}] = {{}};")
             lines.append(f"  uint64_t _h_busy[{nw}] = {{{busy_init}}};")
+            # One bit per hold word, so the dispatch loop iterates nsw entries
+            # instead of nw. Arm it wherever a word is made non-empty.
+            nsw = (nw + 63) // 64
+            busy_sw = ", ".join(
+                "~0ull" if (w < nw) else "0ull" for w in range(nsw)
+            )
+            lines.append(f"  uint64_t _h_any[{nsw}] = {{{busy_sw}}};")
     lines.append("  uint8_t __inited = 0;")
     # Design-independent activity signal: how many state elements actually
     # changed in the last tick(). Hosts use it to run a model to quiescence
     # without knowing anything about the design's internals.
     lines.append("  uint32_t _chg = 0;")
+    # Skip-kernel traffic counters. Design-independent and cheap (three
+    # increments per tick, not per eval), but they separate "the commit path
+    # is expensive" from "the wake set is too wide to skip" on a real host
+    # workload, where wall clock alone cannot tell the two apart.
+    lines.append("  uint64_t _nt = 0, _cc = 0, _hc = 0, _hb = 0;")
     lines.append("")
     lines.append("  void poke_inputs() {")
     lines.append("    if (!__inited) {")
@@ -1658,7 +1817,16 @@ def emit_cpp(mod: Module) -> str:
             lines.append(f"  __attribute__((noinline)) void _nba_h{i}() {{")
             lines.append(f"    _h_need[{word}] &= ~{mask};")
             lines.append(f"    _h_busy[{word}] &= ~{mask};")
-            _HOLD_TAKEN = f"_h_busy[{word}] |= {mask};"
+            # Only a word that just emptied can clear the summary bit; the
+            # dispatch loop also re-checks after each hold runs.
+            lines.append(
+                f"    if (!(_h_need[{word}] | _h_busy[{word}])) "
+                f"_h_any[{word >> 6}] &= ~(1ull << {word & 63});"
+            )
+            _HOLD_TAKEN = (
+                f"_h_busy[{word}] |= {mask}; _h_any[{word >> 6}] |= 1ull << {word & 63};"
+                " _hb++;"
+            )
             # Hoist only top-level gate/NBA demands. Full-tree hoist forced mega
             # coalescer skip-evals even when outer enables were false.
             demanded = _collect_top_gate_demands(stmts, cached, assigns, stop)
@@ -1688,6 +1856,7 @@ def emit_cpp(mod: Module) -> str:
             lines.append("")
         if write_flags:
             lines.append("  void _commit() {")
+            lines.append("    _cc += _nw;")
             lines.append("    for (unsigned i = 0; i < _nw; i++) {")
             lines.append("      switch (_wl[i]) {")
             for name, idx in _WRITE_INDEX.items():
@@ -1721,6 +1890,7 @@ def emit_cpp(mod: Module) -> str:
     # Posedge body without re-scanning inputs (hosts may poke first).
     lines.append("  void tick_nba() {")
     lines.append("    _chg = 0;")
+    lines.append("    _nt++;")
     seq_body = live_stmts if large else always_body
     seq_cached = always_cond_reads(seq_body) & cached
     for wr in mod.mem_writes:
@@ -1728,7 +1898,16 @@ def emit_cpp(mod: Module) -> str:
     _emit_eval_calls(seq_cached, cached, assigns, stop, lines, indent=4)
     if large:
         if write_flags:
-            lines.append("    memset(_w, 0, sizeof(_w));")
+            # Reset the dirty flags by walking the previous tick's list, not by
+            # clearing the whole array. The array has one slot per written
+            # signal (13369 on GpuHostSystemAxi) but a live tick dirties one or
+            # two, so a per-tick memset is ~13 KB of stores to consume a couple
+            # of bytes — measured at essentially the whole fixed per-tick
+            # overhead of the ARTI model (~328 ns/tick idle, ~540 ns/tick with
+            # the scanout running). Must run before any _note in this tick;
+            # poke_inputs and the eval phase never note, so the top of
+            # tick_nba is the right place and _wl still holds last tick's list.
+            lines.append("    for (unsigned k = 0; k < _nw; k++) _w[_wl[k]] = 0;")
             lines.append("    _nw = 0;")
         if _ARRAY_INDEX:
             lines.append("    memset(_ac, 0, sizeof(_ac));")
@@ -1736,20 +1915,39 @@ def emit_cpp(mod: Module) -> str:
             nh = len(hold_buckets)
             cls = f"{mod.name}Dut"
             nw = (nh + 63) // 64
+            nsw = (nw + 63) // 64
             lines.append(f"    using HoldFn = void ({cls}::*)();")
             lines.append("    static const HoldFn kHolds[] = {")
             for i in range(nh):
                 comma = "," if i + 1 < nh else ""
                 lines.append(f"      &{cls}::_nba_h{i}{comma}")
             lines.append("    };")
-            lines.append(f"    for (unsigned w = 0; w < {nw}u; w++) {{")
-            lines.append("      uint64_t bits = _h_need[w] | _h_busy[w];")
+            # Scan a summary-of-words bitmap instead of every hold word. The
+            # flat scan ran `_h_need[w] | _h_busy[w]` for all `nw` words on
+            # every tick, awake or not, and that loop was the single hottest
+            # line in the model: 15.6% of an idle ARTI tick (70 iterations on
+            # GpuHostSystemAxi) for a design that dispatches ~0.8 holds per
+            # tick. `_h_any` has one bit per hold word, so the scan is nsw
+            # iterations -- 2 here -- and a word is only touched when awake.
+            lines.append(f"    for (unsigned sw = 0; sw < {nsw}u; sw++) {{")
+            lines.append("      uint64_t sw_bits = _h_any[sw];")
+            lines.append("      while (sw_bits) {")
+            lines.append("        unsigned si = (unsigned)__builtin_ctzll(sw_bits);")
+            lines.append("        sw_bits &= sw_bits - 1ull;")
+            lines.append("        unsigned w = (sw << 6) + si;")
+            lines.append("        if (w >= %uu) break;" % nw)
+            lines.append("        uint64_t bits = _h_need[w] | _h_busy[w];")
             if nh & 63:
-                lines.append(f"      if (w == {nw - 1}u) bits &= (1ull << {nh & 63}u) - 1ull;")
-            lines.append("      while (bits) {")
-            lines.append("        unsigned b = (unsigned)__builtin_ctzll(bits);")
-            lines.append("        bits &= bits - 1ull;")
-            lines.append("        (this->*kHolds[(w << 6) + b])();")
+                lines.append(
+                    f"        if (w == {nw - 1}u) bits &= (1ull << {nh & 63}u) - 1ull;"
+                )
+            lines.append("        while (bits) {")
+            lines.append("          unsigned b = (unsigned)__builtin_ctzll(bits);")
+            lines.append("          bits &= bits - 1ull;")
+            lines.append("          _hc++;")
+            lines.append("          (this->*kHolds[(w << 6) + b])();")
+            lines.append("        }")
+            lines.append("        if (!(_h_need[w] | _h_busy[w])) _h_any[sw] &= ~(1ull << si);")
             lines.append("      }")
             lines.append("    }")
         if live_stmts:
@@ -1922,6 +2120,8 @@ def emit_cpp(mod: Module) -> str:
     _WRITE_WIDE = set()
     _LEAF_HOLDS = {}
     _HOLD_WAKE_TABLES = {}
+    _HOLD_WAKE_PACKED = {}
+    _WAKE_PACK_WORDS = 0
     _LARGE = False
     return "\n".join(lines) + "\n"
 
