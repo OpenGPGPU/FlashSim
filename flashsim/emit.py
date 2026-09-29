@@ -141,6 +141,7 @@ def cached_wires(mod: Module, assigns: dict[str, Expr]) -> set[str]:
     _promote_large_gpu_ssa(assigns, cached)
     stop = set(collect_regs(mod)) | set(collect_inputs(mod)) | set(collect_mems(mod))
     _promote_bulky_gated_cones(mod.always.body, assigns, cached, stop)
+    _promote_shared_inlines(mod.always.body, assigns, cached, stop)
     return cached
 
 
@@ -170,6 +171,11 @@ _DEEP_MUX_CAP = 4096
 # Flatten right-nested ternaries to else-if when at least this many arms and
 # conditions are pure expressions (no demand stmts between else / if).
 _FLAT_TERNARY_ARMS = 3
+# A wire bound as a local inside this many cached evals / hold statements gets
+# its own eval instead. Each inlining site recomputes the wire's whole uncached
+# cone, and the sites all go stale together because they share its leaves.
+_SHARED_INLINE_MIN = 16
+_SHARED_INLINE_ROUNDS = 4
 
 
 def _expr_node_count(expr: Expr) -> int:
@@ -349,6 +355,57 @@ def _promote_bulky_gated_cones(
                 continue
             cached.add(tmp)
             added += 1
+
+
+def _promote_shared_inlines(
+    body: list[Stmt],
+    assigns: dict[str, Expr],
+    cached: set[str],
+    stop: set[str],
+) -> None:
+    """Give a wire its own eval once it is inlined at `_SHARED_INLINE_MIN` sites.
+
+    Uncached wires are bound as locals in every eval (and hold statement) that
+    reaches them, so a decode net shared by a whole L2 slice was recomputed in
+    ~14k evals per tick: 461k local bindings for 32k distinct wires. Promoting
+    the widely inlined ones repeats until no wire crosses the threshold, since
+    each promotion shrinks the cones that were counted against the others.
+    """
+
+    def stmt_exprs(stmts: list[Stmt], out: list[Expr]) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, NbAssign):
+                out.append(stmt.rhs)
+            elif isinstance(stmt, If):
+                out.append(stmt.cond)
+                stmt_exprs(stmt.then_body, out)
+                stmt_exprs(stmt.else_body, out)
+            else:
+                raise TypeError(stmt)
+
+    stmt_roots: list[list[Expr]] = []
+    for stmt in body:
+        exprs: list[Expr] = []
+        stmt_exprs([stmt], exprs)
+        stmt_roots.append(exprs)
+
+    for _ in range(_SHARED_INLINE_ROUNDS):
+        sites: dict[str, int] = defaultdict(int)
+        for name in sorted(cached):
+            if name not in assigns:
+                continue
+            for tmp in set(_uncached_needed(assigns[name], assigns, cached, stop)):
+                sites[tmp] += 1
+        for exprs in stmt_roots:
+            seen: set[str] = set()
+            for expr in exprs:
+                seen.update(_uncached_needed(expr, assigns, cached, stop))
+            for tmp in seen:
+                sites[tmp] += 1
+        promote = {n for n, k in sites.items() if k >= _SHARED_INLINE_MIN}
+        if not promote:
+            return
+        cached |= promote
 
 
 def _right_ternary_arms(expr: Expr) -> tuple[list[tuple[Expr, Expr]], Expr]:
@@ -914,7 +971,9 @@ def skip_partition_key(name: str) -> str:
 
 
 def _partition_maps(
-    cached: set[str], wire_deps: dict[str, set[str]]
+    cached: set[str],
+    wire_deps: dict[str, set[str]],
+    eager_of: dict[str, int] | None = None,
 ) -> tuple[dict[str, int], dict[str, list[int]], int]:
     if len(cached) <= 128:
         uniq_sets = sorted(
@@ -924,15 +983,190 @@ def _partition_maps(
         part_id = {s: i for i, s in enumerate(uniq_sets)}
         wire_part = {w: part_id[frozenset(wire_deps[w])] for w in sorted(cached)}
     else:
-        keys = sorted({skip_partition_key(w) for w in cached})
+        eager_of = eager_of or {}
+
+        def key(w: str) -> str:
+            r = eager_of.get(w)
+            return skip_partition_key(w) if r is None else f"__eager{r}"
+
+        keys = sorted({key(w) for w in cached})
         part_of = {k: i for i, k in enumerate(keys)}
-        wire_part = {w: part_of[skip_partition_key(w)] for w in sorted(cached)}
+        wire_part = {w: part_of[key(w)] for w in sorted(cached)}
     leaf_parts: dict[str, set[int]] = defaultdict(set)
     for w, deps in wire_deps.items():
         p = wire_part[w]
         for leaf in deps:
             leaf_parts[leaf].add(p)
     return wire_part, {k: sorted(v) for k, v in leaf_parts.items()}, max(wire_part.values(), default=-1) + 1
+
+
+_EAGER = os.environ.get("FLASHSIM_EAGER", "1") != "0"
+_EAGER_KEY_RE = re.compile(os.environ.get("FLASHSIM_EAGER_RE", r".*"))
+_EAGER_CHUNK = 1024
+_EAGER_SPLIT = os.environ.get("FLASHSIM_EAGER_SPLIT", "1") != "0"
+
+
+def _eager_regions(
+    cached: set[str],
+    cdeps: dict[str, list[str]],
+    wire_deps: dict[str, set[str]],
+) -> tuple[dict[str, int], list[list[str]]]:
+    """Cached wires to evaluate as straight-line passes instead of lazily.
+
+    Seeds are the cached wires whose skip key matches `FLASHSIM_EAGER_RE`
+    (all of them by default; a capture group makes one region per match).
+    On GpuHostSystemAxi an L2 slice's SSA cone reads the slice state regs
+    almost everywhere, so one state change invalidated ~16k lazy evals at
+    once; each paid a call and an `__ok` check and re-inlined the uncached
+    temps it shares with its neighbours, ~11 MB of code per active fill
+    cycle. A topologically ordered pass computes each shared temp once with
+    no per-wire dispatch.
+
+    Any outside wire that both feeds a region and reads it is pulled in, so a
+    region never re-enters itself through a foreign eval.
+    Each region is then split into one pass per exact leaf set, so a leaf
+    change reruns only the wires that read it. A wire's deps read a subset
+    of its leaves, so passes ordered by leaf-set size never re-enter.
+    Returns (wire -> pass id, pass id -> wires in topological order).
+    """
+    if not _EAGER or len(cached) <= 128:
+        return {}, []
+    seeds: dict[str, set[str]] = defaultdict(set)
+    for w in cached:
+        m = _EAGER_KEY_RE.match(skip_partition_key(w))
+        if m:
+            seeds[m.group(1) if m.groups() else ""].add(w)
+    users: dict[str, list[str]] = defaultdict(list)
+    for w, ds in cdeps.items():
+        for d in ds:
+            users[d].append(w)
+    def close(region: set[str]) -> set[str]:
+        while True:
+            below: set[str] = set()
+            stack = [d for w in region for d in cdeps.get(w, ()) if d not in region]
+            while stack:
+                d = stack.pop()
+                if d in below or d in region:
+                    continue
+                below.add(d)
+                stack.extend(cdeps.get(d, ()))
+            above: set[str] = set()
+            stack = [u for w in region for u in users.get(w, ()) if u not in region]
+            while stack:
+                u = stack.pop()
+                if u in above or u in region:
+                    continue
+                above.add(u)
+                stack.extend(users.get(u, ()))
+            loop = below & above
+            if not loop:
+                return region
+            region |= loop
+
+    # Slices that share a closure wire, or read each other, must be one pass:
+    # a pass stamps itself done on entry, so a foreign pass reading it
+    # mid-flight would see stale values.
+    sets = [close(set(m)) for _k, m in sorted(seeds.items())]
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(sets)):
+            for j in range(i + 1, len(sets)):
+                a, b = sets[i], sets[j]
+                a_reads_b = any(d in b for w in a for d in cdeps.get(w, ()))
+                b_reads_a = any(d in a for w in b for d in cdeps.get(w, ()))
+                if (a & b) or (a_reads_b and b_reads_a):
+                    sets[i] = close(a | b)
+                    del sets[j]
+                    merged = True
+                    break
+            if merged:
+                break
+    eager_of: dict[str, int] = {}
+    regions: list[list[str]] = []
+    for region in sets:
+        order: list[str] = []
+        seen: set[str] = set()
+        for root in sorted(region):
+            if root in seen:
+                continue
+            stack2: list[tuple[str, bool]] = [(root, False)]
+            while stack2:
+                w, done = stack2.pop()
+                if done:
+                    order.append(w)
+                    continue
+                if w in seen:
+                    continue
+                seen.add(w)
+                stack2.append((w, True))
+                for d in cdeps.get(w, ()):
+                    if d in region and d not in seen:
+                        stack2.append((d, False))
+        if not _EAGER_SPLIT:
+            groups = [order]
+        else:
+            by_leaves: dict[frozenset[str], list[str]] = defaultdict(list)
+            for w in order:
+                by_leaves[frozenset(wire_deps[w])].append(w)
+            groups = [
+                by_leaves[k]
+                for k in sorted(by_leaves, key=lambda s: (len(s), sorted(s)))
+            ]
+        for group in groups:
+            rid = len(regions)
+            for w in group:
+                eager_of[w] = rid
+            regions.append(group)
+    sizes = sorted((len(g) for g in regions), reverse=True) or [0]
+    print(
+        f"[eager] {sum(len(g) for g in regions)}/{len(cached)} cached wires in "
+        f"{len(regions)} passes, largest {sizes[:8]}, "
+        f"singletons {sum(1 for s in sizes if s == 1)}",
+        file=sys.stderr,
+    )
+    return eager_of, regions
+
+
+def _pass_inputs(
+    regions: list[list[str]],
+    eager_of: dict[str, int],
+    assigns: dict[str, Expr],
+    cached: set[str],
+    stop: set[str],
+    wire_deps: dict[str, set[str]],
+    cdeps: dict[str, list[str]],
+) -> tuple[list[set[str]], dict[str, list[int]]]:
+    """Per pass: leaves it reads other than through another pass, and for
+    each pass wire the other passes that read it.
+
+    A pass whose own page moved can still skip its work when none of those
+    leaves changed and no upstream pass wire changed value.
+    """
+    direct: list[set[str]] = []
+    consumers: dict[str, set[int]] = defaultdict(set)
+    for r, order in enumerate(regions):
+        leaves: set[str] = set()
+        seen: set[str] = set()
+        for w in order:
+            stack = list(expr_ids(assigns[w])) if w in assigns else []
+            while stack:
+                name = stack.pop()
+                if name in seen:
+                    continue
+                seen.add(name)
+                if name in stop or name not in assigns:
+                    leaves.add(name)
+                elif name in cached:
+                    q = eager_of.get(name)
+                    if q is None:
+                        leaves |= wire_deps[name]
+                    elif q != r:
+                        consumers[name].add(r)
+                else:
+                    stack.extend(expr_ids(assigns[name]))
+        direct.append(leaves)
+    return direct, {w: sorted(v) for w, v in consumers.items()}
 
 
 _BUMP_INLINE = 6
@@ -1014,6 +1248,70 @@ def _stmt_stop_leaves(
 
     walk([stmt])
     return leaves
+
+
+def _stmt_cut_leaves(
+    stmt: Stmt,
+    assigns: dict[str, Expr],
+    stop: set[str],
+    cut: set[str],
+    memo: dict[str, tuple[frozenset[str], frozenset[str]]],
+) -> tuple[set[str], set[str]]:
+    """`_stmt_stop_leaves`, but a wire in `cut` is a dependency of its own.
+
+    An eager pass wakes the holds that read a cut wire when its value moves,
+    so the leaves behind it need no direct wake edge.
+    Returns (leaves, cut wires).
+    """
+
+    def of(root: str) -> tuple[frozenset[str], frozenset[str]]:
+        stack: list[tuple[str, bool]] = [(root, False)]
+        while stack:
+            name, expanded = stack.pop()
+            if name in memo:
+                continue
+            if name in cut:
+                memo[name] = (frozenset(), frozenset((name,)))
+                continue
+            if name in stop or name not in assigns:
+                memo[name] = (frozenset((name,)), frozenset())
+                continue
+            deps = expr_ids(assigns[name])
+            if not expanded:
+                stack.append((name, True))
+                stack.extend((d, False) for d in deps if d not in memo)
+                continue
+            leaves: set[str] = set()
+            wires: set[str] = set()
+            for dep in deps:
+                a, b = memo[dep]
+                leaves |= a
+                wires |= b
+            memo[name] = (frozenset(leaves), frozenset(wires))
+        return memo[root]
+
+    leaves: set[str] = set()
+    wires: set[str] = set()
+
+    def note(expr: Expr) -> None:
+        for name in expr_ids(expr):
+            a, b = of(name)
+            leaves.update(a)
+            wires.update(b)
+
+    def walk(stmts: list[Stmt]) -> None:
+        for s in stmts:
+            if isinstance(s, NbAssign):
+                note(s.rhs)
+            elif isinstance(s, If):
+                note(s.cond)
+                walk(s.then_body)
+                walk(s.else_body)
+            else:
+                raise TypeError(s)
+
+    walk([stmt])
+    return leaves, wires
 
 
 def _hold_wake_tables(leaf_holds: dict[str, list[int]]) -> dict[tuple[int, ...], int]:
@@ -1133,9 +1431,25 @@ def _bump_parts(
 ) -> None:
     parts, holds = _bump_sig(leaf, leaf_parts)
     _emit_bump_sig(parts, holds, tables, lines, indent)
+    _emit_pass_wake(_LEAF_PASSES.get(leaf, ()), lines, indent)
+
+
+def _emit_pass_wake(passes, lines: list[str], indent: int) -> None:
+    words: dict[int, int] = defaultdict(int)
+    for r in passes:
+        words[_PASS_BIT[r] >> 6] |= 1 << (_PASS_BIT[r] & 63)
+    for w, mask in sorted(words.items()):
+        lines.append(f"{' ' * indent}_p_need[{w}] |= {mask:#x}ull;")
 
 
 _WIRE_PART: dict[str, int] = {}
+_EAGER_OF: dict[str, int] = {}
+_EAGER_DONE: set[str] = set()
+_REGION_HOLDS: dict[str, list[int]] = {}
+_PASS_CONSUMERS: dict[str, list[int]] = {}
+_PASS_PAGE: list[int] = []
+_PASS_BIT: dict[int, int] = {}
+_LEAF_PASSES: dict[str, list[int]] = {}
 _WRITE_INDEX: dict[str, int] = {}
 _WRITE_WIDE: set[str] = set()
 _LEAF_HOLDS: dict[str, list[int]] = {}
@@ -1149,9 +1463,17 @@ _HOLD_GROUP = 24
 
 def _eval_invoke(name: str, indent: int) -> str:
     sp = " " * indent
+    # Inside an eager pass every region wire and every hoisted foreign dep is
+    # already computed; an opaque call would only force clang to reload
+    # every member after it.
+    if name in _EAGER_DONE:
+        return ""
     p = _WIRE_PART.get(name)
     if p is None:
         return f"{sp}eval_{name}();"
+    r = _EAGER_OF.get(name)
+    if r is not None:
+        return f"{sp}if (_eg{r} != _pg[{p}]) _eager{r}();"
     return f"{sp}if ({name}__ok != _pg[{p}]) eval_{name}();"
 
 
@@ -1425,13 +1747,25 @@ def emit_cpp(mod: Module) -> str:
     if always_body is None:
         always_body = mod.always.body
     wire_deps = {w: cone_leaves(w, assigns, stop) for w in sorted(cached)}
-    wire_part, leaf_parts, nparts = _partition_maps(cached, wire_deps)
+    cdeps = {w: cached_deps(w, assigns, cached, stop) for w in sorted(cached)}
+    eager_of, eager_regions = _eager_regions(cached, cdeps, wire_deps)
+    wire_part, leaf_parts, nparts = _partition_maps(cached, wire_deps, eager_of)
+    pass_direct, pass_consumers = _pass_inputs(
+        eager_regions, eager_of, assigns, cached, stop, wire_deps, cdeps
+    )
+    pass_page = []
+    for leaves in pass_direct:
+        for leaf in leaves:
+            leaf_parts.setdefault(leaf, []).append(nparts)
+        pass_page.append(nparts)
+        nparts += 1
     inv_tables = _invalidation_tables(leaf_parts)
     write_flags = [n for n in writes if not sigs[n].depth]
     large = len(writes) >= _LARGE_WRITES
     hold_buckets: list[tuple[str, list[Stmt]]] = []
     live_stmts: list[Stmt] = []
     leaf_holds: dict[str, list[int]] = {}
+    region_holds: dict[str, list[int]] = {}
     if large:
         # Any statement can be skipped, not just holds: if nothing it reads
         # changed since it last ran, re-running it would recommit the value
@@ -1460,28 +1794,66 @@ def emit_cpp(mod: Module) -> str:
             for off in range(0, len(stmts), _HOLD_GROUP):
                 hold_buckets.append((f"{key}#{off // _HOLD_GROUP}", stmts[off : off + _HOLD_GROUP]))
         holds_map: dict[str, set[int]] = defaultdict(set)
+        cut_map: dict[str, set[int]] = defaultdict(set)
+        cut = {
+            w
+            for w in eager_of
+            if w in sigs and not sigs[w].depth and not is_wide(sigs[w].width)
+        }
+        memo: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
         for i, (_key, stmts) in enumerate(hold_buckets):
             for stmt in stmts:
-                for leaf in _stmt_stop_leaves(stmt, assigns, stop, wire_deps):
+                if cut:
+                    leaves, wires = _stmt_cut_leaves(stmt, assigns, stop, cut, memo)
+                    for w in wires:
+                        cut_map[w].add(i)
+                else:
+                    leaves = _stmt_stop_leaves(stmt, assigns, stop, wire_deps)
+                for leaf in leaves:
                     holds_map[leaf].add(i)
         leaf_holds = {k: sorted(v) for k, v in holds_map.items()}
+        region_holds = {k: sorted(v) for k, v in cut_map.items()}
         _report_wake_locality(
             mod.name, hold_buckets, leaf_holds, wire_part, leaf_parts,
             always_body,
         )
+    # Passes that can reach a hold-facing wire must run before hold dispatch
+    # even when nothing demands them; wake just those, from their direct
+    # leaves at commit and from upstream passes whose values changed.
+    woken: set[int] = set()
+    for r in range(len(eager_regions) - 1, -1, -1):
+        if any(
+            w in region_holds or any(q in woken for q in pass_consumers.get(w, ()))
+            for w in eager_regions[r]
+        ):
+            woken.add(r)
+    pass_bit = {r: i for i, r in enumerate(sorted(woken))}
+    leaf_passes: dict[str, list[int]] = defaultdict(list)
+    for r in sorted(woken):
+        for leaf in pass_direct[r]:
+            leaf_passes[leaf].append(r)
     used_inputs = {
-        name for name in inputs if name in leaf_parts or name in leaf_holds
+        name
+        for name in inputs
+        if name in leaf_parts or name in leaf_holds or name in leaf_passes
     }
     array_writes = [n for n in writes if sigs[n].depth]
-    global _WIRE_PART, _WRITE_INDEX, _WRITE_WIDE, _LEAF_HOLDS, _HOLD_WAKE_TABLES, _HOLD_WAKE_PACKED, _ARRAY_INDEX, _HOLD_TAKEN, _LARGE, _WAKE_PACK_WORDS
+    global _WIRE_PART, _EAGER_OF, _REGION_HOLDS, _PASS_CONSUMERS, _PASS_PAGE, _PASS_BIT, _LEAF_PASSES, _WRITE_INDEX, _WRITE_WIDE, _LEAF_HOLDS, _HOLD_WAKE_TABLES, _HOLD_WAKE_PACKED, _ARRAY_INDEX, _HOLD_TAKEN, _LARGE, _WAKE_PACK_WORDS
     _WIRE_PART = wire_part
+    _EAGER_OF = eager_of
+    _REGION_HOLDS = region_holds
+    _PASS_CONSUMERS = pass_consumers
+    _PASS_PAGE = pass_page
+    _PASS_BIT = pass_bit
+    _LEAF_PASSES = dict(leaf_passes)
     _WRITE_INDEX = {n: i for i, n in enumerate(write_flags)} if large else {}
     _WRITE_WIDE = {n for n in write_flags if is_wide(sigs[n].width)} if large else set()
     _LEAF_HOLDS = leaf_holds
-    _HOLD_WAKE_TABLES = _hold_wake_tables(leaf_holds)
+    wake_sets = {**leaf_holds, **region_holds}
+    _HOLD_WAKE_TABLES = _hold_wake_tables(wake_sets)
     _WAKE_PACK_WORDS = (len(hold_buckets) + 63) // 64 if hold_buckets else 0
     _HOLD_WAKE_PACKED = (
-        _hold_wake_packed(leaf_holds, _WAKE_PACK_WORDS) if _wake_pack_enabled() else {}
+        _hold_wake_packed(wake_sets, _WAKE_PACK_WORDS) if _wake_pack_enabled() else {}
     )
     _ARRAY_INDEX = {n: i for i, n in enumerate(array_writes)} if large else {}
     _LARGE = large
@@ -1730,7 +2102,15 @@ def emit_cpp(mod: Module) -> str:
         width = sig.width if sig else 32
         depth = sig.depth if sig else 0
         lines.append(f"  {_storage_decl(name, width, depth)}")
-        lines.append(f"  uint32_t {name}__ok = 0;")
+        if name not in eager_of:
+            lines.append(f"  uint32_t {name}__ok = 0;")
+    for r in range(len(eager_regions)):
+        lines.append(f"  uint32_t _eg{r} = 0, _ed{r} = 0;")
+        lines.append(f"  uint8_t _up{r} = 0;")
+    if pass_bit:
+        npw = (len(pass_bit) + 63) // 64
+        init = ", ".join("~0ull" for _ in range(npw))
+        lines.append(f"  uint64_t _p_need[{npw}] = {{{init}}};")
     if nparts:
         lines.append(f"  uint32_t _pg[{nparts}];")
         lines.append(f"  uint32_t _seq_seen[{nparts}] = {{}};")
@@ -1805,7 +2185,14 @@ def emit_cpp(mod: Module) -> str:
     lines.append("  }")
     lines.append("")
     for name in sorted(cached):
+        if name in eager_of:
+            lines.append(f"  void eval_{name}() {{ {_eval_invoke(name, 0)} }}")
+            continue
         _emit_eval_method(name, assigns, sigs, stop, cached, lines, wire_part[name])
+    for r, order in enumerate(eager_regions):
+        _emit_eager_region(r, order, wire_part[order[0]], assigns, sigs, stop, cached, cdeps, lines)
+        if r in pass_bit:
+            lines.append(f"  void _pn{r}() {{ {_eval_invoke(order[0], 0)} }}")
     for name in outputs:
         if name not in cached:
             lines.append(f"  void eval_{name}() {{}}")
@@ -1814,6 +2201,7 @@ def emit_cpp(mod: Module) -> str:
         for i, (_key, stmts) in enumerate(hold_buckets):
             word, bit = i >> 6, i & 63
             mask = f"(1ull << {bit})"
+            hold_start = len(lines)
             lines.append(f"  __attribute__((noinline)) void _nba_h{i}() {{")
             lines.append(f"    _h_need[{word}] &= ~{mask};")
             lines.append(f"    _h_busy[{word}] &= ~{mask};")
@@ -1845,6 +2233,7 @@ def emit_cpp(mod: Module) -> str:
                 demanded,
             )
             _HOLD_TAKEN = ""
+            lines[hold_start:] = _drop_dominated_eager_calls(lines[hold_start:])
             lines.append("  }")
             lines.append("")
         if live_stmts:
@@ -1891,6 +2280,28 @@ def emit_cpp(mod: Module) -> str:
     lines.append("  void tick_nba() {")
     lines.append("    _chg = 0;")
     lines.append("    _nt++;")
+    # Region-mediated hold wakes fire inside the pass, so a woken pass must
+    # run before the dispatch loop even if nothing else demands it. Pass bits
+    # are in topological order and a pass only wakes later ones, so one
+    # ascending drain that re-reads each word sees every wake.
+    if pass_bit:
+        cls = f"{mod.name}Dut"
+        npw = (len(pass_bit) + 63) // 64
+        lines.append(f"    using PassFn = void ({cls}::*)();")
+        lines.append("    static const PassFn kPasses[] = {")
+        for i, r in enumerate(sorted(pass_bit)):
+            comma = "," if i + 1 < len(pass_bit) else ""
+            lines.append(f"      &{cls}::_pn{r}{comma}")
+        lines.append("    };")
+        lines.append(f"    for (unsigned w = 0; w < {npw}u; w++) {{")
+        lines.append("      uint64_t bits;")
+        lines.append("      while ((bits = _p_need[w])) {")
+        lines.append("        unsigned b = (unsigned)__builtin_ctzll(bits);")
+        lines.append("        _p_need[w] = bits & (bits - 1ull);")
+        lines.append("        unsigned i = (w << 6) + b;")
+        lines.append(f"        if (i < {len(pass_bit)}u) (this->*kPasses[i])();")
+        lines.append("      }")
+        lines.append("    }")
     seq_body = live_stmts if large else always_body
     seq_cached = always_cond_reads(seq_body) & cached
     for wr in mod.mem_writes:
@@ -2014,8 +2425,8 @@ def emit_cpp(mod: Module) -> str:
     if mod.mem_writes:
         we_or = " | ".join(f"__we{i}" for i in range(len(mod.mem_writes)))
         lines.append(f"    if ({we_or}) {{")
-        for dep in sorted(mem_data_demanded):
-            lines.append(_eval_invoke(dep, 6))
+        for call in dict.fromkeys(_eval_invoke(dep, 6) for dep in sorted(mem_data_demanded)):
+            lines.append(call)
         for i, wr in enumerate(mod.mem_writes):
             depth = sigs[wr.mem].depth
             mask = depth - 1 if depth else 0
@@ -2257,6 +2668,150 @@ def split_dut_methods(
     for name, body_lines in sorted(own_files.items()):
         parts.append((f"dut_{name.lstrip('_')}.cpp", "".join(body_lines)))
     return header, parts
+
+
+_EAGER_CALL_RE = re.compile(r"^(\s*)if \(_eg\d+ != _pg\[\d+\]\) _eager\d+\(\);$")
+
+
+def _drop_dominated_eager_calls(body: list[str]) -> list[str]:
+    """Keep the first top-level `_eager` demand of a method, drop later copies.
+
+    A hold reads dozens of region wires and demands each one; after the first
+    unconditional demand the rest are dead but still opaque calls.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in body:
+        m = _EAGER_CALL_RE.match(line)
+        if m:
+            call = line.strip()
+            if call in seen:
+                continue
+            if len(m.group(1)) == 4:
+                seen.add(call)
+        out.append(line)
+    return out
+
+
+def _emit_cone_temp(
+    tmp: str,
+    assigns: dict[str, Expr],
+    sigs: dict[str, Signal],
+    cached: set[str],
+    lines: list[str],
+    scratch: list[int],
+) -> None:
+    tw = sigs[tmp].width if tmp in sigs else 32
+    td = sigs[tmp].depth if tmp in sigs else 0
+    if td:
+        lines.append(f"    {_storage_decl(tmp, tw, td, init=False)}")
+        _emit_array_assign(tmp, assigns[tmp], cached, sigs, lines, 4)
+    elif is_wide(tw):
+        lines.append(f"    {_storage_decl(tmp, tw, init=False)}")
+        _emit_wide_assign(tmp, assigns[tmp], cached, sigs, lines, 4, scratch)
+    elif _needs_limb_emit(assigns[tmp], sigs):
+        tmask = mask_expr(tw)
+        lines.append(f"    {c_type(tw)} {tmp};")
+        _emit_assign(tmp, assigns[tmp], cached, sigs, lines, 4, tmask, scratch)
+    else:
+        tmask = mask_expr(tw)
+        rhs = emit_expr(assigns[tmp], sigs)
+        if tmask:
+            lines.append(f"    {c_type(tw)} {tmp} = ({rhs}) & {tmask};")
+        else:
+            lines.append(f"    {c_type(tw)} {tmp} = {rhs};")
+
+
+def _emit_cached_value(
+    name: str,
+    assigns: dict[str, Expr],
+    sigs: dict[str, Signal],
+    cached: set[str],
+    lines: list[str],
+    scratch: list[int],
+) -> None:
+    expr = assigns[name]
+    width = sigs[name].width if name in sigs else 32
+    depth = sigs[name].depth if name in sigs else 0
+    if depth:
+        _emit_array_assign(name, expr, cached, sigs, lines, 4)
+    elif is_wide(width):
+        _emit_wide_assign(name, expr, cached, sigs, lines, 4, scratch)
+    else:
+        _emit_assign(name, expr, cached, sigs, lines, 4, mask_expr(width), scratch)
+
+
+def _emit_eager_region(
+    r: int,
+    order: list[str],
+    part: int,
+    assigns: dict[str, Expr],
+    sigs: dict[str, Signal],
+    stop: set[str],
+    cached: set[str],
+    cdeps: dict[str, list[str]],
+    lines: list[str],
+) -> None:
+    """`_eager{r}()`: every wire of region r in dependency order.
+
+    Foreign deps go first: the region closure guarantees none of them reads
+    the region. Chunked so no single function is too large for clang -O2; an
+    uncached temp shared across a chunk boundary is recomputed in the later
+    chunk.
+    """
+    global _EAGER_DONE
+    region = set(order)
+    foreign = sorted({d for w in order for d in cdeps.get(w, ()) if d not in region})
+    lines.append(f"  __attribute__((noinline)) void _eager{r}() {{")
+    demanded: set[str] = set()
+    for dep in foreign:
+        call = _eval_invoke(dep, 4)
+        if call not in demanded:
+            demanded.add(call)
+            lines.append(call)
+    dp = _PASS_PAGE[r]
+    lines.append(f"    _eg{r} = _pg[{part}];")
+    lines.append(f"    if (_ed{r} == _pg[{dp}] && !_up{r}) return;")
+    lines.append(f"    _ed{r} = _pg[{dp}];")
+    lines.append(f"    _up{r} = 0;")
+    nchunks = (len(order) + _EAGER_CHUNK - 1) // _EAGER_CHUNK
+    for k in range(nchunks):
+        lines.append(f"    _eager{r}_{k}();")
+    lines.append("  }")
+    lines.append("")
+    _EAGER_DONE = region | set(foreign)
+    for k in range(nchunks):
+        lines.append(f"  __attribute__((noinline)) void _eager{r}_{k}() {{")
+        scratch = [0]
+        done: set[str] = set()
+        for name in order[k * _EAGER_CHUNK : (k + 1) * _EAGER_CHUNK]:
+            for tmp in internal_cone(name, assigns, cached, stop):
+                if tmp not in done:
+                    done.add(tmp)
+                    _emit_cone_temp(tmp, assigns, sigs, cached, lines, scratch)
+            holds = _REGION_HOLDS.get(name)
+            ups = _PASS_CONSUMERS.get(name, ())
+            sig = sigs.get(name)
+            scalar = sig is not None and not sig.depth and not is_wide(sig.width)
+            track = bool(holds) or (bool(ups) and scalar)
+            if track:
+                lines.append(f"    const auto {name}__o = {name};")
+            _emit_cached_value(name, assigns, sigs, cached, lines, scratch)
+            if track:
+                lines.append(f"    if ({name} != {name}__o) {{")
+                if holds:
+                    _emit_bump_sig((), tuple(holds), {}, lines, 6)
+                for q in ups:
+                    lines.append(f"      _up{q} = 1;")
+                _emit_pass_wake([q for q in ups if q in _PASS_BIT], lines, 6)
+                lines.append("    }")
+            elif ups:
+                for q in ups:
+                    lines.append(f"    _up{q} = 1;")
+                _emit_pass_wake([q for q in ups if q in _PASS_BIT], lines, 4)
+        lines.append("  }")
+        lines.append("")
+    _EAGER_DONE = set()
 
 
 def _emit_eval_method(
@@ -2935,6 +3490,7 @@ def _emit_eval_calls(
 ) -> None:
     seen: set[str] = set()
     ordered: list[str] = []
+    passes: dict[int, str] = {}
     stack: list[tuple[str, bool]] = [(name, False) for name in reversed(sorted(names))]
     while stack:
         name, expanded = stack.pop()
@@ -2946,9 +3502,16 @@ def _emit_eval_calls(
         if name in seen:
             continue
         seen.add(name)
+        r = _EAGER_OF.get(name)
+        if r is not None:
+            # A pass pulls its own upstream; one demand per pass is enough.
+            passes.setdefault(r, name)
+            continue
         stack.append((name, True))
         for dep in cached_deps(name, assigns, cached, stop):
             stack.append((dep, False))
+    for r, name in sorted(passes.items()):
+        lines.append(_eval_invoke(name, indent))
     if not _WIRE_PART:
         for name in ordered:
             lines.append(_eval_invoke(name, indent))

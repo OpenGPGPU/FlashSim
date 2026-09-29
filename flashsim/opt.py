@@ -8,6 +8,8 @@ Keep values that feed `always_ff` named so `__ok` can still skip a sticky cone.
 
 from __future__ import annotations
 
+import os
+
 from flashsim.ir import (
     AlwaysFF,
     ArrayGet,
@@ -719,12 +721,21 @@ def _not_expr(expr: Expr) -> Expr:
     return UnaryOp("!", expr)
 
 
+_FLATTEN_ELSE_MAX = int(os.environ.get("FLASHSIM_FLATTEN_ELSE_MAX", "4"))
+
+
 def _flatten_nested_holds(body: list[Stmt]) -> list[Stmt]:
     """Lift `if (c) then else if (e) hold` into skippable empty-else holds.
 
     `_nba_to_if` emits 1-bit enables as `if (!en) reset else if (extra) taken`.
     On GPU-sized nets those stay in `_nba_live` and run every cycle. Flattening
     puts both sides into hold buckets that GSIM wake can skip.
+
+    An else arm is lifted only while it holds at most `_FLATTEN_ELSE_MAX`
+    holds. Each lifted hold is prefixed with `!c`, so flattening a whole
+    priority chain `if (c1) .. else if (c2) .. else if (cn)` makes arm k test
+    k-1 negations: O(n^2) guard terms. An L2 slice's per-entry registers
+    have ~50-arm chains, which put ~36 KB of guards into every entry's hold.
     """
     out: list[Stmt] = []
     for stmt in body:
@@ -733,7 +744,7 @@ def _flatten_nested_holds(body: list[Stmt]) -> list[Stmt]:
             continue
         then = _flatten_nested_holds(stmt.then_body)
         els = _flatten_nested_holds(stmt.else_body)
-        if _all_holds(els):
+        if _all_holds(els) and len(els) <= _FLATTEN_ELSE_MAX:
             if _all_holds(then):
                 for inner in then:
                     assert isinstance(inner, If)
