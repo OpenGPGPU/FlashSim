@@ -9,6 +9,9 @@ Keep values that feed `always_ff` named so `__ok` can still skip a sticky cone.
 from __future__ import annotations
 
 import os
+import re
+import sys
+from collections import Counter
 
 from flashsim.ir import (
     AlwaysFF,
@@ -93,6 +96,12 @@ def optimize(mod: Module) -> Module:
         body = _map_stmts(body, _fold_expr)
     body = _cse_sibling_or_prefixes(body, assigns)
     assigns, body = _dce(assigns, body, outputs, mem_writes)
+    if _MERGE_SOP:
+        assigns = _merge_sop_terms(assigns, sigs)
+        assigns, body = _dce(assigns, body, outputs, mem_writes)
+    if _REASSOC_AND:
+        assigns = _reassoc_and_chains(assigns, sigs)
+        assigns, body = _dce(assigns, body, outputs, mem_writes)
 
     referred: set[str] = set(assigns)
     for expr in assigns.values():
@@ -722,6 +731,303 @@ def _not_expr(expr: Expr) -> Expr:
 
 
 _FLATTEN_ELSE_MAX = int(os.environ.get("FLASHSIM_FLATTEN_ELSE_MAX", "4"))
+_MERGE_SOP = os.environ.get("FLASHSIM_MERGE_SOP", "1") != "0"
+_SOP_TERMS_MAX = 256
+_SOP_LITS_MAX = 64
+_SOP_FALSE = frozenset([("<false>", True)])
+
+
+def _merge_sop_terms(
+    assigns: dict[str, Expr], sigs: dict[str, Signal]
+) -> dict[str, Expr]:
+    """Collapse 1-bit ORs whose AND terms re-merge complementary branches.
+
+    CIRCT's control-flow removal gives the block after an if/else the
+    condition `(p & c & …) | (p & !c & …) | …`, one term per path, and each
+    later statement's block condition is built on the previous one. For an
+    L2 slice's 256 `sharers(way)(idx) :=` trees that is a 256-deep chain of
+    52-term ORs that is really just the entry condition. Flatten each OR to
+    literal sets, then apply `A.x | A.!x = A`, `A | A.!x.B = A | A.B` and
+    absorption until nothing changes.
+    """
+
+    def bit(e: Expr) -> bool:
+        try:
+            return expr_width(e, sigs) == 1
+        except (KeyError, TypeError):
+            return False
+
+    def neg_of(e: Expr) -> Expr | None:
+        if isinstance(e, UnaryOp) and e.op in {"!", "~"} and bit(e.a):
+            return e.a
+        if isinstance(e, BinOp) and e.op == "^" and bit(e.a):
+            if _is_const(e.b, 1):
+                return e.a
+            if _is_const(e.a, 1):
+                return e.b
+        return None
+
+    def resolve(e: Expr) -> Expr:
+        seen = 0
+        while isinstance(e, Id) and e.name in assigns and seen < 64:
+            inner = assigns[e.name]
+            if isinstance(inner, Id) or neg_of(inner) is not None:
+                e = inner
+                seen += 1
+                continue
+            break
+        return e
+
+    def atom(e: Expr) -> tuple[Expr, bool]:
+        pol = True
+        for _ in range(64):
+            e = resolve(e)
+            n = neg_of(e)
+            if n is None:
+                break
+            e, pol = n, not pol
+        return e, pol
+
+    def is_and(e: Expr) -> Expr | None:
+        if isinstance(e, BinOp) and e.op == "&":
+            return e
+        if isinstance(e, Id) and e.name in assigns:
+            inner = assigns[e.name]
+            if isinstance(inner, BinOp) and inner.op == "&":
+                return inner
+        return None
+
+    def term_lits(e: Expr, opaque: set[Expr]) -> frozenset | None:
+        lits: set[tuple[Expr, bool]] = set()
+        stack = [e]
+        while stack:
+            k, pol = atom(stack.pop())
+            conj = is_and(k) if pol and k not in opaque else None
+            if conj is not None and bit(conj.a) and bit(conj.b):
+                stack.append(conj.b)
+                stack.append(conj.a)
+                continue
+            if (k, not pol) in lits:
+                return _SOP_FALSE
+            lits.add((k, pol))
+            if len(lits) > _SOP_LITS_MAX:
+                return None
+        return frozenset(lits)
+
+    def simplify(terms: set[frozenset]) -> set[frozenset]:
+        changed = True
+        while changed:
+            changed = False
+            by_size = sorted(terms, key=len)
+            for t in by_size:
+                if t not in terms:
+                    continue
+                for s in by_size:
+                    if s is t or len(s) > len(t) or s not in terms:
+                        continue
+                    if s <= t:
+                        terms.discard(t)
+                        changed = True
+                        break
+                    diff = s - t
+                    if len(diff) == 1:
+                        (k, pol), = diff
+                        if (k, not pol) in t:
+                            nt = t - {(k, not pol)}
+                            terms.discard(t)
+                            if len(s) == len(t):
+                                terms.discard(s)
+                            terms.add(nt)
+                            changed = True
+                            break
+                if changed:
+                    break
+        return terms
+
+    def build(lits: frozenset, negs: dict[Expr, Expr]) -> Expr:
+        parts: list[Expr] = []
+        for k, pol in sorted(lits, key=repr):
+            if pol:
+                parts.append(k)
+            else:
+                parts.append(negs.get(k) or UnaryOp("!", k))
+        return _and_chain(parts)
+
+    negs: dict[Expr, Expr] = {}
+    for name, e in assigns.items():
+        n = neg_of(e)
+        if n is not None and name in sigs and not sigs[name].depth:
+            negs.setdefault(resolve(n), Id(name))
+
+    order: list[str] = []
+    state: dict[str, int] = {}
+    for root in assigns:
+        stack = [(root, False)]
+        while stack:
+            name, done = stack.pop()
+            if done:
+                order.append(name)
+                continue
+            if state.get(name):
+                continue
+            state[name] = 1
+            stack.append((name, True))
+            for dep in expr_ids(assigns[name]):
+                if dep in assigns and not state.get(dep):
+                    stack.append((dep, False))
+
+    out = assigns
+    merged = 0
+    for name in order:
+        e = out[name]
+        sig = sigs.get(name)
+        if sig is None or sig.depth or sig.width != 1:
+            continue
+        if not (isinstance(e, BinOp) and e.op == "|"):
+            continue
+        parts = _flatten_op(e, "|")
+        if len(parts) < 2 or len(parts) > _SOP_TERMS_MAX or not all(bit(p) for p in parts):
+            continue
+        opaque: set[Expr] = set()
+        terms: list[frozenset] | None = None
+        for _ in range(4):
+            terms = []
+            for p in parts:
+                t = term_lits(p, opaque)
+                if t is None:
+                    terms = None
+                    break
+                terms.append(t)
+            if terms is None:
+                break
+            neg_keys = {k for t in terms if t is not _SOP_FALSE for k, pol in t if not pol}
+            grow = neg_keys - opaque
+            if not grow:
+                break
+            opaque |= grow
+        if terms is None:
+            continue
+        orig: dict[frozenset, Expr] = {}
+        for p, t in zip(parts, terms):
+            orig.setdefault(t, p)
+        live = {t for t in terms if t is not _SOP_FALSE}
+        n_before = len(set(terms))
+        live = simplify(live)
+        if len(live) >= n_before:
+            continue
+        merged += 1
+        if not live:
+            out[name] = Const(0, 1)
+        elif frozenset() in live:
+            out[name] = Const(1, 1)
+        else:
+            out[name] = _or_chain(
+                [orig.get(t) or build(t, negs) for t in sorted(live, key=repr)]
+            )
+    if merged:
+        print(f"[sop] merged {merged} or-chains", file=sys.stderr)
+    return out
+
+
+_REASSOC_AND = os.environ.get("FLASHSIM_REASSOC_AND", "1") != "0"
+_REASSOC_AND_MAX = 48
+
+
+def _reassoc_and_chains(
+    assigns: dict[str, Expr], sigs: dict[str, Signal]
+) -> dict[str, Expr]:
+    """Rebuild 1-bit AND chains so operands shared by many wires come first.
+
+    CIRCT nests `a & (b & (c & e_i))` with the per-entry term innermost, so
+    each of an L2 slice's per-entry enables recomputes the same 7-term global
+    product. Flattening every chain to its operand set and rebuilding it
+    left-deep in descending share count turns common prefixes into one shared
+    wire, leaving one or two ANDs per entry.
+    """
+
+    def bit(e: Expr) -> bool:
+        return expr_width(e, sigs) == 1
+
+    flat: dict[str, frozenset[Expr] | None] = {}
+
+    def literals(e: Expr) -> frozenset[Expr] | None:
+        if isinstance(e, BinOp) and e.op == "&" and bit(e.a) and bit(e.b):
+            a = literals(e.a)
+            b = literals(e.b) if a is not None else None
+            if a is None or b is None or len(a) + len(b) > _REASSOC_AND_MAX:
+                return None
+            return a | b
+        if isinstance(e, Id) and e.name in flat:
+            s = flat[e.name]
+            return s if s is not None and len(s) > 1 else frozenset([e])
+        return frozenset([e])
+
+    order: list[str] = []
+    state: dict[str, int] = {}
+    for root in assigns:
+        stack = [(root, False)]
+        while stack:
+            name, done = stack.pop()
+            if done:
+                order.append(name)
+                continue
+            if state.get(name):
+                continue
+            state[name] = 1
+            stack.append((name, True))
+            for dep in expr_ids(assigns[name]):
+                if dep in assigns and not state.get(dep):
+                    stack.append((dep, False))
+    for name in order:
+        e = assigns[name]
+        sig = sigs.get(name)
+        if (
+            sig is None
+            or sig.depth
+            or sig.width != 1
+            or not (isinstance(e, BinOp) and e.op == "&")
+        ):
+            continue
+        flat[name] = literals(e)
+
+    chains = {n: s for n, s in flat.items() if s is not None and len(s) >= 3}
+    if not chains:
+        return assigns
+    freq: Counter = Counter()
+    for s in chains.values():
+        freq.update(s)
+    by_set: dict[frozenset[Expr], str] = {}
+    for n in order:
+        s = chains.get(n)
+        if s is not None:
+            by_set.setdefault(s, n)
+    out = dict(assigns)
+    counter = [0]
+
+    def prefix(lits: list[Expr], stem: str) -> Expr:
+        if len(lits) == 1:
+            return lits[0]
+        key = frozenset(lits)
+        name = by_set.get(key)
+        if name is None:
+            while True:
+                counter[0] += 1
+                name = f"{stem}_t9{counter[0]}"
+                if name not in sigs and name not in out:
+                    break
+            sigs[name] = Signal(name, 1, "wire")
+            by_set[key] = name
+            out[name] = BinOp("&", prefix(lits[:-1], stem), lits[-1])
+        return Id(name)
+
+    for n in order:
+        s = chains.get(n)
+        if s is None:
+            continue
+        lits = sorted(s, key=lambda e: (-freq[e], repr(e)))
+        stem = n[: n.rfind("_t")] if re.search(r"_t\d+$", n) else n
+        out[n] = BinOp("&", prefix(lits[:-1], stem), lits[-1])
+    return out
 
 
 def _flatten_nested_holds(body: list[Stmt]) -> list[Stmt]:
