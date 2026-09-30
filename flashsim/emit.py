@@ -1352,12 +1352,21 @@ def _emit_bump_sig(
     tables: dict[tuple[int, ...], int],
     lines: list[str],
     indent: int,
+    once: bool = False,
 ) -> None:
     sp = " " * indent
     if parts:
         if len(parts) <= _BUMP_INLINE:
             for p in parts:
                 lines.append(f"{sp}_pg[{p}]++;")
+        elif once:
+            # Pages are only compared for equality, so registers sharing a
+            # table need one bump per commit, not one each.
+            i = tables[parts]
+            lines.append(
+                f"{sp}if (_bst[{i}] != _bep) {{ _bst[{i}] = _bep; "
+                f"fs_bump(_pg, _inv{i}, {len(parts)}u); }}"
+            )
         else:
             i = tables[parts]
             lines.append(f"{sp}fs_bump(_pg, _inv{i}, {len(parts)}u);")
@@ -1428,9 +1437,10 @@ def _bump_parts(
     tables: dict[tuple[int, ...], int],
     lines: list[str],
     indent: int,
+    once: bool = False,
 ) -> None:
     parts, holds = _bump_sig(leaf, leaf_parts)
-    _emit_bump_sig(parts, holds, tables, lines, indent)
+    _emit_bump_sig(parts, holds, tables, lines, indent, once)
     _emit_pass_wake(_LEAF_PASSES.get(leaf, ()), lines, indent)
 
 
@@ -2152,6 +2162,8 @@ def emit_cpp(mod: Module) -> str:
     # is expensive" from "the wake set is too wide to skip" on a real host
     # workload, where wall clock alone cannot tell the two apart.
     lines.append("  uint64_t _nt = 0, _cc = 0, _hc = 0, _hb = 0;")
+    if inv_tables:
+        lines.append(f"  uint64_t _bep = 0, _bst[{len(inv_tables)}] = {{}};")
     lines.append("")
     lines.append("  void poke_inputs() {")
     lines.append("    if (!__inited) {")
@@ -2246,6 +2258,8 @@ def emit_cpp(mod: Module) -> str:
         if write_flags:
             lines.append("  void _commit() {")
             lines.append("    _cc += _nw;")
+            if inv_tables:
+                lines.append("    _bep++;")
             lines.append("    for (unsigned i = 0; i < _nw; i++) {")
             lines.append("      switch (_wl[i]) {")
             for name, idx in _WRITE_INDEX.items():
@@ -2255,13 +2269,13 @@ def emit_cpp(mod: Module) -> str:
                     lines.append(
                         f"        if (memcmp({name}__n, {name}, sizeof({name}))) {{"
                     )
-                    _bump_parts(name, leaf_parts, inv_tables, lines, 10)
+                    _bump_parts(name, leaf_parts, inv_tables, lines, 10, True)
                     lines.append("          _chg++;")
                     lines.append(f"          memcpy({name}, {name}__n, sizeof({name}));")
                     lines.append("        }")
                 else:
                     lines.append(f"        if ({name}__n != {name}) {{")
-                    _bump_parts(name, leaf_parts, inv_tables, lines, 10)
+                    _bump_parts(name, leaf_parts, inv_tables, lines, 10, True)
                     lines.append("          _chg++;")
                     lines.append(f"          {name} = {name}__n;")
                     lines.append("        }")
