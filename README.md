@@ -141,8 +141,54 @@ time, so no activity policy can hold QEMU's BQL for a whole tick cap.
 
 Note what this does and does not buy: it cuts *latency per host read* and the
 per-read tick count, not the total simulated cycles a job needs. Total wall
-clock is still (cycles the job needs) × (ns/tick), so the present phase still
-has to be re-measured end to end before any claim is made about it.
+clock is still (cycles the job needs) × (ns/tick). That is measured end to end
+below.
+
+### End to end: the Debian present workload
+
+The scanout micro-benchmark above is fixed-function and leaves most of the GPU
+cold. The real workload is `opengpu_pipe_blit` then `opengpu_pipe_present` on the
+`debian-320x240` display profile, which has both shader cores on. Both backends
+come from the same RTL and run the same ISO, timed over the serial console:
+
+| stage | FlashSim | Verilator (8 regions) | ratio |
+|---|---|---|---|
+| blit | **0.130 s** | 22.777 s | **175×** |
+| present | **129.606 s** | 353.030 s | **2.72×** |
+| GPU test phase | **129.737 s** | 375.807 s | **2.90×** |
+| whole run | 169.925 s | 422.461 s | 2.49× |
+
+Both report `OPENGPU PIPE PRESENT PASS: 320x240 painted=38160 tint` and
+`BENCH_RC=0`, so the two backends agree on the rendered pixels, not just on the
+timing. The whole-run figure is the weakest one: past ~40 s it is measuring
+Linux boot, not the GPU.
+
+Present is 99.9% of the GPU test phase, so this is where the remaining work is,
+and it is a real remaining loss rather than a measurement artifact. Two earlier
+comparisons that looked far better were not: they ran a `pipe_present` that
+failed immediately with `EOPNOTSUPP` on *both* backends, so they timed how long
+each took to give up. The display profile turns the vertex core on by default,
+and the driver rejects any submit whose vertex flag does not match the hardware
+(`driver/opengpu_compute.c`), so `pipe_present` has to go through the vertex
+path to draw anything at all.
+
+The present phase is bound by per-tick cost, not by how fast the host can drive
+the model. The ARTI device polls the model from a `QEMU_CLOCK_HOST` timer and
+gives the model one tick per poll, so the poll rate looks like a floor on
+wall clock. It is not — sweeping it over a 16× range moves the phase by 1.2%,
+which is noise:
+
+| IRQ poll interval | present |
+|---|---|
+| 25 µs | 137.83 s |
+| 100 µs (default) | 139.44 s |
+| 400 µs | 138.35 s |
+
+Sweeping it required relinking the driver, which first produced a binary linked
+against a stale model archive and a present phase that never finished; the
+control run is what caught that. A model relink has to check that the archive in
+`hw/misc/` is the one the build actually produced — `build_embedded.sh` only
+copies it when the bytes differ, so a tree can keep serving an older model.
 
 ### Where the tick actually goes
 
@@ -216,6 +262,58 @@ Tried and **reverted** (no net win, measured not guessed):
   vectorDataCache 32-bucket skip partitions (+1.0 s wall vs dmux baseline),
   L2 SSA shard colocation by `tid%65` (wall tie), L2 `always_inline` (clang -O2 hang),
   vector ALU 32-bucket skip partitions (multiplyAlu/…; +1.0 s wall).
+
+Also tried against the present workload above. These were measured by recording
+a full guest run's model calls and replaying them against a candidate model,
+checking every return value and every written byte against the recording, so a
+behavioural regression shows up as a mismatch rather than as a faster number.
+The recording was taken on the `vertex_draw` workload: 21.6 M ticks, 1.31 G hold
+invocations, and the baseline candidate replays it at 7.85 µs/tick with zero
+mismatches.
+
+- **The giant `sharers` hold ladders.** Sixteen holds are ~6,100 lines each with
+  864 `sharers_n =` assignments, and "body lines × executions" makes them look
+  like half the cost. They are **0.8%**. They are nested `if`s: the outer
+  condition is a large disjunction, so when it is false the whole ladder is
+  skipped in O(1), and lines are not executions. Profiling the standalone replay
+  binary instead of QEMU gives `tick_nba` 87.65%, all `_eager*` 10.42%, all
+  holds 0.8%. Cost proxies only work on straight-line code.
+- **`-O3` on the shards, and `-O2` for `dut_commit.cpp`** — 7.85 → 7.79 and
+  7.85 → 7.76 µs/tick. Both noise, and the `-O2` costs 10.5 minutes of compile.
+- **Smaller `_EAGER_CHUNK` (1024 → 256) for instruction locality** — exactly
+  0%. A 10,711-line pass becomes four chunks of ≤2,689 and nothing moves.
+- **Skipping the sequential guard list when nothing was invalidated.** Every
+  guard is "has my page moved since I last ran", so a tick that invalidates
+  nothing can skip all 878 of them behind one compare. Measured 7.85 → 7.81:
+  pages are invalidated on essentially every tick (27.4 of 4,240 passes re-run),
+  so the gate never fires.
+- **Trimming the coarse `_up` wake channel.** 94 passes are woken when one L2
+  state decode flips; 73 genuinely depend on it. The 21 spurious ones are small,
+  so the reachable win is under 1%.
+- **Within-function CSE of repeated wire expressions.** 21.5% of assignments are
+  structurally repeated inside their function, but 53.6% of those repeats are
+  single-operator (`!x`), where sharing costs the load it saves. The profitable
+  bucket is the two-operator one, and it adds ~66k locals to a function that is
+  already 24,000 cycles.
+- **Bit-parallel evaluation.** The design does have lane structure — 91
+  isomorphic families, 89 of them 256-way, from the L2 tag ways — but they cover
+  only **10.5%** of wires (19.4% inside the hottest passes). Arithmetic would
+  drop to ~0.9×, i.e. a 1.11× ceiling, in exchange for widening the expression
+  layer's type system and validating lane correspondence.
+
+That list is the shape of the remaining problem. Change detection is close to
+optimal: 27.4 of 4,240 passes re-run per tick (0.6%), and the ones that re-run
+have to. One L2 state decode bit has 111,005 transitive consumers and gates 4,083
+of the 4,322 wires in the hottest pass, so that cone genuinely recomputes when
+it changes — the dependency is dense and real, not an artifact of coarse
+invalidation. At ~0.9 cycles per wire the emitted code is close to what scalar
+bitwise evaluation costs.
+
+Going further therefore means changing what has to be evaluated, not how fast it
+is evaluated: `l2.slices[*].sharers` and `valid` are dynamically indexed
+register vectors that firtool expands into hundreds of per-entry enable chains,
+and modelling them as array-indexed writes is a frontend change. Nothing in
+this file can substitute for it.
 
 ### Reproducible builds
 
