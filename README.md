@@ -252,8 +252,24 @@ Tried and **reverted** (no net win, measured not guessed):
   3.5x fewer wake-construction ops, measured 1.003x geomean, because commit
   only runs ~1 slot per tick so the whole path is under 1% of a cycle.
 - **`-O2` for `dut_commit.cpp`** — `-O1`/`-O2` there compile in 50/70s, not
-  "hours", so the stated rationale for the `-O0` is wrong. But it is measured
-  neutral: commit runs 0.67 slots/tick on a live design. The `-O0` stays.
+  "hours", so the stated rationale for the `-O0` is wrong. On the `vertex_draw`
+  replay it is neutral: commit runs 0.67 slots/tick there. But "neutral" is
+  workload-specific, and on the *scanout* path that a present actually spends
+  its time in it is a large regression. Measured on the 320x240 model with the
+  scanout free-running (1.00 commit/tick, the free-running-display case), Apple
+  clang 16, M4 Max, ns/tick over three runs each:
+
+  | `dut_commit.cpp` | idle | scanout active |
+  |---|---|---|
+  | `-O0` (current) | 180.7 | **199.4** |
+  | `-O1` | 111.5 (-38%) | 190.1 (**+33% worse**) |
+  | `-O2` | 114.3 (-37%) | 234.8 (**+64% worse**) |
+
+  So `-O0` stays, and for a different reason than "compile time": raising it
+  buys a large idle win and pays a much larger active loss, because the commit
+  body bloats the hot tick path. Quote the workload with any commit-path
+  number. (`-O3` on the shards is also a slight loss on this codegen: idle
+  181.1 → 186.6, active 199.8 → 205.6.)
 - cond-ranked mega promote, hold-bucket 64, fanout-ranked promote, SETTLE_MIN=128 default, noinline outline
   of coalescer hold arms, global dmux SPLIT=16 / CHUNK=8, Concat-part-only hoist
   of vectorTlb `writeData` 16-deep lanes, heavy-hold isolation by ternary size,
@@ -279,7 +295,9 @@ mismatches.
   binary instead of QEMU gives `tick_nba` 87.65%, all `_eager*` 10.42%, all
   holds 0.8%. Cost proxies only work on straight-line code.
 - **`-O3` on the shards, and `-O2` for `dut_commit.cpp`** — 7.85 → 7.79 and
-  7.85 → 7.76 µs/tick. Both noise, and the `-O2` costs 10.5 minutes of compile.
+  7.85 → 7.76 µs/tick. Both noise against this replay, and the `-O2` costs 10.5
+  minutes of compile. Re-measured against the scanout path rather than this
+  replay, both are small losses — see the `dut_commit.cpp` entry above.
 - **Smaller `_EAGER_CHUNK` (1024 → 256) for instruction locality** — exactly
   0%. A 10,711-line pass becomes four chunks of ≤2,689 and nothing moves.
 - **Skipping the sequential guard list when nothing was invalidated.** Every
@@ -314,6 +332,41 @@ is evaluated: `l2.slices[*].sharers` and `valid` are dynamically indexed
 register vectors that firtool expands into hundreds of per-entry enable chains,
 and modelling them as array-indexed writes is a frontend change. Nothing in
 this file can substitute for it.
+
+### PGO is available and is the only flag-level win left
+
+The embedded build (`arti_model.py`'s `BUILD_EMBEDDED` template) uses plain
+`-O2` on the shards, `-O0` on `dut_commit.cpp`, `-O1` on the wrapper, and no
+`-march`/`-mcpu`. Of those, only the optimisation *level* has anything left in
+it, and it is negative: `-O3` on the shards is a slight loss (see above), and
+`-mcpu=native` measured inside the noise on the scanout path (active
+210.0 → 203.3 ns/tick, idle unchanged) while costing build portability.
+
+Two-phase PGO is the one thing that does pay. Compiling the shards with
+`-fprofile-generate`, running the model, merging with `llvm-profdata`, then
+recompiling with `-fprofile-use` measured (Apple clang 16, M4 Max, ns/tick,
+three runs each, scanout free-running plus a quiet-MMIO phase):
+
+| model | phase | `-O2` | PGO | delta |
+|---|---|---:|---:|---:|
+| 320x240 (shader cores on) | idle | 180.7 | 166.6 | **-7.8%** |
+| 320x240 | scanout active | 199.4 | 184.2 | **-7.6%** |
+| GpuHostSystemAxi 64x64 | idle | 123.9 | 115.5 | **-6.8%** |
+| GpuHostSystemAxi 64x64 | scanout active | 143.4 | 132.6 | **-7.6%** |
+
+It is deliberately *not* wired in, for two reasons. It doubles shard compile
+time (two full passes over ~90 MB of emitted C++), and — the real blocker —
+it needs a training workload, and `arti_smoke.cpp` is not one: it reads
+`GPU_ID`, writes `color_base` and checks an IRQ, so a profile from it would
+describe almost nothing. Training has to cover the paths that dominate a real
+run (the free-running scanout, the raster/fragment path, the shader path), and
+picking that workload is a design decision, not a build default. PGO also does
+not threaten the byte-identical emitter output claimed below, since it changes
+only the compiler's decisions, not the emitted C++.
+
+Anyone wiring it up should train on more than the scanout alone: the scanout
+path and the shader path barely share a hot branch, and a scanout-only profile
+is what the numbers above actually are.
 
 ### Reproducible builds
 
