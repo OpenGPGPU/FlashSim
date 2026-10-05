@@ -925,16 +925,21 @@ static void tick_with(void (*combo_fn)(void), void (*eval_fn)(void))
     // advance on every such tick, not only while `_chg` is set: gating it on
     // `_chg` makes the limit unreachable exactly when the design goes quiet,
     // which is when the settle most needs to exit.
-    if (axi_busy())
+    //
+    // axi_busy() is sampled once here and reused by the active test below;
+    // it reads five DUT valids plus three queue depths, and this runs on
+    // every tick of every settle.
+    const bool busy = axi_busy();
+    if (busy)
       g_chg_tail = 0;
     else if (g_chg_tail < chg_tail())
       g_chg_tail++;
-  }
-  if (gpu_active()) {
-    g_arti_idle = 0;
-    g_stat_active_ticks++;
-  } else {
-    g_arti_idle++;
+    if (busy || (g_rtl->_chg != 0 && g_chg_tail < chg_tail())) {
+      g_arti_idle = 0;
+      g_stat_active_ticks++;
+    } else {
+      g_arti_idle++;
+    }
   }
   g_stat_ticks++;
 }
