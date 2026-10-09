@@ -1667,7 +1667,7 @@ def emit_expr(expr: Expr, sigs: dict[str, Signal]) -> str:
     if isinstance(expr, Extract):
         src = emit_expr(expr.a, sigs)
         if isinstance(expr.a, Id) and expr.a.name in sigs and is_wide(sigs[expr.a.name].width):
-            return f"fs_getbits({expr.a.name}, {expr.low}u, {expr.width}u)"
+            return _load_bits(expr.a.name, expr.low, expr.width)
         mask = mask_expr(expr.width)
         if expr.low:
             src_w = _expr_width(expr.a, sigs)
