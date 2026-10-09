@@ -46,6 +46,10 @@ from flashsim.ir import (
 
 
 def optimize(mod: Module) -> Module:
+    # CIRCT's single-use SSA chains become deeply nested mux expressions as
+    # they are inlined. C++ emission already allows this depth; optimization
+    # must use the same limit before traversing those expressions.
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
     assigns = {a.lhs: a.rhs for a in mod.assigns}
     sigs = dict(mod.signals)
     body = mod.always.body
