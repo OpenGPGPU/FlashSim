@@ -1581,6 +1581,15 @@ def mask_expr(width: int) -> str | None:
     return hex((1 << width) - 1)
 
 
+def _bounded_index(index: str, depth: int) -> str:
+    """Wrap memory indices without aliasing valid non-power-of-two entries."""
+    if not depth:
+        return index
+    if (depth & (depth - 1)) == 0:
+        return f"(({index}) & {depth - 1}u)"
+    return f"(({index}) % {depth}u)"
+
+
 def _emit_const(value: int, width: int) -> str:
     value &= (1 << width) - 1 if width < 128 else (1 << 128) - 1
     if width <= 32:
@@ -1690,14 +1699,12 @@ def emit_expr(expr: Expr, sigs: dict[str, Signal]) -> str:
         arr = emit_expr(expr.arr, sigs)
         idx = emit_expr(expr.index, sigs)
         depth = _array_depth(expr.arr, sigs)
-        if depth:
-            idx = f"(({idx}) & {depth - 1}u)"
+        idx = _bounded_index(idx, depth)
         return f"{arr}[{idx}]"
     if isinstance(expr, MemRead):
         depth = sigs[expr.mem].depth
         idx = emit_expr(expr.addr, sigs)
-        if depth:
-            idx = f"(({idx}) & {depth - 1}u)"
+        idx = _bounded_index(idx, depth)
         return f"{expr.mem}[{idx}]"
     raise TypeError(type(expr))
 
@@ -2443,7 +2450,6 @@ def emit_cpp(mod: Module) -> str:
             lines.append(call)
         for i, wr in enumerate(mod.mem_writes):
             depth = sigs[wr.mem].depth
-            mask = depth - 1 if depth else 0
             w = sigs[wr.mem].width
             lines.append(f"      if (__we{i}) {{")
             decl: set[str] = set()
@@ -2478,7 +2484,7 @@ def emit_cpp(mod: Module) -> str:
             else:
                 lines.append(f"        __wd{i} = {emit_expr(wr.data, sigs)};")
             lines.append(
-                f"        __wa{i} = ({emit_expr(wr.addr, sigs)}) & {mask}u;"
+                f"        __wa{i} = {_bounded_index(emit_expr(wr.addr, sigs), depth)};"
             )
             lines.append("      }")
         lines.append("    }")
@@ -3347,8 +3353,7 @@ def _emit_wide_assign(
         _emit_demand(expr, cached, lines, indent)
         depth = sigs[expr.mem].depth
         idx = emit_expr(expr.addr, sigs)
-        if depth:
-            idx = f"(({idx}) & {depth - 1}u)"
+        idx = _bounded_index(idx, depth)
         mem_w = sigs[expr.mem].width
         if is_wide(mem_w):
             lines.append(f"{sp}memcpy({dest}, {expr.mem}[{idx}], sizeof({dest}));")
@@ -3437,8 +3442,7 @@ def _emit_wide_assign(
         arr = emit_expr(expr.arr, sigs)
         idx = emit_expr(expr.index, sigs)
         depth = _array_depth(expr.arr, sigs)
-        if depth:
-            idx = f"(({idx}) & {depth - 1}u)"
+        idx = _bounded_index(idx, depth)
         elem_w = _expr_width(expr, sigs)
         if is_wide(elem_w):
             lines.append(f"{sp}memcpy({dest}, {arr}[{idx}], sizeof({dest}));")
@@ -3482,8 +3486,7 @@ def _emit_array_assign(
         _emit_demand(expr.value, cached, lines, indent)
         depth = _array_depth(expr, sigs)
         idx = emit_expr(expr.index, sigs)
-        if depth:
-            idx = f"(({idx}) & {depth - 1}u)"
+        idx = _bounded_index(idx, depth)
         val_w = _expr_width(expr.value, sigs)
         val = emit_expr(expr.value, sigs)
         if is_wide(val_w):
