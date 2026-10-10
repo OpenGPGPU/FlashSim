@@ -495,6 +495,36 @@ if __name__ == "__main__":
     print("ok")
 
 
+def test_page_gen_gates_idle_eager_demand() -> None:
+    """Idle ticks must not rescan eager demands after pages stop changing."""
+    from flashsim import emit as em
+    from flashsim.ir import AlwaysFF, Assign, Id, Module, NbAssign, Signal
+
+    em._PAGE_GEN = True
+    lines: list[str] = []
+    em._emit_bump_sig((3,), (), {}, lines, 4)
+    assert any("_pg[3]++;" in ln for ln in lines)
+    assert any("_pg_gen++;" in ln for ln in lines)
+    em._PAGE_GEN = False
+
+    mod = Module(
+        name="PageGate",
+        signals={
+            "clock": Signal("clock", 1, "input"),
+            "r": Signal("r", 8, "reg"),
+            "w": Signal("w", 8, "wire"),
+            "out": Signal("out", 8, "output"),
+        },
+        assigns=[Assign("w", Id("r")), Assign("out", Id("w"))],
+        always=AlwaysFF("clock", [NbAssign("r", Id("w"))]),
+        ports=["clock", "out"],
+    )
+    text = em.emit_cpp(mod)
+    assert "_pg_gen = 1;" in text
+    assert "_demand_gen = 0;" in text
+    assert "_pg[0]++;\n      _pg_gen++;" in text
+
+
 def test_pass_wake_arms_summary_and_dispatch_rereads() -> None:
     """Pass dispatch walks `_p_any` and must still see same-tick later wakes.
 

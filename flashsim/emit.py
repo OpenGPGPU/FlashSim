@@ -1359,17 +1359,20 @@ def _emit_bump_sig(
         if len(parts) <= _BUMP_INLINE:
             for p in parts:
                 lines.append(f"{sp}_pg[{p}]++;")
+                _note_page_gen(lines, indent)
         elif once:
             # Pages are only compared for equality, so registers sharing a
             # table need one bump per commit, not one each.
             i = tables[parts]
+            gen = " _pg_gen++;" if _PAGE_GEN else ""
             lines.append(
                 f"{sp}if (_bst[{i}] != _bep) {{ _bst[{i}] = _bep; "
-                f"fs_bump(_pg, _inv{i}, {len(parts)}u); }}"
+                f"fs_bump(_pg, _inv{i}, {len(parts)}u);{gen} }}"
             )
         else:
             i = tables[parts]
             lines.append(f"{sp}fs_bump(_pg, _inv{i}, {len(parts)}u);")
+            _note_page_gen(lines, indent)
     if not holds:
         return
     if len(holds) <= _BUMP_INLINE:
@@ -1524,6 +1527,14 @@ _HOLD_TAKEN = ""
 _LARGE = False
 _LARGE_WRITES = 256
 _HOLD_GROUP = 24
+# When set, every page bump also increments `_pg_gen` so tick_nba can skip
+# the eager-demand scan on ticks where no leaf changed.
+_PAGE_GEN = False
+
+
+def _note_page_gen(lines: list[str], indent: int) -> None:
+    if _PAGE_GEN:
+        lines.append(f"{' ' * indent}_pg_gen++;")
 
 def _eval_invoke(name: str, indent: int) -> str:
     sp = " " * indent
@@ -1830,6 +1841,8 @@ def emit_cpp(mod: Module) -> str:
             leaf_parts.setdefault(leaf, []).append(nparts)
         pass_page.append(nparts)
         nparts += 1
+    global _PAGE_GEN
+    _PAGE_GEN = nparts > 0
     inv_tables = _invalidation_tables(leaf_parts)
     write_flags = [n for n in writes if not sigs[n].depth]
     large = len(writes) >= _LARGE_WRITES
@@ -2189,6 +2202,11 @@ def emit_cpp(mod: Module) -> str:
     if nparts:
         lines.append(f"  uint32_t _pg[{nparts}];")
         lines.append(f"  uint32_t _seq_seen[{nparts}] = {{}};")
+        # `_pg_gen` changes whenever any page does. `_demand_gen` is the
+        # generation last scanned by the eager-demand helpers, so an idle
+        # tick skips those compares entirely.
+        lines.append("  uint32_t _pg_gen = 1;")
+        lines.append("  uint32_t _demand_gen = 0;")
     if large:
         for name in writes:
             sig = sigs[name]
@@ -2349,6 +2367,36 @@ def emit_cpp(mod: Module) -> str:
             lines.append("    }")
             lines.append("  }")
             lines.append("")
+    seq_body_pre = live_stmts if large else always_body
+    seq_cached_pre = always_cond_reads(seq_body_pre) & cached
+    for wr in mod.mem_writes:
+        seq_cached_pre |= expr_ids(wr.enable) & cached
+    seq_calls: list[str] = []
+    _emit_eval_calls(seq_cached_pre, cached, assigns, stop, seq_calls, indent=4)
+    mem_en_demanded: set[str] = set()
+    mem_data_demanded: set[str] = set()
+    for wr in mod.mem_writes:
+        mem_en_demanded |= _cached_deps_for_expr(wr.enable, assigns, cached, stop)
+        for expr in (wr.data, wr.addr):
+            mem_data_demanded |= _cached_deps_for_expr(expr, assigns, cached, stop)
+    mem_data_demanded -= mem_en_demanded
+    mem_all_demanded = mem_en_demanded | mem_data_demanded
+    mem_calls = list(dict.fromkeys(
+        call for dep in sorted(mem_en_demanded) if (call := _eval_invoke(dep, 4))
+    ))
+    gate_demand = _PAGE_GEN and bool(seq_calls or mem_calls)
+    # Out of line so an idle tick does not build the address prologue for
+    # hundreds of `_eg != _pg` compares inside tick_nba.
+    if gate_demand and seq_calls:
+        lines.append("  __attribute__((noinline)) void _demand_seq() {")
+        lines.extend(seq_calls)
+        lines.append("  }")
+        lines.append("")
+    if gate_demand and mem_calls:
+        lines.append("  __attribute__((noinline)) void _demand_mem() {")
+        lines.extend(mem_calls)
+        lines.append("  }")
+        lines.append("")
     lines.append("  void tick() {")
     lines.append("    _chg = 0;")
     lines.append("    poke_inputs();")
@@ -2377,7 +2425,16 @@ def emit_cpp(mod: Module) -> str:
     seq_cached = always_cond_reads(seq_body) & cached
     for wr in mod.mem_writes:
         seq_cached |= expr_ids(wr.enable) & cached
-    _emit_eval_calls(seq_cached, cached, assigns, stop, lines, indent=4)
+    if gate_demand:
+        # Captured before holds. Holds do not bump pages; commit does, and
+        # that bump must be visible on the next tick rather than this one.
+        lines.append("    uint8_t _demand = _demand_gen != _pg_gen;")
+        if seq_calls:
+            lines.append("    if (_demand) { _demand_gen = _pg_gen; _demand_seq(); }")
+        else:
+            lines.append("    if (_demand) _demand_gen = _pg_gen;")
+    else:
+        lines.extend(seq_calls)
     if large:
         if write_flags:
             # Reset the dirty flags by walking the previous tick's list, not by
@@ -2462,17 +2519,15 @@ def emit_cpp(mod: Module) -> str:
     # Mem-write path is two-phase: evaluate enable cones every tick (cheap —
     # usually a handful of skip-cached wires), then only if any enable fires
     # pull data/addr cones. Quiet settle ticks otherwise paid hundreds of
-    # unused __ok checks + wide pack temps every cycle.
-    mem_en_demanded: set[str] = set()
-    mem_data_demanded: set[str] = set()
-    for wr in mod.mem_writes:
-        mem_en_demanded |= _cached_deps_for_expr(wr.enable, assigns, cached, stop)
-        for expr in (wr.data, wr.addr):
-            mem_data_demanded |= _cached_deps_for_expr(expr, assigns, cached, stop)
-    mem_data_demanded -= mem_en_demanded
-    mem_all_demanded = mem_en_demanded | mem_data_demanded
-    for dep in sorted(mem_en_demanded):
-        lines.append(_eval_invoke(dep, 4))
+    # unused __ok checks + wide pack temps every cycle. When no page has
+    # changed since the last scan, the enable wires are still current.
+    if gate_demand and mem_calls:
+        lines.append("    if (_demand) _demand_mem();")
+    else:
+        for dep in sorted(mem_en_demanded):
+            call = _eval_invoke(dep, 4)
+            if call:
+                lines.append(call)
     for i, wr in enumerate(mod.mem_writes):
         w = sigs[wr.mem].width
         _emit_compute(
@@ -2604,6 +2659,7 @@ def emit_cpp(mod: Module) -> str:
     _HOLD_WAKE_PACKED = {}
     _WAKE_PACK_WORDS = 0
     _LARGE = False
+    _PAGE_GEN = False
     return "\n".join(lines) + "\n"
 
 
