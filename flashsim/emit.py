@@ -1444,12 +1444,66 @@ def _bump_parts(
     _emit_pass_wake(_LEAF_PASSES.get(leaf, ()), lines, indent)
 
 
+def _pass_summary_init(nwords: int) -> str:
+    """One bit per `_p_need` word. The tail of the last word stays clear."""
+    nsw = (nwords + 63) // 64
+    parts: list[str] = []
+    for sw in range(nsw):
+        live = min(64, max(0, nwords - sw * 64))
+        if live >= 64:
+            parts.append("~0ull")
+        elif live <= 0:
+            parts.append("0ull")
+        else:
+            parts.append(f"{(1 << live) - 1:#x}ull")
+    return ", ".join(parts)
+
+
 def _emit_pass_wake(passes, lines: list[str], indent: int) -> None:
     words: dict[int, int] = defaultdict(int)
     for r in passes:
         words[_PASS_BIT[r] >> 6] |= 1 << (_PASS_BIT[r] & 63)
     for w, mask in sorted(words.items()):
         lines.append(f"{' ' * indent}_p_need[{w}] |= {mask:#x}ull;")
+        # The dispatch loop walks `_p_any`, so a bare `_p_need` update leaves
+        # the pass asleep until some other wake arms this word.
+        lines.append(
+            f"{' ' * indent}_p_any[{w >> 6}] |= "
+            f"(1ull << {w & 63}u);"
+        )
+
+
+def _emit_pass_dispatch(lines: list[str], npw: int, npass: int) -> None:
+    """Drain woken passes through a summary-of-words bitmap.
+
+    A flat scan re-reads every `_p_need` word on every tick. Passes are
+    topological — a pass only wakes a later one — so one ascending drain
+    that re-reads each word still sees every same-tick wake. The summary
+    scan has to preserve that: re-read the current word (a later bit in
+    the same word must run now) and merge summary bits above the cursor
+    (a later word in this group may have been idle when the snapshot was
+    taken). Earlier words are not revisited, matching the old scan.
+    """
+    nsw = (npw + 63) // 64
+    lines.append(f"    for (unsigned sw = 0; sw < {nsw}u; sw++) {{")
+    lines.append("      uint64_t sw_bits = _p_any[sw];")
+    lines.append("      while (sw_bits) {")
+    lines.append("        unsigned si = (unsigned)__builtin_ctzll(sw_bits);")
+    lines.append("        sw_bits &= sw_bits - 1ull;")
+    lines.append("        unsigned w = (sw << 6) + si;")
+    lines.append(f"        if (w >= {npw}u) break;")
+    lines.append("        uint64_t bits;")
+    lines.append("        while ((bits = _p_need[w])) {")
+    lines.append("          unsigned b = (unsigned)__builtin_ctzll(bits);")
+    lines.append("          _p_need[w] = bits & (bits - 1ull);")
+    lines.append("          unsigned i = (w << 6) + b;")
+    lines.append(f"          if (i < {npass}u) (this->*kPasses[i])();")
+    lines.append("        }")
+    lines.append("        if (!_p_need[w]) _p_any[sw] &= ~(1ull << si);")
+    # si == 63 has no higher bit; shifting a uint64_t by 64 is undefined.
+    lines.append("        if (si < 63u) sw_bits |= _p_any[sw] & (~0ull << (si + 1u));")
+    lines.append("      }")
+    lines.append("    }")
 
 
 _WIRE_PART: dict[str, int] = {}
@@ -2128,6 +2182,10 @@ def emit_cpp(mod: Module) -> str:
         npw = (len(pass_bit) + 63) // 64
         init = ", ".join("~0ull" for _ in range(npw))
         lines.append(f"  uint64_t _p_need[{npw}] = {{{init}}};")
+        nsw = (npw + 63) // 64
+        lines.append(
+            f"  uint64_t _p_any[{nsw}] = {{{_pass_summary_init(npw)}}};"
+        )
     if nparts:
         lines.append(f"  uint32_t _pg[{nparts}];")
         lines.append(f"  uint32_t _seq_seen[{nparts}] = {{}};")
@@ -2314,15 +2372,7 @@ def emit_cpp(mod: Module) -> str:
             comma = "," if i + 1 < len(pass_bit) else ""
             lines.append(f"      &{cls}::_pn{r}{comma}")
         lines.append("    };")
-        lines.append(f"    for (unsigned w = 0; w < {npw}u; w++) {{")
-        lines.append("      uint64_t bits;")
-        lines.append("      while ((bits = _p_need[w])) {")
-        lines.append("        unsigned b = (unsigned)__builtin_ctzll(bits);")
-        lines.append("        _p_need[w] = bits & (bits - 1ull);")
-        lines.append("        unsigned i = (w << 6) + b;")
-        lines.append(f"        if (i < {len(pass_bit)}u) (this->*kPasses[i])();")
-        lines.append("      }")
-        lines.append("    }")
+        _emit_pass_dispatch(lines, npw, len(pass_bit))
     seq_body = live_stmts if large else always_body
     seq_cached = always_cond_reads(seq_body) & cached
     for wr in mod.mem_writes:

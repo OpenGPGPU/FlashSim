@@ -495,6 +495,41 @@ if __name__ == "__main__":
     print("ok")
 
 
+def test_pass_wake_arms_summary_and_dispatch_rereads() -> None:
+    """Pass dispatch walks `_p_any` and must still see same-tick later wakes.
+
+    A snapshot of `_p_need[w]` drops bits a running pass sets in that word,
+    and a snapshot of `_p_any` drops words that were idle when the group was
+    entered. Both have to be re-read: passes are topological and the old
+    ascending scan ran those wakes before hold dispatch in the same tick.
+    """
+    import flashsim.emit as emit
+
+    emit._PASS_BIT = {3: 0, 9: 70, 11: 130}
+    lines: list[str] = []
+    emit._emit_pass_wake([3, 9, 11], lines, 6)
+    text = "\n".join(lines)
+    assert "_p_need[0] |= 0x1ull;" in text
+    assert "_p_any[0] |= (1ull << 0u);" in text
+    assert "_p_need[1] |= 0x40ull;" in text
+    assert "_p_any[0] |= (1ull << 1u);" in text
+    assert "_p_need[2] |= 0x4ull;" in text
+    assert "_p_any[0] |= (1ull << 2u);" in text
+    assert text.count("_p_need[") == text.count("_p_any[")
+
+    # 196 words: summary groups 0..2 are full, group 3 has words 192..195.
+    assert emit._pass_summary_init(196) == "~0ull, ~0ull, ~0ull, 0xfull"
+
+    lines = []
+    emit._emit_pass_dispatch(lines, 196, 12525)
+    body = "\n".join(lines)
+    assert "for (unsigned sw = 0; sw < 4u; sw++)" in body
+    assert "while ((bits = _p_need[w]))" in body
+    assert "sw_bits |= _p_any[sw] & (~0ull << (si + 1u))" in body
+    assert "if (w >= 196u) break;" in body
+    assert "if (i < 12525u)" in body
+
+
 def test_every_hold_wake_arms_the_summary_word() -> None:
     """Every emitted `_h_need` set must also arm `_h_any`.
 
