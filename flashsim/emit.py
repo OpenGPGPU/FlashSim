@@ -1622,6 +1622,41 @@ def limb_count(width: int) -> int:
     return (width + 63) // 64
 
 
+def _field_layout(width: int) -> tuple[int, int]:
+    """Size and alignment of one input word, matching `_storage_decl`."""
+    if is_wide(width):
+        return limb_count(width) * 8, 8
+    if width <= 8:
+        return 1, 1
+    if width <= 16:
+        return 2, 2
+    if width <= 32:
+        return 4, 4
+    if width <= 64:
+        return 8, 8
+    return 16, 16
+
+
+def _input_image_bytes(
+    inputs: list[str], used: set[str], sigs: dict[str, Signal]
+) -> int:
+    """Bytes from the first input through the last input's prev copy.
+
+    Inputs and their `__prev` shadows are declared as one contiguous run.
+    A quiet host rewrites the same values, so one compare of that run
+    replaces the per-port checks.
+    """
+    off = 0
+    for name in inputs:
+        sz, al = _field_layout(sigs[name].width)
+        off = (off + al - 1) & ~(al - 1)
+        off += sz
+        if name in used:
+            off = (off + al - 1) & ~(al - 1)
+            off += sz
+    return off
+
+
 def _storage_decl(name: str, width: int, depth: int = 0, init: bool = True) -> str:
     suffix = " = {}" if init else ""
     zero = " = 0" if init else ""
@@ -2181,6 +2216,9 @@ def emit_cpp(mod: Module) -> str:
         lines.append(f"  {_storage_decl(name, width)}")
         if name in used_inputs:
             lines.append(f"  {_storage_decl(name + '__prev', width)}")
+    in_span = _input_image_bytes(inputs, used_inputs, sigs) if used_inputs else 0
+    if in_span:
+        lines.append(f"  uint8_t _in_snap[{in_span}] = {{}};")
     for name in sorted(cached):
         sig = sigs.get(name)
         width = sig.width if sig else 32
@@ -2266,8 +2304,14 @@ def emit_cpp(mod: Module) -> str:
         else:
             lines.append(f"      {name}__prev = {name};")
     lines.append("      __inited = 1;")
+    if in_span:
+        lines.append(f"      memcpy(_in_snap, &{inputs[0]}, sizeof(_in_snap));")
     lines.append("      return;")
     lines.append("    }")
+    if in_span:
+        lines.append(
+            f"    if (memcmp(&{inputs[0]}, _in_snap, sizeof(_in_snap)) == 0) return;"
+        )
     for name in inputs:
         if name not in used_inputs:
             continue
@@ -2282,6 +2326,8 @@ def emit_cpp(mod: Module) -> str:
         else:
             lines.append(f"      {name}__prev = {name};")
         lines.append("    }")
+    if in_span:
+        lines.append(f"    memcpy(_in_snap, &{inputs[0]}, sizeof(_in_snap));")
     lines.append("  }")
     lines.append("")
     for name in sorted(cached):

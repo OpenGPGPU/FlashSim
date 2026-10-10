@@ -506,6 +506,30 @@ def test_empty_dirty_list_skips_commit() -> None:
     assert "if (_ac_any) {" in text
 
 
+def test_poke_skips_unchanged_input_image() -> None:
+    """Unchanged inputs are one block compare, not a per-port walk."""
+    from flashsim.emit import emit_cpp
+    from flashsim.ir import AlwaysFF, Assign, Id, Module, NbAssign, Signal
+
+    mod = Module(
+        name="InSnap",
+        signals={
+            "clock": Signal("clock", 1, "input"),
+            "a": Signal("a", 8, "input"),
+            "w": Signal("w", 8, "wire"),
+            "r": Signal("r", 8, "reg"),
+            "out": Signal("out", 8, "output"),
+        },
+        assigns=[Assign("w", Id("a")), Assign("out", Id("w"))],
+        always=AlwaysFF("clock", [NbAssign("r", Id("w"))]),
+        ports=["clock", "a", "out"],
+    )
+    text = emit_cpp(mod)
+    assert "uint8_t _in_snap[" in text
+    assert "if (memcmp(&a, _in_snap, sizeof(_in_snap)) == 0) return;" in text
+    assert "memcpy(_in_snap, &a, sizeof(_in_snap));" in text
+
+
 def test_bump_sig_stable_for_commit_batching() -> None:
     from flashsim import emit as em
 
