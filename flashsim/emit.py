@@ -2226,6 +2226,7 @@ def emit_cpp(mod: Module) -> str:
             lines.append("  void _note(uint16_t i) { if (!_w[i]) { _w[i] = 1; _wl[_nw++] = i; } }")
         if _ARRAY_INDEX:
             lines.append(f"  uint8_t _ac[{len(_ARRAY_INDEX)}] = {{}};")
+            lines.append("  uint8_t _ac_any = 0;")
         if hold_buckets:
             nh = len(hold_buckets)
             nw = (nh + 63) // 64
@@ -2453,7 +2454,10 @@ def emit_cpp(mod: Module) -> str:
             lines.append("    for (unsigned k = 0; k < _nw; k++) _w[_wl[k]] = 0;")
             lines.append("    _nw = 0;")
         if _ARRAY_INDEX:
-            lines.append("    memset(_ac, 0, sizeof(_ac));")
+            # The per-array memcmp chain is one predicted branch per memory.
+            # `_ac_any` stays clear on a quiet tick, so both the clear and the
+            # chain stay off the idle path. Holds set the flag with the byte.
+            lines.append("    if (_ac_any) { memset(_ac, 0, sizeof(_ac)); _ac_any = 0; }")
         if hold_buckets:
             nh = len(hold_buckets)
             cls = f"{mod.name}Dut"
@@ -2637,6 +2641,8 @@ def emit_cpp(mod: Module) -> str:
                 lines.append("    if (_nw) _commit(); else _bep++;")
             else:
                 lines.append("    if (_nw) _commit();")
+        if _ARRAY_INDEX:
+            lines.append("    if (_ac_any) {")
         for name, idx in _ARRAY_INDEX.items():
             lines.append(
                 f"    if (_ac[{idx}] && memcmp({name}__n, {name}, sizeof({name}))) {{"
@@ -2644,6 +2650,8 @@ def emit_cpp(mod: Module) -> str:
             _bump_parts(name, leaf_parts, inv_tables, lines, 6)
             lines.append("      _chg++;")
             lines.append(f"      memcpy({name}, {name}__n, sizeof({name}));")
+            lines.append("    }")
+        if _ARRAY_INDEX:
             lines.append("    }")
     else:
         for name in writes:
@@ -3845,7 +3853,7 @@ def _emit_nba_tree(
             if _is_array(sigs, stmt.lhs):
                 aidx = _ARRAY_INDEX.get(stmt.lhs)
                 if aidx is not None:
-                    lines.append(f"{sp}_ac[{aidx}] = 1;")
+                    lines.append(f"{sp}_ac[{aidx}] = 1; _ac_any = 1;")
                     if _HOLD_TAKEN:
                         lines.append(f"{sp}{_HOLD_TAKEN}")
                 _emit_array_assign(tmp, stmt.rhs, cached, sigs, lines, indent)

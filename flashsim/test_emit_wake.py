@@ -461,7 +461,16 @@ def test_mem_write_enable_gates_data_evals() -> None:
 def test_empty_dirty_list_skips_commit() -> None:
     """An empty dirty list must not enter the -O0 commit switch."""
     from flashsim.emit import emit_cpp
-    from flashsim.ir import AlwaysFF, Assign, Const, Id, Module, NbAssign, Signal
+    from flashsim.ir import (
+        AlwaysFF,
+        ArrayZeros,
+        Assign,
+        Const,
+        Id,
+        Module,
+        NbAssign,
+        Signal,
+    )
 
     n = 256
     signals = {
@@ -482,6 +491,19 @@ def test_empty_dirty_list_skips_commit() -> None:
     text = emit_cpp(mod)
     assert "if (_nw) _commit();" in text
     assert "\n    _commit();\n" not in text
+    signals["m"] = Signal("m", 8, "mem", depth=4)
+    body.append(NbAssign("m", ArrayZeros(4, 8)))
+    mod = Module(
+        name="EmptyCommit",
+        signals=signals,
+        assigns=[Assign("out", Id("r0"))],
+        always=AlwaysFF("clock", body),
+        ports=["clock", "out"],
+    )
+    text = emit_cpp(mod)
+    assert "if (_ac_any) { memset(_ac, 0, sizeof(_ac)); _ac_any = 0; }" in text
+    assert "_ac[0] = 1; _ac_any = 1;" in text
+    assert "if (_ac_any) {" in text
 
 
 def test_bump_sig_stable_for_commit_batching() -> None:
