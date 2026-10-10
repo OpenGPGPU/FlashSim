@@ -13,9 +13,12 @@ are sampled with `eval_*` after `poke_inputs`, matching Verilator `eval()`.
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 
 from flashsim.compile import compile_file
+from flashsim.circt_frontend import verilog_sources
 
 
 HEADER = """\
@@ -353,7 +356,12 @@ unset _ccache_libexec
 # Split DUT shards (dut_*.cpp) compile at -O2 in parallel. The thin ARTI
 # wrapper stays -O1-compatible; without shards we keep -O1 on the monolith
 # because clang -O2 never finishes on a ~300MB single TU.
-NPROC="$(sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)"
+NPROC="${FLASHSIM_COMPILE_JOBS:-$(sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)}"
+SHARD_OPT="${FLASHSIM_SHARD_OPT:--O2}"
+case "$SHARD_OPT" in
+  -O0|-O1|-O2|-O3) ;;
+  *) echo "FLASHSIM_SHARD_OPT must be -O0, -O1, -O2 or -O3" >&2; exit 1 ;;
+esac
 CXXFLAGS_BASE=(-std=gnu++17 -fPIC -fPIE -w -Wno-parentheses-equality -fbracket-depth=4096 -I.)
 OBJS=()
 
@@ -377,16 +385,30 @@ if ((${#SHARDS[@]} > 0)); then
   # design and the switch is never entered deeply. If you are chasing a slow
   # active settle, look at the page-gate pruning in tick_nba (707 pages, ~453
   # re-evaluating per quiescent cycle), not at this -O0.
+  # Keep the number of compiler processes bounded.  The old loop launched
+  # every shard at once, which made the larger multi-CU model compete for all
+  # memory even though NPROC had already been detected above.
+  running=0
+  pids=()
   for src in "${SHARDS[@]}"; do
     obj="${src%.cpp}.o"
     OBJS+=("$obj")
     if [[ "$src" == "dut_commit.cpp" ]]; then
       compile_one "$src" "$obj" -O0 &
     else
-      compile_one "$src" "$obj" -O2 &
+      compile_one "$src" "$obj" "$SHARD_OPT" &
+    fi
+    pids+=("$!")
+    running=$((running + 1))
+    if ((running >= NPROC)); then
+      wait "${pids[0]}"
+      pids=("${pids[@]:1}")
+      running=$((running - 1))
     fi
   done
-  wait
+  for pid in "${pids[@]}"; do
+    wait "$pid"
+  done
   compile_one arti_rtl_model.cpp arti_rtl_model.o -O1
   OBJS+=(arti_rtl_model.o)
 else
@@ -1185,7 +1207,7 @@ def write_embedded_model(out_dir: Path, top: str, verilog: Path | None = None,
     out_dir.mkdir(parents=True, exist_ok=True)
     if verilog is not None:
         # GpuHostSystemAxi is too large for a single -O2 TU; emit method shards.
-        split = 16 if top == "GpuHostSystemAxi" else 0
+        split = _dut_shard_count(top, verilog)
         compile_file(verilog, out_dir / "dut.h", frontend=frontend, split=split)
     (out_dir / "arti_rtl_model.h").write_text(HEADER)
     if top == "GpuHostSystemAxi":
@@ -1199,3 +1221,41 @@ def write_embedded_model(out_dir: Path, top: str, verilog: Path | None = None,
     path = out_dir / "build_embedded.sh"
     path.write_text(script)
     path.chmod(0o755)
+
+
+def _dut_shard_count(top: str, verilog: Path) -> int:
+    """Choose a shard count without changing the generated RTL.
+
+    The four-CU ``GpuHostSystemAxi`` top is materially larger than the
+    original one-CU snapshot.  Keeping the old fixed 16-way split makes each
+    C++ translation unit unnecessarily large and raises peak compiler memory.
+    The generated top names each CU explicitly, so counting those instance
+    names is a stable elaboration-size signal and does not depend on a GPU
+    configuration being imported into FlashSim.
+
+    ``FLASHSIM_DUT_SHARDS`` is an escape hatch for CI machines with a fixed
+    memory/parallelism budget.  A value of zero restores the unsplit path,
+    which is useful for small tops and for debugging.
+    """
+    if top != "GpuHostSystemAxi":
+        return 0
+    override = os.environ.get("FLASHSIM_DUT_SHARDS")
+    if override is not None:
+        try:
+            value = int(override)
+        except ValueError as exc:
+            raise ValueError("FLASHSIM_DUT_SHARDS must be an integer") from exc
+        if value < 0:
+            raise ValueError("FLASHSIM_DUT_SHARDS must be >= 0")
+        return value
+    try:
+        text = "\n".join(
+            source.read_text(errors="ignore")
+            for source in verilog_sources(verilog)
+        )
+    except OSError:
+        return 16
+    cu_ids = {int(m.group(1)) for m in re.finditer(r"_computeUnits_(\d+)_", text)}
+    if len(cu_ids) >= 4:
+        return 32
+    return 16

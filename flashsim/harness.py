@@ -41,6 +41,10 @@ class BenchIO:
     clock: str = "clk"
     prelude: str = ""
     tail: str = ""
+    # Some generated GPU snapshots keep the historical top-level interface
+    # name while newer unified-command snapshots use the same DUT top with a
+    # different port set.  A harness can select the real C++ model name here.
+    top: str | None = None
 
 
 _STD = BenchIO(
@@ -308,6 +312,7 @@ def _fields_io(
     dump_fields: list[str],
     sink: str,
     dump_hex32: frozenset[str] = frozenset(),
+    top: str | None = None,
 ) -> BenchIO:
     decls = "\n".join(f"    {_cdecl(n, w)};" for n, w, _ in fields)
     stim_lines: list[str] = []
@@ -323,7 +328,7 @@ def _fields_io(
     fmt = " ".join("%08x" if n in dump_hex32 else "%x" for n in dump_fields)
     args = ", ".join("{p}" + n for n in dump_fields)
     dump = f'    std::printf("{fmt}\\n", {args});\n'
-    return BenchIO(decls, stimulus, poke, dump, sink, clock="clock")
+    return BenchIO(decls, stimulus, poke, dump, sink, clock="clock", top=top)
 
 
 def _shared_io() -> BenchIO:
@@ -1047,6 +1052,49 @@ def _gpu_system_io() -> BenchIO:
     )
 
 
+def _gpu_system_unified_io() -> BenchIO:
+    """Idle harness for the unified-command GpuSystem interface.
+
+    The multi-CU GPU snapshot routes command, graphics and DMA traffic through
+    ``io_gpuCommand``/``io_memoryRequest``.  All omitted inputs remain at the
+    DUT's zero initial value, which gives a deterministic reset-plus-idle
+    cycle benchmark without depending on an older command bundle layout.
+    """
+    return _fields_io(
+        [
+            ("reset", 1, "(uint8_t)(i < 8)"),
+            ("io_gpuCommand_valid", 1, "0u"),
+            ("io_gpuCompletion_ready", 1, "1u"),
+            ("io_graphicsDrained", 1, "1u"),
+            ("io_graphicsHostRequest_valid", 1, "0u"),
+            ("io_graphicsHostResponse_ready", 1, "1u"),
+            ("io_graphicsShaderRequest_valid", 1, "0u"),
+            ("io_graphicsShaderResponse_ready", 1, "1u"),
+            ("io_graphicsShaderL1Invalidate_ready", 1, "1u"),
+            ("io_graphicsShaderL1InvalidateDone_valid", 1, "0u"),
+            ("io_graphicsShaderAtomicRequest_valid", 1, "0u"),
+            ("io_graphicsShaderAtomicResponse_ready", 1, "1u"),
+            ("io_memoryRequest_ready", 1, "1u"),
+            ("io_memoryResponse_valid", 1, "0u"),
+            ("io_commandResetActive", 1, "0u"),
+            ("io_instructionTlbFlush_valid", 1, "0u"),
+            ("io_vectorTlbFlush_valid", 1, "0u"),
+        ],
+        [
+            "io_gpuCommand_ready",
+            "io_gpuCompletion_valid",
+            "io_memoryRequest_valid",
+            "io_memoryRequest_bits_address",
+            "io_commandResetDone",
+        ],
+        "(uint64_t){p}io_gpuCommand_ready + {p}io_gpuCompletion_valid + "
+        "{p}io_memoryRequest_valid + {p}io_memoryRequest_bits_address + "
+        "{p}io_commandResetDone",
+        dump_hex32=frozenset({"io_memoryRequest_bits_address"}),
+        top="GpuSystem",
+    )
+
+
 def _frontend_scalar_fpu_io() -> BenchIO:
     # Mixed IMEM line: addi x1, x1, 1 then fadd.s f3, f1, f2. Finish warps after
     # the burst so the 1e6-cycle perf run is mostly idle.
@@ -1295,6 +1343,7 @@ IOS = {
     "FrontendScalarFpu": _frontend_scalar_fpu_io(),
     "Gpu": _gpu_io(),
     "GpuSystem": _gpu_system_io(),
+    "GpuSystemUnified": _gpu_system_unified_io(),
     "GpuHostAxi": _gpu_host_axi_io(),
 }
 
@@ -1317,6 +1366,7 @@ def _observe_evals(io: BenchIO) -> str:
 
 def flashsim_main(module: str, mode: str) -> str:
     io = IOS[module]
+    dut_type = io.top or module
     poke, dump, sink, decls, tail = _fmt(io, "dut.")
     do_dump = mode == "check"
     observe = _observe_evals(io)
@@ -1327,7 +1377,10 @@ def flashsim_main(module: str, mode: str) -> str:
 #include <cstring>
 
 int main() {{
-  {module}Dut dut;
+  // Value-initialize omitted input ports as zero.  This matters for wide
+  // generated tops whose harness only drives the handshake fields used by a
+  // bench; Verilator's model constructor also starts those ports at zero.
+  {dut_type}Dut dut{{}};
   const uint64_t N = CYCLES;
   uint64_t sink = 0;
   auto t0 = std::chrono::steady_clock::now();
@@ -1351,9 +1404,10 @@ int main() {{
 
 def verilator_main(module: str, mode: str) -> str:
     io = IOS[module]
+    top = io.top or module
     poke, dump, sink, decls, tail = _fmt(io, "top.")
     do_dump = mode == "check"
-    return f"""#include "V{module}.h"
+    return f"""#include "V{top}.h"
 #include "verilated.h"
 #include <chrono>
 #include <cstdint>
@@ -1362,7 +1416,7 @@ def verilator_main(module: str, mode: str) -> str:
 
 int main(int argc, char** argv) {{
   Verilated::commandArgs(argc, argv);
-  V{module} top;
+  V{top} top;
   const uint64_t N = CYCLES;
   uint64_t sink = 0;
   auto t0 = std::chrono::steady_clock::now();

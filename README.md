@@ -24,6 +24,19 @@ so idle ticks do not memcpy, re-clear, or scan hundreds of skip flags. Do
 not fork CIRCT unless a pass must land in-tree. `--frontend native` is a
 Verilog-subset fallback when CIRCT is not installed.
 
+Large `GpuHostSystemAxi` models are emitted as C++ method shards and compiled
+in parallel. Multi-CU RTL is detected from the generated source and uses a
+32-way split by default; set `FLASHSIM_DUT_SHARDS` to pin the split count for
+machines with a smaller memory or compiler parallelism budget. Set
+`FLASHSIM_COMPILE_JOBS` to limit parallel shard compilation (including the
+ARTI `build_embedded.sh` path); completed shard objects are reused between the
+correctness and performance builds. Set
+`FLASHSIM_REUSE_EMIT=1` when rerunning a benchmark against an unchanged
+generated DUT to reuse the emitted C++ and skip the Python lowering pass. Set
+`FLASHSIM_SHARD_OPT=-O0`/`-O1` for a quick multi-CU smoke build; the default is
+`-O2`; the generated `dut_commit.cpp` shard is kept at O0 because it is a
+large dirty-list switch with little effect on the normal runtime path.
+
 ARTI A/B (needs a probe initramfs under `$WORK/initramfs.cpio.gz`; build via
 `arti-work` probe setup or copy from a prior run):
 
