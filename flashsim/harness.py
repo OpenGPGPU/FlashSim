@@ -1364,10 +1364,45 @@ def _observe_evals(io: BenchIO) -> str:
     return "".join(f"    dut.eval_{n}();\n" for n in names)
 
 
+def _quiet_poke(poke: str) -> str:
+    """Drive ports, and tell the model when none of them changed.
+
+    The model otherwise memcmp's the whole input image, including wide data
+    ports this harness never rewrites. Comparing the locals it does drive is
+    enough to know the image is unchanged.
+    """
+    out = ["    uint8_t _changed = 0;"]
+    for ln in poke.splitlines():
+        if not ln.strip():
+            continue
+        assigned = re.match(r"\s*dut\.(\w+) = (.+);$", ln)
+        if assigned:
+            name, expr = assigned.group(1), assigned.group(2)
+            out.append(
+                f"    if (dut.{name} != ({expr})) "
+                f"{{ dut.{name} = {expr}; _changed = 1; }}"
+            )
+            continue
+        copied = re.match(
+            r"\s*memcpy\(&dut\.(\w+), ([^,]+), sizeof\(([^)]+)\)\);$", ln
+        )
+        if copied:
+            name, src, size = copied.group(1), copied.group(2), copied.group(3)
+            out.append(
+                f"    if (memcmp(&dut.{name}, {src}, sizeof({size}))) "
+                f"{{ memcpy(&dut.{name}, {src}, sizeof({size})); _changed = 1; }}"
+            )
+            continue
+        return poke
+    out.append("    if (dut.__inited && !_changed) dut._in_fresh = 1;")
+    return "\n".join(out)
+
+
 def flashsim_main(module: str, mode: str) -> str:
     io = IOS[module]
     dut_type = io.top or module
     poke, dump, sink, decls, tail = _fmt(io, "dut.")
+    poke = _quiet_poke(poke)
     do_dump = mode == "check"
     observe = _observe_evals(io)
     return f"""#include "dut.h"

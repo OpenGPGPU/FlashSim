@@ -507,6 +507,16 @@ def test_empty_dirty_list_skips_commit() -> None:
     assert "void _commit_ac() {" in text
 
 
+def test_quiet_poke_marks_unchanged_ports() -> None:
+    from flashsim.harness import _quiet_poke
+
+    text = _quiet_poke("    dut.reset = reset;\n    memcpy(&dut.data, data, sizeof(data));\n")
+    assert "if (dut.reset != (reset))" in text
+    assert "if (memcmp(&dut.data, data, sizeof(data)))" in text
+    assert "dut._in_fresh = 1" in text
+    assert _quiet_poke("    dut.weird();") == "    dut.weird();"
+
+
 def test_poke_skips_unchanged_input_image() -> None:
     """Unchanged inputs are one block compare, not a per-port walk."""
     from flashsim.emit import emit_cpp
@@ -527,6 +537,8 @@ def test_poke_skips_unchanged_input_image() -> None:
     )
     text = emit_cpp(mod)
     assert "uint8_t _in_snap[" in text
+    assert "uint8_t _in_fresh = 0;" in text
+    assert "if (__inited && _in_fresh) { _in_fresh = 0; return; }" in text
     assert "if (memcmp(&a, _in_snap, sizeof(_in_snap)) == 0) return;" in text
     assert "memcpy(_in_snap, &a, sizeof(_in_snap));" in text
 

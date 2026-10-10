@@ -2286,6 +2286,9 @@ def emit_cpp(mod: Module) -> str:
             )
             lines.append(f"  uint64_t _h_any[{nsw}] = {{{busy_sw}}};")
     lines.append("  uint8_t __inited = 0;")
+    # Hosts set this when every driven input still holds the value poke last
+    # recorded. A quiet tick then returns before the input-image compare.
+    lines.append("  uint8_t _in_fresh = 0;")
     # Design-independent activity signal: how many state elements actually
     # changed in the last tick(). Hosts use it to run a model to quiescence
     # without knowing anything about the design's internals.
@@ -2299,6 +2302,10 @@ def emit_cpp(mod: Module) -> str:
         lines.append(f"  uint64_t _bep = 0, _bst[{len(inv_tables)}] = {{}};")
     lines.append("")
     lines.append("  void poke_inputs() {")
+    if in_span:
+        # The image compare is the whole quiet-tick cost once the summaries
+        # are already gated. Honor a host that knows the bytes did not change.
+        lines.append("    if (__inited && _in_fresh) { _in_fresh = 0; return; }")
     lines.append("    if (!__inited) {")
     if nparts:
         lines.append(f"      for (unsigned i = 0; i < {nparts}u; i++) _pg[i] = 1;")

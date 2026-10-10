@@ -461,6 +461,9 @@ static arti_mem_read_cb g_mem_read_cb = nullptr;
 static arti_mem_write_cb g_mem_write_cb = nullptr;
 static int g_arti_debug = -1;
 static unsigned g_arti_idle = 0;
+// Set only around settle / IRQ pump loops. Those loops' only input writer is
+// mem_drive(), so an unchanged drive can skip the input-image compare.
+static int g_settle_quiet = 0;
 
 static constexpr unsigned TIMEOUT_CYCLES = 1000;
 static constexpr unsigned M_AXI_BYTES = 8;
@@ -782,22 +785,33 @@ static void idle_slave(void)
   g_rtl->io_s_axi_rready = 0;
 }
 
-static void mem_drive(void)
+template <typename T, typename U>
+static bool drive_in(T& dst, U val) {
+  T next = static_cast<T>(val);
+  if (dst == next)
+    return false;
+  dst = next;
+  return true;
+}
+
+static bool mem_drive(void)
 {
-  g_rtl->io_m_axi_awready = !g_aw_active;
-  g_rtl->io_m_axi_wready = 1;
+  bool ch = false;
+  ch |= drive_in(g_rtl->io_m_axi_awready, !g_aw_active);
+  ch |= drive_in(g_rtl->io_m_axi_wready, 1);
   // One outstanding read burst. Accepting unlimited ARs while R beats
   // sit in a software FIFO desynchronized the GPU's memoryAxi (depth
   // loads never retired, draws hung after the first write burst).
-  g_rtl->io_m_axi_arready = g_rresp.empty();
-  g_rtl->io_m_axi_bvalid = !g_bresp.empty();
-  g_rtl->io_m_axi_bresp = g_bresp.empty() ? 0 : g_bresp.front().resp;
-  g_rtl->io_m_axi_bid = g_bresp.empty() ? 0 : g_bresp.front().id;
-  g_rtl->io_m_axi_rvalid = !g_rresp.empty();
-  g_rtl->io_m_axi_rdata = g_rresp.empty() ? 0 : g_rresp.front().data;
-  g_rtl->io_m_axi_rresp = g_rresp.empty() ? 0 : g_rresp.front().resp;
-  g_rtl->io_m_axi_rlast = !g_rresp.empty() && g_rresp.front().last;
-  g_rtl->io_m_axi_rid = g_rresp.empty() ? 0 : g_rresp.front().id;
+  ch |= drive_in(g_rtl->io_m_axi_arready, g_rresp.empty());
+  ch |= drive_in(g_rtl->io_m_axi_bvalid, !g_bresp.empty());
+  ch |= drive_in(g_rtl->io_m_axi_bresp, g_bresp.empty() ? 0 : g_bresp.front().resp);
+  ch |= drive_in(g_rtl->io_m_axi_bid, g_bresp.empty() ? 0 : g_bresp.front().id);
+  ch |= drive_in(g_rtl->io_m_axi_rvalid, !g_rresp.empty());
+  ch |= drive_in(g_rtl->io_m_axi_rdata, g_rresp.empty() ? 0 : g_rresp.front().data);
+  ch |= drive_in(g_rtl->io_m_axi_rresp, g_rresp.empty() ? 0 : g_rresp.front().resp);
+  ch |= drive_in(g_rtl->io_m_axi_rlast, !g_rresp.empty() && g_rresp.front().last);
+  ch |= drive_in(g_rtl->io_m_axi_rid, g_rresp.empty() ? 0 : g_rresp.front().id);
+  return ch;
 }
 
 static void mem_capture(void)
@@ -927,7 +941,12 @@ static void force_hold_boost(void)
 static void tick_with(void (*combo_fn)(void), void (*eval_fn)(void))
 {
   force_hold_boost();
-  mem_drive();
+  const bool inputs_changed = mem_drive();
+  // Settle and the IRQ pump do not touch the control slave. When the memory
+  // side also holds its previous values, the input image is unchanged and
+  // poke can skip the compare.
+  if (g_settle_quiet && !inputs_changed)
+    g_rtl->_in_fresh = 1;
   combo_fn();
   // Sample response handshakes before the posedge so the DUT sees each
   // R/B beat for a full cycle. Popping before tick() dropped the first
@@ -998,6 +1017,7 @@ static void arti_model_settle(void)
   struct timespec s0, s1;
   if (ns_budget > 0)
     clock_gettime(CLOCK_MONOTONIC, &s0);
+  g_settle_quiet = 1;
   for (i = 0; i < mmio_advance(); i++) {
     tick_pump();
     if (i + 1 >= settle_min() && g_arti_idle > idle_grace())
@@ -1013,6 +1033,7 @@ static void arti_model_settle(void)
         break;
     }
   }
+  g_settle_quiet = 0;
   if (g_arti_debug)
     fprintf(stderr,
             "[artidbg] settle ticks=%u irq=%u idle=%u chg=%u ar=%u aw=%u "
@@ -1183,6 +1204,7 @@ extern "C" int arti_rtl_model_check_irq(unsigned index)
     g_hold_boost = hold_boost_ticks();
     g_chg_tail = 0;  // same scoping as arti_model_settle
     g_stat_irq_pumps++;
+    g_settle_quiet = 1;
     for (unsigned i = 0; i < cap && gpu_active(); i++) {
       tick_pump();
       if (limit > 0 && (i & 15u) == 15u) {
@@ -1193,6 +1215,7 @@ extern "C" int arti_rtl_model_check_irq(unsigned index)
           break;
       }
     }
+    g_settle_quiet = 0;
   }
   combo_pump();
   stats_report("check_irq");
