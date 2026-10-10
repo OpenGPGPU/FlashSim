@@ -1488,6 +1488,11 @@ def _emit_pass_dispatch(lines: list[str], npw: int, npass: int) -> None:
     taken). Earlier words are not revisited, matching the old scan.
     """
     nsw = (npw + 63) // 64
+    # The loop body is several instructions per summary word. When every
+    # word is idle, one OR is enough and the cursor machinery stays cold.
+    if nsw > 1:
+        joined = " | ".join(f"_p_any[{i}]" for i in range(nsw))
+        lines.append(f"    if ({joined}) {{")
     lines.append(f"    for (unsigned sw = 0; sw < {nsw}u; sw++) {{")
     lines.append("      uint64_t sw_bits = _p_any[sw];")
     lines.append("      while (sw_bits) {")
@@ -1507,6 +1512,8 @@ def _emit_pass_dispatch(lines: list[str], npw: int, npass: int) -> None:
     lines.append("        if (si < 63u) sw_bits |= _p_any[sw] & (~0ull << (si + 1u));")
     lines.append("      }")
     lines.append("    }")
+    if nsw > 1:
+        lines.append("    }")
 
 
 _WIRE_PART: dict[str, int] = {}
@@ -2522,6 +2529,9 @@ def emit_cpp(mod: Module) -> str:
             # GpuHostSystemAxi) for a design that dispatches ~0.8 holds per
             # tick. `_h_any` has one bit per hold word, so the scan is nsw
             # iterations -- 2 here -- and a word is only touched when awake.
+            if nsw > 1:
+                joined = " | ".join(f"_h_any[{i}]" for i in range(nsw))
+                lines.append(f"    if ({joined}) {{")
             lines.append(f"    for (unsigned sw = 0; sw < {nsw}u; sw++) {{")
             lines.append("      uint64_t sw_bits = _h_any[sw];")
             lines.append("      while (sw_bits) {")
@@ -2543,6 +2553,8 @@ def emit_cpp(mod: Module) -> str:
             lines.append("        if (!(_h_need[w] | _h_busy[w])) _h_any[sw] &= ~(1ull << si);")
             lines.append("      }")
             lines.append("    }")
+            if nsw > 1:
+                lines.append("    }")
         if live_stmts:
             lines.append("    _nba_live();")
     else:
