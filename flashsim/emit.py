@@ -2526,23 +2526,31 @@ def emit_cpp(mod: Module) -> str:
     # unused __ok checks + wide pack temps every cycle. When no page has
     # changed since the last scan, the enable wires are still current.
     gate_we = gate_demand and bool(mod.mem_writes)
-    # Locals stay in tick_nba so the commit-time store can see them. Their
-    # loads and zeroing sit behind the page/latch check: an idle tick with
-    # every enable already false does not touch them.
+    # Scratch lives on the dut, and the enable/data/store work lives in
+    # noinline helpers. Keeping the temps as tick_nba locals makes clang
+    # zero the whole frame on the idle path that never reads them, and it
+    # hoists every port address into the prologue.
+    prepare: list[str] = []
+    store: list[str] = []
+    mem_members: list[str] = []
+    phase = prepare if gate_we else lines
+    decl_at = mem_members if gate_we else lines
+    decl_sp = "  " if gate_we else "    "
     for i, wr in enumerate(mod.mem_writes):
         w = sigs[wr.mem].width
-        lines.append(f"    uint8_t __we{i};")
+        decl_at.append(f"{decl_sp}uint8_t __we{i};")
         if is_wide(w):
-            lines.append(f"    uint64_t __wd{i}[{limb_count(w)}];")
+            decl_at.append(f"{decl_sp}uint64_t __wd{i}[{limb_count(w)}];")
         else:
-            lines.append(f"    {c_type(w)} __wd{i};")
-        lines.append(f"    uint32_t __wa{i};")
-    if gate_we:
-        lines.append("    if (_demand || _we_any) {")
-    we_base = 6 if gate_we else 4
+            decl_at.append(f"{decl_sp}{c_type(w)} __wd{i};")
+        decl_at.append(f"{decl_sp}uint32_t __wa{i};")
+    we_base = 4
     we_sp = " " * we_base
     if gate_we and mem_calls:
-        lines.append("      if (_demand) _demand_mem();")
+        lines.append("    if (_demand) _demand_mem();")
+        lines.append("    if (_demand || _we_any) _mem_prepare();")
+    elif gate_we:
+        lines.append("    if (_demand || _we_any) _mem_prepare();")
     elif gate_demand and mem_calls:
         lines.append("    if (_demand) _demand_mem();")
     elif not gate_we:
@@ -2558,28 +2566,28 @@ def emit_cpp(mod: Module) -> str:
             assigns,
             stop,
             sigs,
-            lines,
+            phase,
             we_base,
             set(),
             tick_scratch,
             set(mem_en_demanded),
         )
-        lines.append(f"{we_sp}__we{i} = (uint8_t)({emit_expr(wr.enable, sigs)});")
+        phase.append(f"{we_sp}__we{i} = (uint8_t)({emit_expr(wr.enable, sigs)});")
         if not is_wide(w):
-            lines.append(f"{we_sp}__wd{i} = 0;")
-        lines.append(f"{we_sp}__wa{i} = 0;")
+            phase.append(f"{we_sp}__wd{i} = 0;")
+        phase.append(f"{we_sp}__wa{i} = 0;")
     if mod.mem_writes:
         we_or = " | ".join(f"__we{i}" for i in range(len(mod.mem_writes)))
-        lines.append(f"{we_sp}if ({we_or}) {{")
+        phase.append(f"{we_sp}if ({we_or}) {{")
         for call in dict.fromkeys(
             _eval_invoke(dep, we_base + 2) for dep in sorted(mem_data_demanded)
         ):
             if call:
-                lines.append(call)
+                phase.append(call)
         for i, wr in enumerate(mod.mem_writes):
             depth = sigs[wr.mem].depth
             w = sigs[wr.mem].width
-            lines.append(f"{we_sp}  if (__we{i}) {{")
+            phase.append(f"{we_sp}  if (__we{i}) {{")
             decl: set[str] = set()
             _emit_compute(
                 wr.data,
@@ -2587,7 +2595,7 @@ def emit_cpp(mod: Module) -> str:
                 assigns,
                 stop,
                 sigs,
-                lines,
+                phase,
                 we_base + 4,
                 decl,
                 tick_scratch,
@@ -2599,7 +2607,7 @@ def emit_cpp(mod: Module) -> str:
                 assigns,
                 stop,
                 sigs,
-                lines,
+                phase,
                 we_base + 4,
                 decl,
                 tick_scratch,
@@ -2607,18 +2615,17 @@ def emit_cpp(mod: Module) -> str:
             )
             if is_wide(w):
                 _emit_wide_assign(
-                    f"__wd{i}", wr.data, cached, sigs, lines, we_base + 4, tick_scratch
+                    f"__wd{i}", wr.data, cached, sigs, phase, we_base + 4, tick_scratch
                 )
             else:
-                lines.append(f"{we_sp}    __wd{i} = {emit_expr(wr.data, sigs)};")
-            lines.append(
+                phase.append(f"{we_sp}    __wd{i} = {emit_expr(wr.data, sigs)};")
+            phase.append(
                 f"{we_sp}    __wa{i} = {_bounded_index(emit_expr(wr.addr, sigs), depth)};"
             )
-            lines.append(f"{we_sp}  }}")
-        lines.append(f"{we_sp}}}")
+            phase.append(f"{we_sp}  }}")
+        phase.append(f"{we_sp}}}")
         if gate_we:
-            lines.append(f"{we_sp}_we_any = ({we_or}) ? 1u : 0u;")
-            lines.append("    }")
+            phase.append(f"{we_sp}_we_any = ({we_or}) ? 1u : 0u;")
     if large:
         if write_flags:
             lines.append("    _commit();")
@@ -2653,31 +2660,43 @@ def emit_cpp(mod: Module) -> str:
                 lines.append("    }")
     if mod.mem_writes:
         we_or = " | ".join(f"__we{i}" for i in range(len(mod.mem_writes)))
-        # After the gate, `__we*` is uninitialized on a skipped idle tick.
-        # `_we_any` remembers that every enable was false.
-        cond = "_we_any" if gate_we else we_or
-        lines.append(f"    if ({cond}) {{")
+        # `_we_any` remembers that every enable was false. The store helper
+        # is only entered then, so it does not re-test the latch.
+        sink = store if gate_we else lines
+        if gate_we:
+            lines.append("    if (_we_any) _mem_store();")
+        else:
+            sink.append(f"    if ({we_or}) {{")
         for i, wr in enumerate(mod.mem_writes):
             w = sigs[wr.mem].width
-            lines.append(f"      if (__we{i}) {{")
+            sink.append(f"      if (__we{i}) {{")
             if is_wide(w):
-                lines.append(
+                sink.append(
                     f"        if (memcmp({wr.mem}[__wa{i}], __wd{i}, sizeof(__wd{i}))) {{"
                 )
             else:
-                lines.append(f"        if ({wr.mem}[__wa{i}] != __wd{i}) {{")
-            _bump_parts(wr.mem, leaf_parts, inv_tables, lines, 10)
-            lines.append("          _chg++;")
-            lines.append("        }")
+                sink.append(f"        if ({wr.mem}[__wa{i}] != __wd{i}) {{")
+            _bump_parts(wr.mem, leaf_parts, inv_tables, sink, 10)
+            sink.append("          _chg++;")
+            sink.append("        }")
             if is_wide(w):
-                lines.append(
+                sink.append(
                     f"        memcpy({wr.mem}[__wa{i}], __wd{i}, sizeof(__wd{i}));"
                 )
             else:
-                lines.append(f"        {wr.mem}[__wa{i}] = __wd{i};")
-            lines.append("      }")
-        lines.append("    }")
+                sink.append(f"        {wr.mem}[__wa{i}] = __wd{i};")
+            sink.append("      }")
+        if not gate_we:
+            sink.append("    }")
     lines.append("  }")
+    if gate_we:
+        lines.extend(mem_members)
+        lines.append("  __attribute__((noinline)) void _mem_prepare() {")
+        lines.extend(prepare)
+        lines.append("  }")
+        lines.append("  __attribute__((noinline)) void _mem_store() {")
+        lines.extend(store)
+        lines.append("  }")
     lines.append("};")
     lines.append("")
     _WIRE_PART = {}
@@ -2708,7 +2727,9 @@ _SPLIT_INLINE_MAX_BYTES = 320
 # `_commit` is intentionally NOT in core: the dirty-list switch is tens of
 # thousands of lines and clang -O2 on it can hang for hours. It gets its own
 # `dut_commit.cpp` translation unit (see split_dut_methods).
-_SPLIT_CORE = frozenset({"poke_inputs", "tick", "tick_nba", "_nba_live"})
+_SPLIT_CORE = frozenset(
+    {"poke_inputs", "tick", "tick_nba", "_nba_live", "_mem_prepare", "_mem_store"}
+)
 _SPLIT_OWN_FILE = frozenset({"_commit"})
 
 _METHOD_START_RE = re.compile(

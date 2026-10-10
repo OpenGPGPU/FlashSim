@@ -446,13 +446,15 @@ def test_mem_write_enable_gates_data_evals() -> None:
     )
     text = emit_cpp(mod)
     # Idle ticks with no page change and every enable already false skip the
-    # enable loads. The store phase uses the latch so it does not read
-    # uninitialized __we* locals.
+    # enable loads. Scratch and the store live in noinline helpers so tick_nba
+    # does not zero those temps on the skip path.
     assert "uint8_t _we_any = 0;" in text
-    assert "if (_demand || _we_any)" in text
+    assert "if (_demand || _we_any) _mem_prepare();" in text
     assert "_we_any = (__we0) ? 1u : 0u;" in text
-    assert "if (_we_any) {\n      if (__we0)" in text
-    assert "uint8_t __we0" in text
+    assert "if (_we_any) _mem_store();" in text
+    assert "void _mem_prepare() {" in text
+    assert "void _mem_store() {" in text
+    assert "\n  uint8_t __we0;\n" in text
     assert "if (__we0) {" in text
     # With a single port the OR-guard collapses to if (__we0) wrapping data.
     # data_w is an output → cached; its eval must not precede the first __we0.
