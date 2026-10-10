@@ -503,7 +503,8 @@ def test_empty_dirty_list_skips_commit() -> None:
     text = emit_cpp(mod)
     assert "if (_ac_any) { memset(_ac, 0, sizeof(_ac)); _ac_any = 0; }" in text
     assert "_ac[0] = 1; _ac_any = 1;" in text
-    assert "if (_ac_any) {" in text
+    assert "if (_ac_any) _commit_ac();" in text
+    assert "void _commit_ac() {" in text
 
 
 def test_poke_skips_unchanged_input_image() -> None:

@@ -2676,6 +2676,7 @@ def emit_cpp(mod: Module) -> str:
         phase.append(f"{we_sp}}}")
         if gate_we:
             phase.append(f"{we_sp}_we_any = ({we_or}) ? 1u : 0u;")
+    ac_body: list[str] = []
     if large:
         if write_flags:
             # `_commit` is compiled at -O0 (the switch is too large for -O2).
@@ -2687,18 +2688,19 @@ def emit_cpp(mod: Module) -> str:
                 lines.append("    if (_nw) _commit(); else _bep++;")
             else:
                 lines.append("    if (_nw) _commit();")
+        # The memcmp chain names every array. Left inline, clang computes
+        # those addresses in the tick_nba prologue even when `_ac_any` is
+        # clear and the chain does not run.
         if _ARRAY_INDEX:
-            lines.append("    if (_ac_any) {")
+            lines.append("    if (_ac_any) _commit_ac();")
         for name, idx in _ARRAY_INDEX.items():
-            lines.append(
+            ac_body.append(
                 f"    if (_ac[{idx}] && memcmp({name}__n, {name}, sizeof({name}))) {{"
             )
-            _bump_parts(name, leaf_parts, inv_tables, lines, 6)
-            lines.append("      _chg++;")
-            lines.append(f"      memcpy({name}, {name}__n, sizeof({name}));")
-            lines.append("    }")
-        if _ARRAY_INDEX:
-            lines.append("    }")
+            _bump_parts(name, leaf_parts, inv_tables, ac_body, 6)
+            ac_body.append("      _chg++;")
+            ac_body.append(f"      memcpy({name}, {name}__n, sizeof({name}));")
+            ac_body.append("    }")
     else:
         for name in writes:
             sig = sigs[name]
@@ -2759,6 +2761,10 @@ def emit_cpp(mod: Module) -> str:
         lines.append("  __attribute__((noinline)) void _mem_store() {")
         lines.extend(store)
         lines.append("  }")
+    if ac_body:
+        lines.append("  __attribute__((noinline)) void _commit_ac() {")
+        lines.extend(ac_body)
+        lines.append("  }")
     lines.append("};")
     lines.append("")
     _WIRE_PART = {}
@@ -2790,7 +2796,15 @@ _SPLIT_INLINE_MAX_BYTES = 320
 # thousands of lines and clang -O2 on it can hang for hours. It gets its own
 # `dut_commit.cpp` translation unit (see split_dut_methods).
 _SPLIT_CORE = frozenset(
-    {"poke_inputs", "tick", "tick_nba", "_nba_live", "_mem_prepare", "_mem_store"}
+    {
+        "poke_inputs",
+        "tick",
+        "tick_nba",
+        "_nba_live",
+        "_mem_prepare",
+        "_mem_store",
+        "_commit_ac",
+    }
 )
 _SPLIT_OWN_FILE = frozenset({"_commit"})
 
