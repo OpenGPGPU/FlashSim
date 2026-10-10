@@ -2207,6 +2207,10 @@ def emit_cpp(mod: Module) -> str:
         # tick skips those compares entirely.
         lines.append("  uint32_t _pg_gen = 1;")
         lines.append("  uint32_t _demand_gen = 0;")
+        if mod.mem_writes:
+            # Last tick's mem-enable OR. Idle ticks with an unchanged page
+            # generation skip the enable prelude entirely.
+            lines.append("  uint8_t _we_any = 0;")
     if large:
         for name in writes:
             sig = sigs[name]
@@ -2521,9 +2525,27 @@ def emit_cpp(mod: Module) -> str:
     # pull data/addr cones. Quiet settle ticks otherwise paid hundreds of
     # unused __ok checks + wide pack temps every cycle. When no page has
     # changed since the last scan, the enable wires are still current.
-    if gate_demand and mem_calls:
+    gate_we = gate_demand and bool(mod.mem_writes)
+    # Locals stay in tick_nba so the commit-time store can see them. Their
+    # loads and zeroing sit behind the page/latch check: an idle tick with
+    # every enable already false does not touch them.
+    for i, wr in enumerate(mod.mem_writes):
+        w = sigs[wr.mem].width
+        lines.append(f"    uint8_t __we{i};")
+        if is_wide(w):
+            lines.append(f"    uint64_t __wd{i}[{limb_count(w)}];")
+        else:
+            lines.append(f"    {c_type(w)} __wd{i};")
+        lines.append(f"    uint32_t __wa{i};")
+    if gate_we:
+        lines.append("    if (_demand || _we_any) {")
+    we_base = 6 if gate_we else 4
+    we_sp = " " * we_base
+    if gate_we and mem_calls:
+        lines.append("      if (_demand) _demand_mem();")
+    elif gate_demand and mem_calls:
         lines.append("    if (_demand) _demand_mem();")
-    else:
+    elif not gate_we:
         for dep in sorted(mem_en_demanded):
             call = _eval_invoke(dep, 4)
             if call:
@@ -2537,26 +2559,27 @@ def emit_cpp(mod: Module) -> str:
             stop,
             sigs,
             lines,
-            4,
+            we_base,
             set(),
             tick_scratch,
             set(mem_en_demanded),
         )
-        lines.append(f"    uint8_t __we{i} = (uint8_t)({emit_expr(wr.enable, sigs)});")
-        if is_wide(w):
-            lines.append(f"    uint64_t __wd{i}[{limb_count(w)}];")
-        else:
-            lines.append(f"    {c_type(w)} __wd{i} = 0;")
-        lines.append(f"    uint32_t __wa{i} = 0;")
+        lines.append(f"{we_sp}__we{i} = (uint8_t)({emit_expr(wr.enable, sigs)});")
+        if not is_wide(w):
+            lines.append(f"{we_sp}__wd{i} = 0;")
+        lines.append(f"{we_sp}__wa{i} = 0;")
     if mod.mem_writes:
         we_or = " | ".join(f"__we{i}" for i in range(len(mod.mem_writes)))
-        lines.append(f"    if ({we_or}) {{")
-        for call in dict.fromkeys(_eval_invoke(dep, 6) for dep in sorted(mem_data_demanded)):
-            lines.append(call)
+        lines.append(f"{we_sp}if ({we_or}) {{")
+        for call in dict.fromkeys(
+            _eval_invoke(dep, we_base + 2) for dep in sorted(mem_data_demanded)
+        ):
+            if call:
+                lines.append(call)
         for i, wr in enumerate(mod.mem_writes):
             depth = sigs[wr.mem].depth
             w = sigs[wr.mem].width
-            lines.append(f"      if (__we{i}) {{")
+            lines.append(f"{we_sp}  if (__we{i}) {{")
             decl: set[str] = set()
             _emit_compute(
                 wr.data,
@@ -2565,7 +2588,7 @@ def emit_cpp(mod: Module) -> str:
                 stop,
                 sigs,
                 lines,
-                8,
+                we_base + 4,
                 decl,
                 tick_scratch,
                 set(mem_all_demanded),
@@ -2577,22 +2600,25 @@ def emit_cpp(mod: Module) -> str:
                 stop,
                 sigs,
                 lines,
-                8,
+                we_base + 4,
                 decl,
                 tick_scratch,
                 set(mem_all_demanded),
             )
             if is_wide(w):
                 _emit_wide_assign(
-                    f"__wd{i}", wr.data, cached, sigs, lines, 8, tick_scratch
+                    f"__wd{i}", wr.data, cached, sigs, lines, we_base + 4, tick_scratch
                 )
             else:
-                lines.append(f"        __wd{i} = {emit_expr(wr.data, sigs)};")
+                lines.append(f"{we_sp}    __wd{i} = {emit_expr(wr.data, sigs)};")
             lines.append(
-                f"        __wa{i} = {_bounded_index(emit_expr(wr.addr, sigs), depth)};"
+                f"{we_sp}    __wa{i} = {_bounded_index(emit_expr(wr.addr, sigs), depth)};"
             )
-            lines.append("      }")
-        lines.append("    }")
+            lines.append(f"{we_sp}  }}")
+        lines.append(f"{we_sp}}}")
+        if gate_we:
+            lines.append(f"{we_sp}_we_any = ({we_or}) ? 1u : 0u;")
+            lines.append("    }")
     if large:
         if write_flags:
             lines.append("    _commit();")
@@ -2627,7 +2653,10 @@ def emit_cpp(mod: Module) -> str:
                 lines.append("    }")
     if mod.mem_writes:
         we_or = " | ".join(f"__we{i}" for i in range(len(mod.mem_writes)))
-        lines.append(f"    if ({we_or}) {{")
+        # After the gate, `__we*` is uninitialized on a skipped idle tick.
+        # `_we_any` remembers that every enable was false.
+        cond = "_we_any" if gate_we else we_or
+        lines.append(f"    if ({cond}) {{")
         for i, wr in enumerate(mod.mem_writes):
             w = sigs[wr.mem].width
             lines.append(f"      if (__we{i}) {{")

@@ -445,7 +445,13 @@ def test_mem_write_enable_gates_data_evals() -> None:
         ],
     )
     text = emit_cpp(mod)
-    # Enable eval runs unconditionally; data eval only inside any-enable guard.
+    # Idle ticks with no page change and every enable already false skip the
+    # enable loads. The store phase uses the latch so it does not read
+    # uninitialized __we* locals.
+    assert "uint8_t _we_any = 0;" in text
+    assert "if (_demand || _we_any)" in text
+    assert "_we_any = (__we0) ? 1u : 0u;" in text
+    assert "if (_we_any) {\n      if (__we0)" in text
     assert "uint8_t __we0" in text
     assert "if (__we0) {" in text
     # With a single port the OR-guard collapses to if (__we0) wrapping data.
