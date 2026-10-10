@@ -2628,7 +2628,15 @@ def emit_cpp(mod: Module) -> str:
             phase.append(f"{we_sp}_we_any = ({we_or}) ? 1u : 0u;")
     if large:
         if write_flags:
-            lines.append("    _commit();")
+            # `_commit` is compiled at -O0 (the switch is too large for -O2).
+            # Its prologue materializes the switch before it notices `_nw` is
+            # zero, so an empty dirty list must not enter the function. `_bep`
+            # still advances: it is the per-tick bump epoch, and a later
+            # commit of the same signal has to see a new epoch.
+            if inv_tables:
+                lines.append("    if (_nw) _commit(); else _bep++;")
+            else:
+                lines.append("    if (_nw) _commit();")
         for name, idx in _ARRAY_INDEX.items():
             lines.append(
                 f"    if (_ac[{idx}] && memcmp({name}__n, {name}, sizeof({name}))) {{"

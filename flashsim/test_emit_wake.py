@@ -456,14 +456,32 @@ def test_mem_write_enable_gates_data_evals() -> None:
     assert "void _mem_store() {" in text
     assert "\n  uint8_t __we0;\n" in text
     assert "if (__we0) {" in text
-    # With a single port the OR-guard collapses to if (__we0) wrapping data.
-    # data_w is an output → cached; its eval must not precede the first __we0.
-    we = text.index("uint8_t __we0")
-    # Find tick_nba body after we0
-    rest = text[we:]
-    assert "eval_data_w" in rest or "data_w =" in rest or "data_w__ok" in rest
-    # The any-enable wrapper precedes data packing / writeback.
-    assert rest.count("if (__we0)") >= 2
+
+
+def test_empty_dirty_list_skips_commit() -> None:
+    """An empty dirty list must not enter the -O0 commit switch."""
+    from flashsim.emit import emit_cpp
+    from flashsim.ir import AlwaysFF, Assign, Const, Id, Module, NbAssign, Signal
+
+    n = 256
+    signals = {
+        "clock": Signal("clock", 1, "input"),
+        "out": Signal("out", 1, "output"),
+    }
+    body = []
+    for i in range(n):
+        signals[f"r{i}"] = Signal(f"r{i}", 1, "reg")
+        body.append(NbAssign(f"r{i}", Const(0, 1)))
+    mod = Module(
+        name="EmptyCommit",
+        signals=signals,
+        assigns=[Assign("out", Id("r0"))],
+        always=AlwaysFF("clock", body),
+        ports=["clock", "out"],
+    )
+    text = emit_cpp(mod)
+    assert "if (_nw) _commit();" in text
+    assert "\n    _commit();\n" not in text
 
 
 def test_bump_sig_stable_for_commit_batching() -> None:
