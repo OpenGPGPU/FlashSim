@@ -336,6 +336,14 @@ QEMU_SRC="$(cd "$QEMU_SRC" && pwd)"
 ARTI_WORK="${ARTI_WORK:-$(cd "$SCRIPT_DIR/../../.." && pwd)/arti-work}"
 QEMU_BUILD=${QEMU_BUILD:-$ARTI_WORK/qemu-arti-build}
 TOP_MODULE=__TOP__
+# Optional LLVM PGO profile produced by a representative host/QEMU training
+# run. Resolve the caller's path before changing to the model directory.
+PGO_PROFILE="${FLASHSIM_PGO_PROFILE:-}"
+if [[ -n "$PGO_PROFILE" ]]; then
+  [ -f "$PGO_PROFILE" ] || { echo "FLASHSIM_PGO_PROFILE not found: $PGO_PROFILE" >&2; exit 1; }
+  PGO_PROFILE="$(cd "$(dirname "$PGO_PROFILE")" && pwd)/$(basename "$PGO_PROFILE")"
+  echo "PGO profile: $PGO_PROFILE"
+fi
 
 echo "=== Building FlashSim embedded RTL model for $TOP_MODULE ==="
 cd "$SCRIPT_DIR"
@@ -367,14 +375,8 @@ case "$SHARD_OPT" in
   *) echo "FLASHSIM_SHARD_OPT must be -O0, -O1, -O2 or -O3" >&2; exit 1 ;;
 esac
 CXXFLAGS_BASE=(-std=gnu++17 -fPIC -fPIE -w -Wno-parentheses-equality -fbracket-depth=4096 -I.)
-# Optional LLVM PGO profile produced by a representative host/QEMU training
-# run.  Keep this opt-in: a profile from a tiny smoke test can over-specialize
-# the model and make a full-system workload slower.
-PGO_PROFILE="${FLASHSIM_PGO_PROFILE:-}"
-if [[ -n "$PGO_PROFILE" ]]; then
-  [ -f "$PGO_PROFILE" ] || { echo "FLASHSIM_PGO_PROFILE not found: $PGO_PROFILE" >&2; exit 1; }
-  echo "PGO profile: $PGO_PROFILE"
-fi
+# Keep this opt-in: a profile from a tiny smoke test can over-specialize the
+# model and make a full-system workload slower.
 OBJS=()
 
 compile_one() {
