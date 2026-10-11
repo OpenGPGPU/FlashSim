@@ -367,9 +367,9 @@ three runs each, scanout free-running plus a quiet-MMIO phase):
 | GpuHostSystemAxi 64x64 | idle | 123.9 | 115.5 | **-6.8%** |
 | GpuHostSystemAxi 64x64 | scanout active | 143.4 | 132.6 | **-7.6%** |
 
-It is deliberately *not* wired in, for two reasons. It doubles shard compile
-time (two full passes over ~90 MB of emitted C++), and — the real blocker —
-it needs a training workload, and `arti_smoke.cpp` is not one: it reads
+PGO is opt-in because it doubles shard compile time (two full passes over
+~90 MB of emitted C++) and needs a representative training workload.
+`arti_smoke.cpp` is not one: it reads
 `GPU_ID`, writes `color_base` and checks an IRQ, so a profile from it would
 describe almost nothing. Training has to cover the paths that dominate a real
 run (the free-running scanout, the raster/fragment path, the shader path), and
@@ -381,12 +381,20 @@ Anyone wiring it up should train on more than the scanout alone: the scanout
 path and the shader path barely share a hot branch, and a scanout-only profile
 is what the numbers above actually are.
 
-The embedded build now accepts a merged LLVM profile without changing the
-default build:
+The embedded build supports both phases without changing the default build:
 
 ```sh
+FLASHSIM_PGO_GENERATE=1 ./build_embedded.sh
+# Run the representative QEMU workload with LLVM_PROFILE_FILE=/path/%m.profraw.
+llvm-profdata merge -output=/path/merged.profdata /path/*.profraw
 FLASHSIM_PGO_PROFILE=/path/to/merged.profdata ./build_embedded.sh
 ```
+
+For the training build, the script configures QEMU's final linker with
+`-fprofile-instr-generate` (`objc_link_args` on macOS, `c_link_args` on Linux)
+so the instrumented model can write `.profraw` files. When the optimized build
+follows, it removes the temporary linker flag. With `SKIP_QEMU_REBUILD=1`,
+the caller remains responsible for configuring that link flag before training.
 
 The profile must come from the same generated model and a representative
 workload. The option applies `-fprofile-instr-use` to every model translation

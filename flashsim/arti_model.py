@@ -339,6 +339,15 @@ TOP_MODULE=__TOP__
 # Optional LLVM PGO profile produced by a representative host/QEMU training
 # run. Resolve the caller's path before changing to the model directory.
 PGO_PROFILE="${FLASHSIM_PGO_PROFILE:-}"
+PGO_GENERATE="${FLASHSIM_PGO_GENERATE:-0}"
+case "$PGO_GENERATE" in
+  0|1) ;;
+  *) echo "FLASHSIM_PGO_GENERATE must be 0 or 1" >&2; exit 1 ;;
+esac
+if [[ "$PGO_GENERATE" == 1 && -n "$PGO_PROFILE" ]]; then
+  echo "FLASHSIM_PGO_GENERATE and FLASHSIM_PGO_PROFILE are mutually exclusive" >&2
+  exit 1
+fi
 if [[ -n "$PGO_PROFILE" ]]; then
   [ -f "$PGO_PROFILE" ] || { echo "FLASHSIM_PGO_PROFILE not found: $PGO_PROFILE" >&2; exit 1; }
   PGO_PROFILE="$(cd "$(dirname "$PGO_PROFILE")" && pwd)/$(basename "$PGO_PROFILE")"
@@ -384,6 +393,8 @@ compile_one() {
   echo "  c++ $opt $src"
   if [[ -n "$PGO_PROFILE" ]]; then
     c++ "${CXXFLAGS_BASE[@]}" -fprofile-instr-use="$PGO_PROFILE" "$opt" -c "$src" -o "$obj"
+  elif [[ "$PGO_GENERATE" == 1 ]]; then
+    c++ "${CXXFLAGS_BASE[@]}" -fprofile-instr-generate "$opt" -c "$src" -o "$obj"
   else
     c++ "${CXXFLAGS_BASE[@]}" "$opt" -c "$src" -o "$obj"
   fi
@@ -449,6 +460,34 @@ if [ "${SKIP_QEMU_REBUILD:-}" != "1" ]; then
         echo "QEMU build directory not configured yet; run setup_env.sh first"
         exit 1
     fi
+    # QEMU's final linker is Objective-C on macOS and C on Linux. The model
+    # archive alone cannot pull in LLVM's profile runtime; configure the
+    # language actually used for the final QEMU link. Only touch an empty
+    # option (or one left by this script) to preserve caller link flags.
+    PGO_LINK_MARKER="$QEMU_BUILD/.flashsim-pgo-link-arg"
+    if [[ "$PGO_GENERATE" == 1 ]]; then
+      if [[ "$(uname -s)" == Darwin ]]; then
+        PGO_LINK_KEY=objc_link_args
+      else
+        PGO_LINK_KEY=c_link_args
+      fi
+      PGO_LINK_CURRENT="$(meson introspect "$QEMU_BUILD" --buildoptions | \
+        python3 -c 'import json,sys; k=sys.argv[1]; print(" ".join(next(x["value"] for x in json.load(sys.stdin) if x["name"] == k)))' "$PGO_LINK_KEY")"
+      if [[ -n "$PGO_LINK_CURRENT" && "$PGO_LINK_CURRENT" != -fprofile-instr-generate ]]; then
+        echo "QEMU $PGO_LINK_KEY already has link flags: $PGO_LINK_CURRENT" >&2
+        exit 1
+      fi
+      printf '%s\n' "$PGO_LINK_KEY" > "$PGO_LINK_MARKER"
+      meson configure "$QEMU_BUILD" "-D$PGO_LINK_KEY=-fprofile-instr-generate"
+    elif [[ -f "$PGO_LINK_MARKER" ]]; then
+      PGO_LINK_KEY="$(cat "$PGO_LINK_MARKER")"
+      case "$PGO_LINK_KEY" in
+        objc_link_args|c_link_args) ;;
+        *) echo "invalid PGO link marker: $PGO_LINK_MARKER" >&2; exit 1 ;;
+      esac
+      meson configure "$QEMU_BUILD" "-D$PGO_LINK_KEY="
+      rm "$PGO_LINK_MARKER"
+    fi
     PATH="$ARTI_WORK/qemu-build-tools/bin:$PATH" ninja -C "$QEMU_BUILD" qemu-system-aarch64
     # macOS: a plain cp of the linked binary can leave Finder xattrs that break
     # ad-hoc codesign; dyld then hangs in _dyld_start. Clear and re-sign.
@@ -460,6 +499,11 @@ if [ "${SKIP_QEMU_REBUILD:-}" != "1" ]; then
     ls -lh "$QEMU_BUILD/qemu-system-aarch64"
 else
     echo "SKIP_QEMU_REBUILD=1, leaving QEMU build to setup_env.sh"
+fi
+if [[ "$PGO_GENERATE" == 1 ]]; then
+  echo "Run representative QEMU training with LLVM_PROFILE_FILE set, then"
+  echo "merge the .profraw files with llvm-profdata and rebuild with"
+  echo "FLASHSIM_PGO_PROFILE=/path/to/merged.profdata."
 fi
 '''
 
