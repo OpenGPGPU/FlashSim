@@ -340,10 +340,20 @@ TOP_MODULE=__TOP__
 # run. Resolve the caller's path before changing to the model directory.
 PGO_PROFILE="${FLASHSIM_PGO_PROFILE:-}"
 PGO_GENERATE="${FLASHSIM_PGO_GENERATE:-0}"
+LTO_MODE="${FLASHSIM_LTO:-0}"
 case "$PGO_GENERATE" in
   0|1) ;;
   *) echo "FLASHSIM_PGO_GENERATE must be 0 or 1" >&2; exit 1 ;;
 esac
+case "$LTO_MODE" in
+  0|thin) ;;
+  *) echo "FLASHSIM_LTO must be 0 or thin" >&2; exit 1 ;;
+esac
+if [[ "$PGO_GENERATE" == 1 && "$LTO_MODE" == thin ]]; then
+  echo "FLASHSIM_PGO_GENERATE and FLASHSIM_LTO=thin cannot be combined" >&2
+  echo "train without LTO, then use FLASHSIM_PGO_PROFILE with LTO" >&2
+  exit 1
+fi
 if [[ "$PGO_GENERATE" == 1 && -n "$PGO_PROFILE" ]]; then
   echo "FLASHSIM_PGO_GENERATE and FLASHSIM_PGO_PROFILE are mutually exclusive" >&2
   exit 1
@@ -384,6 +394,9 @@ case "$SHARD_OPT" in
   *) echo "FLASHSIM_SHARD_OPT must be -O0, -O1, -O2 or -O3" >&2; exit 1 ;;
 esac
 CXXFLAGS_BASE=(-std=gnu++17 -fPIC -fPIE -w -Wno-parentheses-equality -fbracket-depth=4096 -I.)
+if [[ "$LTO_MODE" == thin ]]; then
+  CXXFLAGS_BASE+=( -flto=thin )
+fi
 # Keep this opt-in: a profile from a tiny smoke test can over-specialize the
 # model and make a full-system workload slower.
 OBJS=()
@@ -487,6 +500,30 @@ if [ "${SKIP_QEMU_REBUILD:-}" != "1" ]; then
       esac
       meson configure "$QEMU_BUILD" "-D$PGO_LINK_KEY="
       rm "$PGO_LINK_MARKER"
+    fi
+    LTO_LINK_MARKER="$QEMU_BUILD/.flashsim-lto-link-arg"
+    if [[ "$LTO_MODE" == thin ]]; then
+      if [[ "$(uname -s)" == Darwin ]]; then
+        LTO_LINK_KEY=objc_link_args
+      else
+        LTO_LINK_KEY=c_link_args
+      fi
+      LTO_LINK_CURRENT="$(meson introspect "$QEMU_BUILD" --buildoptions | \
+        python3 -c 'import json,sys; k=sys.argv[1]; print(" ".join(next(x["value"] for x in json.load(sys.stdin) if x["name"] == k)))' "$LTO_LINK_KEY")"
+      if [[ -n "$LTO_LINK_CURRENT" && "$LTO_LINK_CURRENT" != -flto=thin ]]; then
+        echo "QEMU $LTO_LINK_KEY already has link flags: $LTO_LINK_CURRENT" >&2
+        exit 1
+      fi
+      printf '%s\n' "$LTO_LINK_KEY" > "$LTO_LINK_MARKER"
+      meson configure "$QEMU_BUILD" "-D$LTO_LINK_KEY=-flto=thin"
+    elif [[ -f "$LTO_LINK_MARKER" ]]; then
+      LTO_LINK_KEY="$(cat "$LTO_LINK_MARKER")"
+      case "$LTO_LINK_KEY" in
+        objc_link_args|c_link_args) ;;
+        *) echo "invalid LTO link marker: $LTO_LINK_MARKER" >&2; exit 1 ;;
+      esac
+      meson configure "$QEMU_BUILD" "-D$LTO_LINK_KEY="
+      rm "$LTO_LINK_MARKER"
     fi
     PATH="$ARTI_WORK/qemu-build-tools/bin:$PATH" ninja -C "$QEMU_BUILD" qemu-system-aarch64
     # macOS: a plain cp of the linked binary can leave Finder xattrs that break

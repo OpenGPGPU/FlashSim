@@ -400,6 +400,20 @@ The profile must come from the same generated model and a representative
 workload. The option applies `-fprofile-instr-use` to every model translation
 unit; the wrapper and shard optimization levels remain unchanged.
 
+ThinLTO is an additional opt-in for builds where compile and link time are
+acceptable:
+
+```sh
+FLASHSIM_LTO=thin FLASHSIM_PGO_PROFILE=/path/to/merged.profdata ./build_embedded.sh
+```
+
+It adds `-flto=thin` to model shards and to QEMU's final linker (using the
+same platform-specific linker option as the PGO training flow), then removes
+the temporary linker option on the next non-LTO build. A 64x64 active-render
+probe measured roughly a 1–3% runtime gain; the real desktop workload should
+be benchmarked before making it a default because ThinLTO substantially
+increases link time and memory use.
+
 For the 640x480 tile-binned Debian model, a profile collected from the complete
 `pipe_desktop` proof reduced the same proof from 464.7 s to 363.1 s on an M4
 Max (21.9% faster), with identical desktop pixels. The profile was collected
