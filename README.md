@@ -381,6 +381,17 @@ Anyone wiring it up should train on more than the scanout alone: the scanout
 path and the shader path barely share a hot branch, and a scanout-only profile
 is what the numbers above actually are.
 
+The embedded build now accepts a merged LLVM profile without changing the
+default build:
+
+```sh
+FLASHSIM_PGO_PROFILE=/path/to/merged.profdata ./build_embedded.sh
+```
+
+The profile must come from the same generated model and a representative
+workload. The option applies `-fprofile-instr-use` to every model translation
+unit; the wrapper and shard optimization levels remain unchanged.
+
 ### Reproducible builds
 
 The emitter used to be **non-deterministic**: two runs on identical input
