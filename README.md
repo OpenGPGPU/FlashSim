@@ -392,6 +392,12 @@ The profile must come from the same generated model and a representative
 workload. The option applies `-fprofile-instr-use` to every model translation
 unit; the wrapper and shard optimization levels remain unchanged.
 
+For the 640x480 tile-binned Debian model, a profile collected from the complete
+`pipe_desktop` proof reduced the same proof from 464.7 s to 363.1 s on an M4
+Max (21.9% faster), with identical desktop pixels. The profile was collected
+from an instrumented QEMU and is kept outside the source tree because it is
+tied to the exact generated RTL and workload.
+
 ### Reproducible builds
 
 The emitter used to be **non-deterministic**: two runs on identical input
