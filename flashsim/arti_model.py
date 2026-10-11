@@ -329,6 +329,10 @@ BUILD_EMBEDDED = r'''#!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 QEMU_SRC=${QEMU_SRC:?must be set}
+# The rest of this script runs from the generated model directory. Resolve
+# caller-provided relative paths before `cd`, otherwise a successful large
+# model compile can fail only at the final archive-copy step.
+QEMU_SRC="$(cd "$QEMU_SRC" && pwd)"
 ARTI_WORK="${ARTI_WORK:-$(cd "$SCRIPT_DIR/../../.." && pwd)/arti-work}"
 QEMU_BUILD=${QEMU_BUILD:-$ARTI_WORK/qemu-arti-build}
 TOP_MODULE=__TOP__
