@@ -492,7 +492,11 @@ static constexpr unsigned M_AXI_BYTES = 8;
 #define ARTI_MODEL_IDLE_GRACE 16
 #endif
 #ifndef ARTI_MODEL_SETTLE_MIN
-#define ARTI_MODEL_SETTLE_MIN 256
+// A quiet control access needs only a short observation window: FlashSim's
+// activity detector already requires AXI quiescence plus IDLE_GRACE.  Keeping
+// this at 128 halves the fixed cost of idle QEMU MMIO polls while active GPU
+// work continues until the externally visible queues drain.
+#define ARTI_MODEL_SETTLE_MIN 128
 #endif
 #ifndef ARTI_MODEL_IRQ_PUMP_CYCLES
 #define ARTI_MODEL_IRQ_PUMP_CYCLES 262144

@@ -132,7 +132,7 @@ number of cycles advanced per host access. One guest MMIO read advances:
 
 | scanout | ticks per MMIO read |
 |---|---|
-| disabled | 258 (settle early-exits at `SETTLE_MIN`) |
+| disabled | 130 (settle early-exits at `SETTLE_MIN`) |
 | running | 500,002 (the full `ARTI_MODEL_MMIO_ADVANCE_CYCLES` cap) |
 
 `gpu_active()` was true whenever `_chg != 0`, and a free-running scanout commits
