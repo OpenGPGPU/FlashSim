@@ -367,10 +367,8 @@ CXXFLAGS_BASE=(-std=gnu++17 -fPIC -fPIE -w -Wno-parentheses-equality -fbracket-d
 # run.  Keep this opt-in: a profile from a tiny smoke test can over-specialize
 # the model and make a full-system workload slower.
 PGO_PROFILE="${FLASHSIM_PGO_PROFILE:-}"
-PGO_FLAGS=()
 if [[ -n "$PGO_PROFILE" ]]; then
   [ -f "$PGO_PROFILE" ] || { echo "FLASHSIM_PGO_PROFILE not found: $PGO_PROFILE" >&2; exit 1; }
-  PGO_FLAGS=(-fprofile-instr-use="$PGO_PROFILE")
   echo "PGO profile: $PGO_PROFILE"
 fi
 OBJS=()
@@ -378,7 +376,11 @@ OBJS=()
 compile_one() {
   local src="$1" obj="$2" opt="$3"
   echo "  c++ $opt $src"
-  c++ "${CXXFLAGS_BASE[@]}" "${PGO_FLAGS[@]}" "$opt" -c "$src" -o "$obj"
+  if [[ -n "$PGO_PROFILE" ]]; then
+    c++ "${CXXFLAGS_BASE[@]}" -fprofile-instr-use="$PGO_PROFILE" "$opt" -c "$src" -o "$obj"
+  else
+    c++ "${CXXFLAGS_BASE[@]}" "$opt" -c "$src" -o "$obj"
+  fi
 }
 
 shopt -s nullglob
