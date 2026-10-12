@@ -59,15 +59,30 @@ def optimize(mod: Module) -> Module:
     mems = {n for n, s in sigs.items() if s.kind == "mem"}
     keep = outputs | regs | inputs | mems | {mod.always.clock}
 
+    # CIRCT may materialize a constant as a named wire and then reference that
+    # wire directly from an always_ff body. `_subst_consts` removes the named
+    # assignment after rewriting other assignments, so carry the same constant
+    # map into sequential and memory-write expressions as well. Otherwise the
+    # later dangling-wire check rejects valid RTL (for example the dynamic
+    # viewport reset constants in GpuHostAxi).
+    consts = {n: e for n, e in assigns.items() if isinstance(e, Const)}
+
+    def rewrite(e: Expr) -> Expr:
+        e = map_expr(e, lambda node: (
+            consts.get(node.name, node)
+            if isinstance(node, Id) else node
+        ))
+        return _rewrite_expr(e, assigns, sigs)
+
     assigns = _subst_consts(assigns)
     assigns = {k: _rewrite_expr(v, assigns, sigs) for k, v in assigns.items()}
-    body = _map_stmts(body, lambda e: _rewrite_expr(e, assigns, sigs))
+    body = _map_stmts(body, rewrite)
     mem_writes = [
         MemWrite(
             w.mem,
-            _rewrite_expr(w.addr, assigns, sigs),
-            _rewrite_expr(w.data, assigns, sigs),
-            _rewrite_expr(w.enable, assigns, sigs),
+            rewrite(w.addr),
+            rewrite(w.data),
+            rewrite(w.enable),
         )
         for w in mod.mem_writes
     ]
