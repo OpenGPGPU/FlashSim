@@ -1381,14 +1381,22 @@ def _emit_bump_sig(
         for k in holds:
             word, bit = k >> 6, k & 63
             lines.append(f"{sp}_h_need[{word}] |= 1ull << {bit};")
-            lines.append(f"{sp}_h_any[{word >> 6}] |= 1ull << {word & 63};")
+            lines.append(
+                f"{sp}if (!_h_any[{word >> 6}]) ++_h_words; "
+                f"_h_any[{word >> 6}] |= 1ull << {word & 63};"
+            )
         return
     packed = _HOLD_WAKE_PACKED.get(holds)
     if packed is not None:
-        lines.append(f"{sp}fs_wake_mask(_h_need, _h_any, _hwm{packed}, {_WAKE_PACK_WORDS}u);")
+        lines.append(
+            f"{sp}fs_wake_mask(_h_need, _h_any, &_h_words, _hwm{packed}, "
+            f"{_WAKE_PACK_WORDS}u);"
+        )
         return
     i = _HOLD_WAKE_TABLES[holds]
-    lines.append(f"{sp}fs_wake(_h_need, _h_any, _hw{i}, {len(holds)}u);")
+    lines.append(
+        f"{sp}fs_wake(_h_need, _h_any, &_h_words, _hw{i}, {len(holds)}u);"
+    )
 
 
 def _report_wake_locality(
@@ -1471,8 +1479,8 @@ def _emit_pass_wake(passes, lines: list[str], indent: int) -> None:
         # The dispatch loop walks `_p_any`, so a bare `_p_need` update leaves
         # the pass asleep until some other wake arms this word.
         lines.append(
-            f"{' ' * indent}_p_any[{w >> 6}] |= "
-            f"(1ull << {w & 63}u);"
+            f"{' ' * indent}if (!_p_any[{w >> 6}]) ++_p_words; "
+            f"_p_any[{w >> 6}] |= (1ull << {w & 63}u);"
         )
 
 
@@ -1490,9 +1498,7 @@ def _emit_pass_dispatch(lines: list[str], npw: int, npass: int) -> None:
     nsw = (npw + 63) // 64
     # The loop body is several instructions per summary word. When every
     # word is idle, one OR is enough and the cursor machinery stays cold.
-    if nsw > 1:
-        joined = " | ".join(f"_p_any[{i}]" for i in range(nsw))
-        lines.append(f"    if ({joined}) {{")
+    lines.append("    if (_p_words) {")
     lines.append(f"    for (unsigned sw = 0; sw < {nsw}u; sw++) {{")
     lines.append("      uint64_t sw_bits = _p_any[sw];")
     lines.append("      while (sw_bits) {")
@@ -1507,13 +1513,15 @@ def _emit_pass_dispatch(lines: list[str], npw: int, npass: int) -> None:
     lines.append("          unsigned i = (w << 6) + b;")
     lines.append(f"          if (i < {npass}u) (this->*kPasses[i])();")
     lines.append("        }")
-    lines.append("        if (!_p_need[w]) _p_any[sw] &= ~(1ull << si);")
+    lines.append(
+        "        if (!_p_need[w]) { _p_any[sw] &= ~(1ull << si); "
+        "if (!_p_any[sw]) --_p_words; }"
+    )
     # si == 63 has no higher bit; shifting a uint64_t by 64 is undefined.
     lines.append("        if (si < 63u) sw_bits |= _p_any[sw] & (~0ull << (si + 1u));")
     lines.append("      }")
     lines.append("    }")
-    if nsw > 1:
-        lines.append("    }")
+    lines.append("    }")
 
 
 _WIRE_PART: dict[str, int] = {}
@@ -2176,19 +2184,21 @@ def emit_cpp(mod: Module) -> str:
         "static inline void fs_bump(uint32_t *pg, const uint16_t *ids, unsigned n) {",
         "  for (unsigned i = 0; i < n; i++) pg[ids[i]]++;",
         "}",
-        "static inline void fs_wake(uint64_t *need, uint64_t *any, const uint16_t *ids,",
-        "                            unsigned n) {",
+        "static inline void fs_wake(uint64_t *need, uint64_t *any, unsigned *words,",
+        "                            const uint16_t *ids, unsigned n) {",
         "  for (unsigned i = 0; i < n; i++) {",
         "    unsigned k = ids[i];",
         "    need[k >> 6] |= 1ull << (k & 63);",
+        "    if (!any[k >> 12]) ++*words;",
         "    any[k >> 12] |= 1ull << ((k >> 6) & 63);",
         "  }",
         "}",
-        "static inline void fs_wake_mask(uint64_t *need, uint64_t *any, const uint64_t *m,",
-        "                             unsigned n) {",
+        "static inline void fs_wake_mask(uint64_t *need, uint64_t *any, unsigned *words,",
+        "                             const uint64_t *m, unsigned n) {",
         "  for (unsigned i = 0; i < n; i++) {",
         "    if (!m[i]) continue;",
         "    need[i] |= m[i];",
+        "    if (!any[i >> 6]) ++*words;",
         "    any[i >> 6] |= 1ull << (i & 63);",
         "  }",
         "}",
@@ -2244,6 +2254,7 @@ def emit_cpp(mod: Module) -> str:
         lines.append(
             f"  uint64_t _p_any[{nsw}] = {{{_pass_summary_init(npw)}}};"
         )
+        lines.append(f"  unsigned _p_words = {nsw}u;")
     if nparts:
         lines.append(f"  uint32_t _pg[{nparts}];")
         lines.append(f"  uint32_t _seq_seen[{nparts}] = {{}};")
@@ -2285,6 +2296,7 @@ def emit_cpp(mod: Module) -> str:
                 "~0ull" if (w < nw) else "0ull" for w in range(nsw)
             )
             lines.append(f"  uint64_t _h_any[{nsw}] = {{{busy_sw}}};")
+            lines.append(f"  unsigned _h_words = {nsw}u;")
     lines.append("  uint8_t __inited = 0;")
     # Hosts set this when every driven input still holds the value poke last
     # recorded. A quiet tick then returns before the input-image compare.
@@ -2365,13 +2377,11 @@ def emit_cpp(mod: Module) -> str:
             lines.append(f"  __attribute__((noinline)) void _nba_h{i}() {{")
             lines.append(f"    _h_need[{word}] &= ~{mask};")
             lines.append(f"    _h_busy[{word}] &= ~{mask};")
-            # Only a word that just emptied can clear the summary bit; the
-            # dispatch loop also re-checks after each hold runs.
-            lines.append(
-                f"    if (!(_h_need[{word}] | _h_busy[{word}])) "
-                f"_h_any[{word >> 6}] &= ~(1ull << {word & 63});"
-            )
+            # The dispatch loop re-checks the final state after the hold runs.
+            # Delaying the summary clear until then avoids decrementing twice
+            # when the hold body re-arms itself through `_HOLD_TAKEN`.
             _HOLD_TAKEN = (
+                f"if (!_h_any[{word >> 6}]) ++_h_words; "
                 f"_h_busy[{word}] |= {mask}; _h_any[{word >> 6}] |= 1ull << {word & 63};"
                 " _hb++;"
             )
@@ -2536,9 +2546,7 @@ def emit_cpp(mod: Module) -> str:
             # GpuHostSystemAxi) for a design that dispatches ~0.8 holds per
             # tick. `_h_any` has one bit per hold word, so the scan is nsw
             # iterations -- 2 here -- and a word is only touched when awake.
-            if nsw > 1:
-                joined = " | ".join(f"_h_any[{i}]" for i in range(nsw))
-                lines.append(f"    if ({joined}) {{")
+            lines.append("    if (_h_words) {")
             lines.append(f"    for (unsigned sw = 0; sw < {nsw}u; sw++) {{")
             lines.append("      uint64_t sw_bits = _h_any[sw];")
             lines.append("      while (sw_bits) {")
@@ -2557,11 +2565,14 @@ def emit_cpp(mod: Module) -> str:
             lines.append("          _hc++;")
             lines.append("          (this->*kHolds[(w << 6) + b])();")
             lines.append("        }")
-            lines.append("        if (!(_h_need[w] | _h_busy[w])) _h_any[sw] &= ~(1ull << si);")
+            lines.append(
+                "        if (!(_h_need[w] | _h_busy[w])) { "
+                "_h_any[sw] &= ~(1ull << si); "
+                "if (!_h_any[sw]) --_h_words; }"
+            )
             lines.append("      }")
             lines.append("    }")
-            if nsw > 1:
-                lines.append("    }")
+            lines.append("    }")
         if live_stmts:
             lines.append("    _nba_live();")
     else:

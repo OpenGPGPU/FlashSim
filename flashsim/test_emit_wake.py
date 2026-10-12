@@ -630,7 +630,9 @@ def test_pass_wake_arms_summary_and_dispatch_rereads() -> None:
     assert "_p_any[0] |= (1ull << 1u);" in text
     assert "_p_need[2] |= 0x4ull;" in text
     assert "_p_any[0] |= (1ull << 2u);" in text
-    assert text.count("_p_need[") == text.count("_p_any[")
+    assert text.count("_p_need[") == 3
+    assert text.count("_p_any[") == 6  # guard plus assignment per wake
+    assert text.count("++_p_words") == 3
 
     # 196 words: summary groups 0..2 are full, group 3 has words 192..195.
     assert emit._pass_summary_init(196) == "~0ull, ~0ull, ~0ull, 0xfull"
@@ -643,6 +645,7 @@ def test_pass_wake_arms_summary_and_dispatch_rereads() -> None:
     assert "sw_bits |= _p_any[sw] & (~0ull << (si + 1u))" in body
     assert "if (w >= 196u) break;" in body
     assert "if (i < 12525u)" in body
+    assert "if (_p_words)" in body
 
 
 def test_every_hold_wake_arms_the_summary_word() -> None:
