@@ -517,6 +517,8 @@ SYSTEM_SOURCE = r'''
 #include <cstring>
 #include <ctime>
 #include <deque>
+#include <array>
+#include <algorithm>
 
 static GpuHostSystemAxiDut *g_rtl = nullptr;
 static arti_mem_read_cb g_mem_read_cb = nullptr;
@@ -528,7 +530,14 @@ static unsigned g_arti_idle = 0;
 static int g_settle_quiet = 0;
 
 static constexpr unsigned TIMEOUT_CYCLES = 1000;
-static constexpr unsigned M_AXI_BYTES = 8;
+// Scalar and limb-array DUT ports have the exact byte size of the AXI bus.
+static constexpr unsigned M_AXI_BYTES =
+    sizeof(((GpuHostSystemAxiDut *)nullptr)->io_m_axi_wdata);
+static_assert(M_AXI_BYTES >= 4 && M_AXI_BYTES <= 64 &&
+              (M_AXI_BYTES & (M_AXI_BYTES - 1)) == 0, "unsupported AXI beat size");
+static_assert(sizeof(((GpuHostSystemAxiDut *)nullptr)->io_m_axi_rdata) == M_AXI_BYTES,
+              "AXI read/write data widths differ");
+using ArtiAxiData = std::array<uint8_t, M_AXI_BYTES>;
 
 #ifndef ARTI_MODEL_MMIO_ADVANCE_CYCLES
 // Cap per host MMIO settle. Match Verilator's ARTI default (500k): while the
@@ -747,7 +756,7 @@ static unsigned irq_pump_cycles(void)
 }
 
 struct ArtiAxiWriteBeat {
-  uint64_t data;
+  ArtiAxiData data;
   uint64_t strb;
   bool last;
 };
@@ -756,7 +765,7 @@ struct ArtiAxiWriteResp {
   uint8_t resp;
 };
 struct ArtiAxiReadBeat {
-  uint64_t data;
+  ArtiAxiData data;
   uint64_t id;
   uint8_t resp;
   bool last;
@@ -873,7 +882,12 @@ static bool mem_drive(void)
   ch |= drive_in(g_rtl->io_m_axi_bresp, g_bresp.empty() ? 0 : g_bresp.front().resp);
   ch |= drive_in(g_rtl->io_m_axi_bid, g_bresp.empty() ? 0 : g_bresp.front().id);
   ch |= drive_in(g_rtl->io_m_axi_rvalid, !g_rresp.empty());
-  ch |= drive_in(g_rtl->io_m_axi_rdata, g_rresp.empty() ? 0 : g_rresp.front().data);
+  const ArtiAxiData zero{};
+  const auto &data = g_rresp.empty() ? zero : g_rresp.front().data;
+  if (memcmp(&g_rtl->io_m_axi_rdata, data.data(), M_AXI_BYTES)) {
+    memcpy(&g_rtl->io_m_axi_rdata, data.data(), M_AXI_BYTES);
+    ch = true;
+  }
   ch |= drive_in(g_rtl->io_m_axi_rresp, g_rresp.empty() ? 0 : g_rresp.front().resp);
   ch |= drive_in(g_rtl->io_m_axi_rlast, !g_rresp.empty() && g_rresp.front().last);
   ch |= drive_in(g_rtl->io_m_axi_rid, g_rresp.empty() ? 0 : g_rresp.front().id);
@@ -890,23 +904,39 @@ static void mem_capture(void)
     g_aw_beat = 0;
     g_write_status = 0;
   }
-  if (g_rtl->io_m_axi_wvalid && g_rtl->io_m_axi_wready)
-    g_wbeats.push_back({(uint64_t)g_rtl->io_m_axi_wdata,
-                        (uint64_t)g_rtl->io_m_axi_wstrb,
-                        !!g_rtl->io_m_axi_wlast});
+  if (g_rtl->io_m_axi_wvalid && g_rtl->io_m_axi_wready) {
+    ArtiAxiWriteBeat w{};
+    ArtiAxiData strobe{};
+    memcpy(w.data.data(), &g_rtl->io_m_axi_wdata, M_AXI_BYTES);
+    memcpy(strobe.data(), &g_rtl->io_m_axi_wstrb, M_AXI_BYTES / 8);
+    memcpy(&w.strb, strobe.data(), M_AXI_BYTES / 8);
+    w.last = !!g_rtl->io_m_axi_wlast;
+    g_wbeats.push_back(w);
+  }
   if (g_aw_active && !g_wbeats.empty()) {
     ArtiAxiWriteBeat w = g_wbeats.front();
     g_wbeats.pop_front();
     uint64_t addr = g_aw_addr + (uint64_t)g_aw_beat * g_aw_size;
     unsigned lane = addr & (M_AXI_BYTES - 1);
     unsigned size = g_aw_size;
-    if (size > M_AXI_BYTES - lane)
-      size = M_AXI_BYTES - lane;
-    uint64_t data = w.data >> (lane * 8);
-    uint64_t mask = w.strb >> lane;
     int status = -1;
-    if (g_mem_write_cb)
-      status = g_mem_write_cb(addr, (const uint8_t *)&data, size, mask, g_aw_id);
+    unsigned done = 0;
+    unsigned data_offset = lane;
+    while (done < size) {
+      unsigned chunk = std::min({8u, size - done, M_AXI_BYTES - data_offset});
+      uint64_t mask = (w.strb >> data_offset) &
+                      (chunk == 8 ? UINT64_MAX : ((UINT64_C(1) << chunk) - 1));
+      if (!g_mem_write_cb ||
+          g_mem_write_cb(addr + done, w.data.data() + data_offset, chunk,
+                         mask, g_aw_id) != 0)
+        status = -1;
+      else if (status < 0)
+        status = 0;
+      done += chunk;
+      data_offset += chunk;
+      if (data_offset == M_AXI_BYTES)
+        data_offset = 0;
+    }
     if (status != 0)
       g_write_status = status;
     g_aw_beat++;
@@ -925,12 +955,14 @@ static void mem_capture(void)
       uint64_t addr = base + (uint64_t)beat * size;
       unsigned lane = addr & (M_AXI_BYTES - 1);
       unsigned transfer = size > M_AXI_BYTES - lane ? M_AXI_BYTES - lane : size;
-      uint64_t data = 0;
+      ArtiAxiReadBeat r{};
       int status = g_mem_read_cb
-                       ? g_mem_read_cb(addr, (uint8_t *)&data, transfer, id)
+                       ? g_mem_read_cb(addr, r.data.data() + lane, transfer, id)
                        : -1;
-      data <<= lane * 8;
-      g_rresp.push_back({data, id, (uint8_t)(status ? 2 : 0), beat + 1 == beats});
+      r.id = id;
+      r.resp = status ? 2 : 0;
+      r.last = beat + 1 == beats;
+      g_rresp.push_back(r);
     }
     g_arti_idle = 0;
   }
