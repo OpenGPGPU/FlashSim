@@ -819,6 +819,32 @@ def _merge_sop_terms(
         return frozenset(lits)
 
     def simplify(terms: set[frozenset]) -> set[frozenset]:
+        # Large CIRCT mux cones commonly contain pairs that differ only in
+        # one literal polarity.  Looking for those pairs by scanning every
+        # term against every other term made the 256-entry L2 sharer cones
+        # quadratic in the number of paths.  An exact complement candidate is
+        # determined by each literal and can be found in the hash set.
+        # Keep the exhaustive absorption pass for small cones, where it is
+        # cheap and catches the more general subset case.
+        if len(terms) > 64:
+            while True:
+                merged = False
+                snapshot = tuple(terms)
+                for t in snapshot:
+                    if t not in terms:
+                        continue
+                    for k, pol in t:
+                        candidate = (t - {(k, pol)}) | {(k, not pol)}
+                        if candidate in terms:
+                            terms.discard(t)
+                            terms.discard(candidate)
+                            terms.add(t - {(k, pol)})
+                            merged = True
+                            break
+                    if merged:
+                        break
+                if not merged:
+                    return terms
         changed = True
         while changed:
             changed = False
