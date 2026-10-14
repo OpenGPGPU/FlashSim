@@ -2449,13 +2449,8 @@ def emit_cpp(mod: Module) -> str:
     seq_calls: list[str] = []
     _emit_eval_calls(seq_cached_pre, cached, assigns, stop, seq_calls, indent=4)
     mem_en_demanded: set[str] = set()
-    mem_data_demanded: set[str] = set()
     for wr in mod.mem_writes:
         mem_en_demanded |= _cached_deps_for_expr(wr.enable, assigns, cached, stop)
-        for expr in (wr.data, wr.addr):
-            mem_data_demanded |= _cached_deps_for_expr(expr, assigns, cached, stop)
-    mem_data_demanded -= mem_en_demanded
-    mem_all_demanded = mem_en_demanded | mem_data_demanded
     mem_calls = list(dict.fromkeys(
         call for dep in sorted(mem_en_demanded) if (call := _eval_invoke(dep, 4))
     ))
@@ -2653,21 +2648,27 @@ def emit_cpp(mod: Module) -> str:
             set(mem_en_demanded),
         )
         phase.append(f"{we_sp}__we{i} = (uint8_t)({emit_expr(wr.enable, sigs)});")
-        if not is_wide(w):
-            phase.append(f"{we_sp}__wd{i} = 0;")
-        phase.append(f"{we_sp}__wa{i} = 0;")
+        # Data and address are assigned below for every enabled port. Store
+        # never reads them for a disabled port; clearing those fields here
+        # adds hundreds of unrelated stores to each active GPU tick.
     if mod.mem_writes:
         we_or = " | ".join(f"__we{i}" for i in range(len(mod.mem_writes)))
         phase.append(f"{we_sp}if ({we_or}) {{")
-        for call in dict.fromkeys(
-            _eval_invoke(dep, we_base + 2) for dep in sorted(mem_data_demanded)
-        ):
-            if call:
-                phase.append(call)
         for i, wr in enumerate(mod.mem_writes):
             depth = sigs[wr.mem].depth
             w = sigs[wr.mem].width
             phase.append(f"{we_sp}  if (__we{i}) {{")
+            port_demanded = mem_en_demanded.copy()
+            for expr in (wr.data, wr.addr):
+                port_demanded |= _cached_deps_for_expr(expr, assigns, cached, stop)
+            # Data/address cones are needed only by their enabled port. The
+            # generation checks still share cached results across ports.
+            for call in dict.fromkeys(
+                _eval_invoke(dep, we_base + 4)
+                for dep in sorted(port_demanded - mem_en_demanded)
+            ):
+                if call:
+                    phase.append(call)
             decl: set[str] = set()
             _emit_compute(
                 wr.data,
@@ -2679,7 +2680,7 @@ def emit_cpp(mod: Module) -> str:
                 we_base + 4,
                 decl,
                 tick_scratch,
-                set(mem_all_demanded),
+                set(port_demanded),
             )
             _emit_compute(
                 wr.addr,
@@ -2691,7 +2692,7 @@ def emit_cpp(mod: Module) -> str:
                 we_base + 4,
                 decl,
                 tick_scratch,
-                set(mem_all_demanded),
+                set(port_demanded),
             )
             if is_wide(w):
                 _emit_wide_assign(
