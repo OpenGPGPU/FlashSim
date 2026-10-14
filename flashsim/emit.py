@@ -2948,7 +2948,25 @@ def split_dut_methods(
     header = "".join(out_lines)
     parts = [(f"dut_{k}.cpp", "".join(shards[k])) for k in range(n_shards)]
     for name, body_lines in sorted(own_files.items()):
-        parts.append((f"dut_{name.lstrip('_')}.cpp", "".join(body_lines)))
+        body = "".join(body_lines)
+        if name == "_commit" and "fs_bump(" in body:
+            # The large commit switch stays at -O0 for bounded compile time.
+            # Its page-invalidation loop is small but can dominate real GTK
+            # draws when compiled at -O0. Give that loop a separate -O2 TU,
+            # preserving the same ordered increments (including duplicate
+            # page IDs and uint32_t wraparound). Other shards still inline
+            # the original helper at their normal optimization level.
+            helper = f"{cls}_commit_bump"
+            body = body.replace("fs_bump(", f"{helper}(")
+            body = body.replace('#include "dut.h"\n',
+                '#include "dut.h"\n'
+                f"extern void {helper}(uint32_t *, const uint16_t *, unsigned);\n", 1)
+            parts.append(("dut_commit_helpers.cpp",
+                "#include <cstdint>\n\n"
+                f"void {helper}(uint32_t *pg, const uint16_t *ids, unsigned n) {{\n"
+                "  for (unsigned i = 0; i < n; i++) pg[ids[i]]++;\n"
+                "}\n"))
+        parts.append((f"dut_{name.lstrip('_')}.cpp", body))
     return header, parts
 
 

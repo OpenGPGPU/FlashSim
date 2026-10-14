@@ -408,12 +408,11 @@ if ((${#SHARDS[@]} > 0)); then
   # (Tiny in-header evals are capped via _SPLIT_INLINE_MAX_BYTES so dut_0's
   # tick_nba still finishes under -O2.)
   # dut_commit.cpp holds the dirty-list switch (~3MB for a 707-page top), so it
-  # stays at -O0 to keep that one TU's compile time bounded. It is NOT the
-  # reason the active settle rate is low: -O1 there compiles in 1m52s and
-  # measures neutral, because the dirty list runs ~6 entries wide on a live
-  # design and the switch is never entered deeply. If you are chasing a slow
-  # active settle, look at the page-gate pruning in tick_nba (707 pages, ~453
-  # re-evaluating per quiescent cycle), not at this -O0.
+  # stays at -O0 to keep that one TU's compile time bounded. The splitter
+  # emits dut_commit_helpers.cpp separately so the page-invalidation loop
+  # uses the normal shard optimization level without optimizing the huge
+  # switch. On the current 640x480 GTK model, sampling found that loop was
+  # the largest active function when compiled inside the -O0 commit TU.
   # Keep the number of compiler processes bounded.  The old loop launched
   # every shard at once, which made the larger multi-CU model compete for all
   # memory even though NPROC had already been detected above.

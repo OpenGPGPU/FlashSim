@@ -346,6 +346,29 @@ register vectors that firtool expands into hundreds of per-entry enable chains,
 and modelling them as array-indexed writes is a frontend change. Nothing in
 this file can substitute for it.
 
+### Compile the commit invalidation helper separately
+
+The 2026-10-15 GTK trace on the current 640x480 shader-core model found
+`fs_bump`, the page-invalidation loop called by `_commit`, was the largest
+active function in the host CPU sample. The model had 28,896 pages, so the
+earlier commit-path measurements above do not describe this workload.
+The splitter now emits the loop in `dut_commit_helpers.cpp`, which uses the
+default shard `-O2`, while the large commit switch stays at `-O0`. Its ordered
+increments, duplicate page IDs, and uint32 wraparound semantics are preserved;
+other shards still inline their original helper.
+
+On the same generated RTL, 32 KiB clears improved from 51.235 to 44.709 ms
+(12.7%, medians of three alternating runs of 20 clears). The existing GLES
+reproducer drawing a 160x120 rectangle in native 640x480 mode improved from
+63.750 to 60.000 s (5.9%). The first eight Weston draws at 64x64, including
+preparation and waiting, took 85.074 versus 70.138 s (17.6%). Guest timings
+are single paired runs and include queue/scheduling effects; these numbers
+are not a full-screen 640x480 redraw benchmark. Both builds pass GLES pixel
+assertions and GTK idle/active readback plus the existing scanout gate.
+All 44 host tests pass, including cross-TU helper linkage, duplicate IDs,
+zero-length invalidation, and generation-counter wraparound. PGO was disabled
+for this comparison.
+
 ### PGO is available and is the only flag-level win left
 
 The embedded build (`arti_model.py`'s `BUILD_EMBEDDED` template) uses plain
