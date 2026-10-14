@@ -833,6 +833,12 @@ def _merge_sop_terms(
                 return None
         return frozenset(lits)
 
+    def term_key(term: frozenset) -> tuple[str, ...]:
+        # repr(frozenset) preserves its hash-dependent iteration order.
+        # Canonicalize literals as well as the outer collection: otherwise
+        # identical RTL needlessly invalidates large compiler-cache shards.
+        return tuple(sorted(map(repr, term)))
+
     def simplify(terms: set[frozenset]) -> set[frozenset]:
         # Large CIRCT mux cones commonly contain pairs that differ only in
         # one literal polarity.  Looking for those pairs by scanning every
@@ -844,11 +850,11 @@ def _merge_sop_terms(
         if len(terms) > 64:
             while True:
                 merged = False
-                snapshot = tuple(terms)
+                snapshot = sorted(terms, key=term_key)
                 for t in snapshot:
                     if t not in terms:
                         continue
-                    for k, pol in t:
+                    for k, pol in sorted(t, key=repr):
                         candidate = (t - {(k, pol)}) | {(k, not pol)}
                         if candidate in terms:
                             terms.discard(t)
@@ -863,7 +869,7 @@ def _merge_sop_terms(
         changed = True
         while changed:
             changed = False
-            by_size = sorted(terms, key=len)
+            by_size = sorted(terms, key=lambda t: (len(t), term_key(t)))
             for t in by_size:
                 if t not in terms:
                     continue
@@ -967,7 +973,7 @@ def _merge_sop_terms(
             out[name] = Const(1, 1)
         else:
             out[name] = _or_chain(
-                [orig.get(t) or build(t, negs) for t in sorted(live, key=repr)]
+                [orig.get(t) or build(t, negs) for t in sorted(live, key=term_key)]
             )
     if merged:
         print(f"[sop] merged {merged} or-chains", file=sys.stderr)
