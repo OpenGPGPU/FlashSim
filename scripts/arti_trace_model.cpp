@@ -8,6 +8,9 @@
 #include <ctime>
 #include <vector>
 #include <chrono>
+#include <cerrno>
+#include <unistd.h>
+#include <sys/wait.h>
 #include "arti_rtl_model.h"
 
 namespace arti_trace {
@@ -161,39 +164,90 @@ extern "C" void arti_rtl_model_tick_n(unsigned n) {
 extern "C" void arti_rtl_model_skip_stats(uint64_t *t,uint64_t *c,uint64_t *h,uint64_t *w) {
   trace_real_stats(t,c,h,w);
 }
-extern "C" int arti_trace_replay() {
-  using namespace arti_trace;
-  open();if(!file || !replay)fail("ARTI_MODEL_REPLAY must name a trace");
-  arti_rtl_model_set_memory_callbacks(nullptr,nullptr);
-  const auto start=std::chrono::steady_clock::now();
-  bool truncated=false;
-  while(true) {
-    uint64_t n=0;
-    size_t got=fread(&n,1,sizeof(n),file);
-    if(!got)break;
-    if(got!=sizeof(n)) {truncated=true;break;}
-    if(n<2*sizeof(Event) || n>UINT64_C(1)<<30)fail("invalid block size");
-    block.resize(n);cursor=0;
-    if(fread(block.data(),1,n,file)!=n) {truncated=true;break;}
-    Event v;memcpy(&v,block.data(),sizeof(v));
-    uint64_t value=0;
-    switch(v.tag) {
-      case Init:arti_rtl_model_init();break;
-      case Read:arti_rtl_model_read(v.a,&value,v.b);break;
-      case Write:arti_rtl_model_write(v.a,v.b,v.c);break;
-      case Irq:arti_rtl_model_check_irq(v.a);break;
-      case Tick:arti_rtl_model_tick_n(v.a);break;
-      default:fail("unknown API call");
-    }
+namespace arti_trace {
+static bool next_call(bool &truncated) {
+  uint64_t n=0;
+  size_t got=fread(&n,1,sizeof(n),file);
+  if(!got)return false;
+  if(got!=sizeof(n)) {truncated=true;return false;}
+  if(n<2*sizeof(Event) || n>UINT64_C(1)<<30)fail("invalid block size");
+  block.resize(n);cursor=0;
+  if(fread(block.data(),1,n,file)!=n) {truncated=true;return false;}
+  Event v;memcpy(&v,block.data(),sizeof(v));
+  uint64_t value=0;
+  switch(v.tag) {
+    case Init:arti_rtl_model_init();break;
+    case Read:arti_rtl_model_read(v.a,&value,v.b);break;
+    case Write:arti_rtl_model_write(v.a,v.b,v.c);break;
+    case Irq:arti_rtl_model_check_irq(v.a);break;
+    case Tick:arti_rtl_model_tick_n(v.a);break;
+    default:fail("unknown API call");
   }
+  return true;
+}
+static uint64_t option(const char *name,uint64_t fallback) {
+  const char *v=getenv(name);
+  if(!v || !*v)return fallback;
+  char *end=nullptr;
+  errno=0;unsigned long long n=strtoull(v,&end,10);
+  if(errno || *v=='-' || !end || *end)fail("invalid replay window option");
+  return n;
+}
+static int measure(uint64_t limit,uint64_t preheat,unsigned sample) {
+  bool truncated=false;
+  for(uint64_t i=0;i<preheat;i++)
+    if(!next_call(truncated))fail("preheat extends beyond trace");
+  const uint64_t c0=calls,r0=reads,w0=writes,b0=bytes;
+  uint64_t t0=0,cc0=0,h0=0,hb0=0;
+  trace_real_stats(&t0,&cc0,&h0,&hb0);
+  const auto start=std::chrono::steady_clock::now();
+  while((!limit || calls-c0<limit) && next_call(truncated)) {}
+  if(limit && calls-c0!=limit)fail("window extends beyond trace");
   uint64_t ticks=0,commits=0,holds=0,wrote=0;
   trace_real_stats(&ticks,&commits,&holds,&wrote);
   double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
   printf("{\"calls\":%llu,\"ticks\":%llu,\"commits\":%llu,\"holds\":%llu,"
          "\"dma_reads\":%llu,\"dma_writes\":%llu,\"dma_bytes\":%llu,"
-         "\"seconds\":%.9f,\"truncated_tail\":%s}\n",
-         (unsigned long long)calls,(unsigned long long)ticks,(unsigned long long)commits,
-         (unsigned long long)holds,(unsigned long long)reads,(unsigned long long)writes,
-         (unsigned long long)bytes,seconds,truncated?"true":"false");
-  return calls?0:1;
+         "\"seconds\":%.9f,\"truncated_tail\":%s,\"warmup_calls\":%llu,\"sample\":%u}\n",
+         (unsigned long long)(calls-c0),(unsigned long long)(ticks-t0),
+         (unsigned long long)(commits-cc0),(unsigned long long)(holds-h0),
+         (unsigned long long)(reads-r0),(unsigned long long)(writes-w0),
+         (unsigned long long)(bytes-b0),seconds,truncated?"true":"false",
+         (unsigned long long)c0,sample);
+  return calls>c0?0:1;
+}
+}
+extern "C" int arti_trace_replay() {
+  using namespace arti_trace;
+  open();if(!file || !replay)fail("ARTI_MODEL_REPLAY must name a trace");
+  arti_rtl_model_set_memory_callbacks(nullptr,nullptr);
+  if(!getenv("ARTI_REPLAY_WINDOW_START"))return measure(0,0,0);
+  const uint64_t warmup=option("ARTI_REPLAY_WINDOW_START",0);
+  const uint64_t count=option("ARTI_REPLAY_WINDOW_CALLS",6000);
+  const uint64_t repetitions=option("ARTI_REPLAY_WINDOW_REPEATS",7);
+  const uint64_t preheat=option("ARTI_REPLAY_WINDOW_PREHEAT",256);
+  if(!count || !repetitions || repetitions>1000)fail("invalid window length or repetitions");
+  bool truncated=false;
+  while(calls<warmup)
+    if(!next_call(truncated))fail("warmup extends beyond trace");
+  const off_t offset=ftello(file);
+  if(offset<0)fail("cannot save trace offset");
+  // Each child inherits the exact warmed DUT/queue state. Reopen its input:
+  // fork shares the old descriptor offset, while stdio read-ahead is copied.
+  // Child preheat removes copy-on-write faults from the measured window.
+  fflush(stdout);
+  for(unsigned i=0;i<repetitions;i++) {
+    const pid_t child=fork();
+    if(child<0)fail("fork failed");
+    if(!child) {
+      fclose(file);
+      file=fopen(getenv("ARTI_MODEL_REPLAY"),"rb");
+      if(!file || fseeko(file,offset,SEEK_SET))fail("cannot restore trace offset");
+      int r=measure(count,preheat,i);fflush(stdout);_exit(r);
+    }
+    int status=0;pid_t waited;
+    do {waited=waitpid(child,&status,0);} while(waited<0 && errno==EINTR);
+    if(waited<0 || !WIFEXITED(status) || WEXITSTATUS(status))return 1;
+  }
+  return 0;
 }

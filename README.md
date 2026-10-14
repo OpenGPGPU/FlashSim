@@ -460,6 +460,24 @@ alongside the trace. The builder writes input hashes to
 `trace-build-manifest.json`. A corruption test verifies that modified DMA
 output causes replay to fail.
 
+For repeated measurements of a later phase, warm up once and fork identical
+replay windows instead of paying the prefix cost for every sample:
+
+```sh
+ARTI_REPLAY_WINDOW_START=36545 ARTI_REPLAY_WINDOW_CALLS=6000 \
+ARTI_REPLAY_WINDOW_REPEATS=7 ARTI_REPLAY_WINDOW_PREHEAT=256 \
+OUTPUT/replay /absolute/path/work.trace
+```
+
+The start index is specific to the trace. Each child opens its own input file
+and inherits the warmed model and AXI queues. Its first 256 calls are verified
+but excluded from timing, avoiding copy-on-write startup costs. It then
+verifies and measures the same 6000 calls. Output is one JSON record per child,
+with tick/DMA deltas and the absolute `warmup_calls` index. Choose a window
+that contains active simulation; idle IRQ polls can advance zero ticks.
+This mode requires POSIX `fork`. Full-trace replay and the fresh guest proof
+remain necessary for final qualification.
+
 ### Reproducible builds
 
 The emitter used to be **non-deterministic**: two runs on identical input

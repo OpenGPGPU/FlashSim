@@ -63,7 +63,9 @@ int main(int argc,char **argv) {
   if(arti_rtl_model_write(32,42,4))return 1;
   uint64_t v=0,t=0;arti_rtl_model_read(32,&v,4);
   if(v!=45 || !arti_rtl_model_check_irq(0))return 2;
-  arti_rtl_model_tick_n(11);arti_rtl_model_skip_stats(&t,nullptr,nullptr,nullptr);
+  arti_rtl_model_tick_n(11);
+  for(unsigned i=0;i<100;i++)arti_rtl_model_tick_n(1);
+  arti_rtl_model_skip_stats(&t,nullptr,nullptr,nullptr);
   printf("%llu\\n",(unsigned long long)t);
 }
 ''')
@@ -77,16 +79,36 @@ int main(int argc,char **argv) {
     recorded = subprocess.check_output([str(binary)],env=env,text=True)
     result = json.loads(subprocess.check_output([str(binary),str(trace)],text=True))
     assert result["ticks"] == int(recorded)
-    assert result["calls"] == 5
+    assert result["calls"] == 105
     assert result["dma_reads"] == result["dma_writes"] == 1
     assert result["truncated_tail"] is False
+    window_env = dict(os.environ,ARTI_REPLAY_WINDOW_START="2",
+                      ARTI_REPLAY_WINDOW_CALLS="80",ARTI_REPLAY_WINDOW_REPEATS="3",
+                      ARTI_REPLAY_WINDOW_PREHEAT="0")
+    windows = [json.loads(line) for line in subprocess.check_output(
+        [str(binary),str(trace)],env=window_env,text=True).splitlines()]
+    assert len(windows) == 3
+    for i,window in enumerate(windows):
+        assert window["sample"] == i
+        assert window["warmup_calls"] == 2
+        assert window["calls"] == 80 and window["ticks"] == 88
+        assert window["dma_reads"] == window["dma_writes"] == 0
+    # The parent must propagate a failed child rather than reporting a
+    # successful timing when a window's expected MMIO result is changed.
+    raw = trace.read_bytes()
+    marker = struct.pack("=6Q",6,0,45,0,0,0)
+    offset = raw.index(marker)+16
+    bad_window = tmp_path / "bad-window.trace"
+    bad_window.write_bytes(raw[:offset]+struct.pack("=Q",44)+raw[offset+8:])
+    failed = subprocess.run([str(binary),str(bad_window)],env=window_env,
+                            capture_output=True,text=True)
+    assert failed.returncode != 0 and "event or data differs" in failed.stderr
     # A process killed while writing a block leaves preceding complete calls
     # replayable. The report explicitly identifies the incomplete tail.
     partial = tmp_path / "partial.trace"
-    raw = trace.read_bytes()
     partial.write_bytes(raw[:-1])
     result = json.loads(subprocess.check_output([str(binary),str(partial)],text=True))
-    assert result["calls"] == 4 and result["truncated_tail"] is True
+    assert result["calls"] == 104 and result["truncated_tail"] is True
     # Locate the unique DMA write record, then corrupt its payload.
     marker = struct.pack("=6Q",9,32,4,1,9,0)
     offset = raw.index(marker)+48
