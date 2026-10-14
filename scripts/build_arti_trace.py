@@ -43,8 +43,13 @@ int main(int argc,char **argv) {
                     "-o", str(out / "replay")], check=True)
     inputs = [model / "libarti_rtl_model.a", model / "dut.h",
               model / "arti_rtl_model.cpp", source]
-    manifest = {str(path): hashlib.file_digest(path.open("rb"), "sha256").hexdigest()
-                for path in inputs}
+    manifest = {}
+    for path in inputs:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024*1024), b""):
+                digest.update(chunk)
+        manifest[str(path)] = digest.hexdigest()
     (out / "trace-build-manifest.json").write_text(json.dumps(manifest, indent=2)+"\n")
     print(out / "replay", flush=True)
 
