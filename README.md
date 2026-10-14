@@ -429,6 +429,37 @@ Max (21.9% faster), with identical desktop pixels. The profile was collected
 from an instrumented QEMU and is kept outside the source tree because it is
 tied to the exact generated RTL and workload.
 
+### Replaying real ARTI traffic
+
+`scripts/build_arti_trace.py MODEL OUTPUT` builds a recorder archive and a
+standalone `OUTPUT/replay` executable, reusing the generated DUT objects. It
+replaces only the wrapper in the output archive and leaves the input model
+and QEMU staging directory untouched. Link the output archive into a separate
+QEMU executable and run the normal guest proof with
+`ARTI_MODEL_TRACE=/absolute/path/work.trace`. Then run:
+
+```sh
+OUTPUT/replay /absolute/path/work.trace
+```
+
+Replay checks the ordered MMIO/IRQ results, DMA request addresses, sizes,
+transaction IDs, write strobes, and every DMA write byte. Recorded DMA reads
+supply the guest memory inputs. Clock observations are recorded too: the
+wrapper's wall-clock limits stop at the original tick even when a candidate
+executes faster. Wrapper policy environment variables are restored from the
+trace header. This permits comparisons of identical shader/texture/scanout
+work without repeatedly booting Debian. It does not measure QEMU/TCG overhead;
+accepted candidates still need the full guest pixel and scanout proof.
+
+The tool prints JSON containing elapsed time, ticks, calls, and DMA counts.
+Compare repeated, alternating baseline/candidate replays built from the same
+RTL. The trace format is local native-endian data. Each API call is stored as
+a block; if QEMU is killed while writing, replay uses complete preceding
+blocks and reports `truncated_tail`. Keep the full guest proof and build hashes
+alongside the trace. The builder writes input hashes to
+`trace-build-manifest.json`. A corruption test verifies that modified DMA
+output causes replay to fail.
+
 ### Reproducible builds
 
 The emitter used to be **non-deterministic**: two runs on identical input
