@@ -3501,9 +3501,9 @@ def _emit_narrow_from_wide(
         if is_wide(aw) or is_wide(bw):
             if expr.op.startswith("s"):
                 raise TypeError(f"signed compare of width {max(aw, bw)}")
-            left = _materialize_limbs(expr.a, aw, cached, sigs, lines, indent, scratch)
-            right = _materialize_limbs(expr.b, bw, cached, sigs, lines, indent, scratch)
             n = max(limb_count(aw), limb_count(bw))
+            left = _materialize_limbs(expr.a, n * 64, cached, sigs, lines, indent, scratch)
+            right = _materialize_limbs(expr.b, n * 64, cached, sigs, lines, indent, scratch)
             cop = {"==": "==", "!=": "!=", "<": "<", "<=": "<=", ">": ">", ">=": ">="}[expr.op]
             lines.append(
                 f"{sp}{dest} = ({ty})(fs_ucmp_limbs({left}, {right}, {n}u) {cop} 0);"
@@ -3718,11 +3718,27 @@ def _materialize_limbs(
     indent: int,
     scratch: list[int],
 ) -> str:
-    if isinstance(expr, Id) and expr.name in sigs and is_wide(sigs[expr.name].width):
+    actual_width = _expr_width(expr, sigs)
+    if (isinstance(expr, Id) and expr.name in sigs and is_wide(actual_width)
+            and limb_count(actual_width) >= limb_count(width)):
         _emit_demand(expr, cached, lines, indent)
         return expr.name
     tmp = _wtmp(lines, indent, limb_count(width), scratch)
-    _emit_wide_assign(tmp, expr, cached, sigs, lines, indent, scratch)
+    if not is_wide(actual_width):
+        # A comparison or other scalar expression can be an operand of a
+        # wide mask/arithmetic operation. Evaluate it with scalar semantics,
+        # then zero extend to the complete operand storage, never C pointers.
+        value = _bind_narrow(expr, actual_width, cached, sigs, lines, indent, scratch)
+        lines.append(f"{' ' * indent}memset({tmp}, 0, sizeof({tmp}));")
+        _emit_setbits_scalar(tmp, 0, min(width, actual_width), value, lines, indent, scratch)
+    elif limb_count(actual_width) < limb_count(width):
+        # Evaluate memory reads and other smaller wide expressions at their
+        # real size before padding; copying sizeof(tmp) could overread them.
+        value = _materialize_limbs(expr, actual_width, cached, sigs, lines, indent, scratch)
+        lines.append(f"{' ' * indent}memset({tmp}, 0, sizeof({tmp}));")
+        lines.append(f"{' ' * indent}fs_copy_bits({tmp}, 0u, {value}, 0u, {actual_width}u);")
+    else:
+        _emit_wide_assign(tmp, expr, cached, sigs, lines, indent, scratch)
     return tmp
 
 
@@ -3809,8 +3825,9 @@ def _emit_wide_assign(
     if isinstance(expr, BinOp) and expr.op in {"&", "|", "^", "+", "-", "*"}:
         aw = _expr_width(expr.a, sigs)
         bw = _expr_width(expr.b, sigs)
-        left = _materialize_limbs(expr.a, aw, cached, sigs, lines, indent, scratch)
-        right = _materialize_limbs(expr.b, bw, cached, sigs, lines, indent, scratch)
+        operand_width = max(aw, bw, width)
+        left = _materialize_limbs(expr.a, operand_width, cached, sigs, lines, indent, scratch)
+        right = _materialize_limbs(expr.b, operand_width, cached, sigs, lines, indent, scratch)
         fn = {
             "&": "fs_and_limbs",
             "|": "fs_or_limbs",
@@ -3830,8 +3847,9 @@ def _emit_wide_assign(
     if isinstance(expr, BinOp) and expr.op in {"/", "s/", "%", "s%"}:
         aw = _expr_width(expr.a, sigs)
         bw = _expr_width(expr.b, sigs)
-        left = _materialize_limbs(expr.a, aw, cached, sigs, lines, indent, scratch)
-        right = _materialize_limbs(expr.b, bw, cached, sigs, lines, indent, scratch)
+        operand_width = max(aw, bw, width)
+        left = _materialize_limbs(expr.a, operand_width, cached, sigs, lines, indent, scratch)
+        right = _materialize_limbs(expr.b, operand_width, cached, sigs, lines, indent, scratch)
         use_n = max(limb_count(aw), limb_count(bw), n)
         bit_w = max(aw, bw, width)
         signed = 1 if expr.op.startswith("s") else 0
