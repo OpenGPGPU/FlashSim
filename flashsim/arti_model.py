@@ -906,8 +906,9 @@ static void mem_capture(void)
     ArtiAxiWriteBeat w{};
     ArtiAxiData strobe{};
     memcpy(w.data.data(), &g_rtl->io_m_axi_wdata, M_AXI_BYTES);
-    memcpy(strobe.data(), &g_rtl->io_m_axi_wstrb, M_AXI_BYTES / 8);
-    memcpy(&w.strb, strobe.data(), M_AXI_BYTES / 8);
+    // One strobe bit per data byte, including a four-byte AXI bus.
+    memcpy(strobe.data(), &g_rtl->io_m_axi_wstrb, (M_AXI_BYTES + 7) / 8);
+    memcpy(&w.strb, strobe.data(), (M_AXI_BYTES + 7) / 8);
     w.last = !!g_rtl->io_m_axi_wlast;
     g_wbeats.push_back(w);
   }
@@ -917,19 +918,19 @@ static void mem_capture(void)
     uint64_t addr = g_aw_addr + (uint64_t)g_aw_beat * g_aw_size;
     unsigned lane = addr & (M_AXI_BYTES - 1);
     unsigned size = g_aw_size;
-    int status = -1;
+    int status = 0;
     unsigned done = 0;
     unsigned data_offset = lane;
     while (done < size) {
       unsigned chunk = std::min({8u, size - done, M_AXI_BYTES - data_offset});
-      uint64_t mask = (w.strb >> data_offset) &
-                      (chunk == 8 ? UINT64_MAX : ((UINT64_C(1) << chunk) - 1));
-      if (!g_mem_write_cb ||
+      // A callback's mask covers this chunk only, even on a 64-byte bus.
+      uint64_t mask = (w.strb >> data_offset) & ((UINT64_C(1) << chunk) - 1);
+      // Zero strobes have no memory effect. Keep errors sticky across all
+      // enabled chunks; a later success must not turn SLVERR into OKAY.
+      if (mask && (!g_mem_write_cb ||
           g_mem_write_cb(addr + done, w.data.data() + data_offset, chunk,
-                         mask, g_aw_id) != 0)
+                         mask, g_aw_id) != 0))
         status = -1;
-      else if (status < 0)
-        status = 0;
       done += chunk;
       data_offset += chunk;
       if (data_offset == M_AXI_BYTES)
