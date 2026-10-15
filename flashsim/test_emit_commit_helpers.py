@@ -41,13 +41,25 @@ struct CheckDut {
         objects.append(str(obj))
     main = tmp_path / "main.cpp"
     main.write_text('''#include "dut.h"
+extern void CheckDut_commit_bump(uint32_t*,const uint16_t*,unsigned);
 int main() {
   CheckDut d;
   d._commit();
   if (d.pg[0] != 1u || d.pg[1] != 9u || d.pg[2] != 10u || d.pg[3] != 1u)
     return 1;
   d._commit();
-  return d.pg[0] != 3u || d.pg[3] != 2u;
+  if (d.pg[0] != 3u || d.pg[3] != 2u) return 2;
+  uint16_t ids[100];
+  for (unsigned i=0;i<100;i++) ids[i]=(i*7)%3;
+  for (unsigned n=0;n<=100;n++) {
+    uint32_t a[4]={UINT32_MAX,UINT32_MAX-2,7,99};
+    uint32_t b[4]={UINT32_MAX,UINT32_MAX-2,7,99};
+    for (unsigned i=0;i<n;i++) b[ids[i]]++;
+    CheckDut_commit_bump(a,ids,n);
+    for (unsigned i=0;i<4;i++) if(a[i]!=b[i]) return 3;
+  }
+  CheckDut_commit_bump(nullptr,nullptr,0);
+  return 0;
 }
 ''')
     binary = tmp_path / "check"

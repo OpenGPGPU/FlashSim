@@ -2851,6 +2851,40 @@ def _shard_index(name: str, n_shards: int) -> int:
     return zlib.adler32(name.encode()) % n_shards
 
 
+def _outline_mem_ports(cls: str, body: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """Keep cold per-port address/data work out of a large prepare prologue."""
+    pattern = re.compile(r"^    if \(__we(\d+)\) \{\n$")
+    if sum(bool(pattern.match(line)) for line in body) < 64:
+        return body, [], []
+    prepared: list[str] = []
+    declarations: list[str] = []
+    helpers: list[str] = []
+    i = 0
+    while i < len(body):
+        match = pattern.match(body[i])
+        if not match:
+            prepared.append(body[i])
+            i += 1
+            continue
+        port = match.group(1)
+        name = f"_mem_port_{port}"
+        inner: list[str] = []
+        depth = 1
+        i += 1
+        while i < len(body) and depth:
+            line = body[i]
+            depth += line.count("{") - line.count("}")
+            if depth:
+                inner.append(line[4:] if line.startswith("    ") else line)
+            i += 1
+        if depth:
+            raise ValueError("unterminated memory-port body")
+        prepared.append(f"    if (__we{port}) {name}();\n")
+        declarations.append(f"  __attribute__((noinline)) void {name}();\n")
+        helpers.extend([f"void {cls}::{name}() {{\n", *inner, "}\n\n"])
+    return prepared, declarations, helpers
+
+
 def split_dut_methods(
     cpp: str, n_shards: int = 8
 ) -> tuple[str, list[tuple[str, str]]]:
@@ -2933,6 +2967,12 @@ def split_dut_methods(
                 converted.append(bl[2:])
             else:
                 converted.append(bl)
+        if name == "_mem_prepare":
+            converted, declarations, helpers = _outline_mem_ports(cls, converted)
+            out_lines.extend(declarations)
+            if helpers:
+                bucket = own_files.setdefault("_mem_ports", [f'#include "dut.h"\n', "\n"])
+                bucket.extend(helpers)
         if name in _SPLIT_OWN_FILE:
             bucket = own_files.setdefault(name, [f'#include "dut.h"\n', "\n"])
             bucket.extend(converted)
@@ -2965,6 +3005,12 @@ def split_dut_methods(
             parts.append(("dut_commit_helpers.cpp",
                 "#include <cstdint>\n\n"
                 f"void {helper}(uint32_t *pg, const uint16_t *ids, unsigned n) {{\n"
+                "  for (; n >= 4u; n -= 4u, ids += 4u) {\n"
+                "    pg[ids[0]]++;\n"
+                "    pg[ids[1]]++;\n"
+                "    pg[ids[2]]++;\n"
+                "    pg[ids[3]]++;\n"
+                "  }\n"
                 "  for (unsigned i = 0; i < n; i++) pg[ids[i]]++;\n"
                 "}\n"))
         parts.append((f"dut_{name.lstrip('_')}.cpp", body))
