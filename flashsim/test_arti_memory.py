@@ -20,7 +20,10 @@ def test_memory_callbacks_masks_faults_and_sparse_writes(tmp_path, beat_bytes):
     capture = "static void mem_capture(void)" + template.split(
         "static void mem_capture(void)", 1)[1].split(
         "\nstatic unsigned g_hold_boost;", 1)[0]
-    # Compile the production function verbatim against a narrow DUT stub.
+    drive = template.split("template <typename T, typename U>", 1)[1].split(
+        "static void mem_capture(void)", 1)[0]
+    drive = "template <typename T, typename U>" + drive
+    # Compile the production functions verbatim against a narrow DUT stub.
     prefix = r"""
 #include <algorithm>
 #include <array>
@@ -40,6 +43,10 @@ struct Dut {
   unsigned io_m_axi_awsize, io_m_axi_arsize, io_m_axi_arlen;
   ArtiAxiData io_m_axi_wdata;
   Strobe io_m_axi_wstrb;
+  bool io_m_axi_bvalid, io_m_axi_rvalid, io_m_axi_rlast;
+  unsigned io_m_axi_bresp, io_m_axi_rresp;
+  uint64_t io_m_axi_bid, io_m_axi_rid;
+  ArtiAxiData io_m_axi_rdata;
 } dut;
 static Dut *g_rtl = &dut;
 struct ArtiAxiWriteBeat {ArtiAxiData data; uint64_t strb; bool last;};
@@ -67,7 +74,7 @@ static int write_cb(uint64_t addr, const uint8_t *data, unsigned n,
   return 0;
 }
 static int read_cb(uint64_t addr, uint8_t *data, unsigned n, uint64_t id) {
-  assert(id == 9 && addr + n <= memory.size());
+  assert(id >= 9 && id < 12 && addr + n <= memory.size());
   memcpy(data, memory.data() + addr, n);
   return fail_call ? -1 : 0;
 }
@@ -129,10 +136,31 @@ int main() {
   mem_capture(); assert(g_rresp.size()==1 && g_rresp.front().last && g_rresp.front().resp==0);
   for(unsigned i=0;i<M_AXI_BYTES;++i)
     assert(g_rresp.front().data[i]==(i==M_AXI_BYTES-4?73:(i>M_AXI_BYTES-4?0xaa:0)));
+  // Multiple addresses may arrive before any read response is consumed.
+  reset();
+  for(unsigned j=0;j<3;++j) {
+    memory[256+j*M_AXI_BYTES]=17+j;
+    dut.io_m_axi_arvalid=true;dut.io_m_axi_araddr=256+j*M_AXI_BYTES;
+    dut.io_m_axi_arid=9+j;dut.io_m_axi_arsize=log2(M_AXI_BYTES);dut.io_m_axi_arlen=0;
+    mem_drive(); assert(dut.io_m_axi_arready);mem_capture();
+  }
+  dut.io_m_axi_arvalid=false;
+  for(unsigned j=0;j<3;++j) {
+    for(unsigned stall=0;stall<4;++stall) {
+      mem_drive();assert(dut.io_m_axi_rvalid && dut.io_m_axi_rid==9+j);
+      assert(dut.io_m_axi_rdata[0]==17+j && dut.io_m_axi_rlast);
+    }
+    g_rresp.pop_front();
+  }
+  mem_drive();assert(!dut.io_m_axi_rvalid);
+  // Admission remains bounded even if the consumer never drains R.
+  for(unsigned j=0;j<64;++j)g_rresp.push_back({});
+  mem_drive();assert(!dut.io_m_axi_arready);
+  g_rresp.pop_front();mem_drive();assert(dut.io_m_axi_arready);
 }
 """
     source = tmp_path / "check.cpp"
-    source.write_text(prefix + capture + main)
+    source.write_text(prefix + drive + capture + main)
     binary = tmp_path / "check"
     subprocess.run([compiler, "-std=c++17", "-O1", f"-DBEAT_BYTES={beat_bytes}",
                     str(source), "-o", str(binary)], check=True)

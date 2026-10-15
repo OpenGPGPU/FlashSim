@@ -872,10 +872,10 @@ static bool mem_drive(void)
   bool ch = false;
   ch |= drive_in(g_rtl->io_m_axi_awready, !g_aw_active);
   ch |= drive_in(g_rtl->io_m_axi_wready, 1);
-  // One outstanding read burst. Accepting unlimited ARs while R beats
-  // sit in a software FIFO desynchronized the GPU's memoryAxi (depth
-  // loads never retired, draws hung after the first write burst).
-  ch |= drive_in(g_rtl->io_m_axi_arready, g_rresp.empty());
+  // Tagged RTL read contexts can overlap independent bursts. Preserve the
+  // queued head under R backpressure and bound admission by pending beats.
+  // A newly accepted cache-line burst adds at most sixteen further beats.
+  ch |= drive_in(g_rtl->io_m_axi_arready, g_rresp.size() < 64);
   ch |= drive_in(g_rtl->io_m_axi_bvalid, !g_bresp.empty());
   ch |= drive_in(g_rtl->io_m_axi_bresp, g_bresp.empty() ? 0 : g_bresp.front().resp);
   ch |= drive_in(g_rtl->io_m_axi_bid, g_bresp.empty() ? 0 : g_bresp.front().id);
