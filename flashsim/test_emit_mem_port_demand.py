@@ -86,3 +86,92 @@ int main() {
     binary = tmp_path / "check"
     subprocess.run([compiler,"-std=c++17","-O2",str(main),*sources,"-o",str(binary)],check=True)
     subprocess.run([str(binary)],check=True)
+
+
+def test_enable_regions_are_not_demanded_twice_before_commit(tmp_path):
+    # More than 128 cached outputs activates eager regions. Keep a direct
+    # input enable as well, so eliminating duplicate region calls must not
+    # accidentally reuse the previous tick's enable value.
+    compiler = shutil.which("c++")
+    if not compiler:
+        pytest.skip("C++ compiler unavailable")
+    signals = {"clock": Signal("clock",1,"input"),
+               "en": Signal("en",1,"input"),
+               "data": Signal("data",32,"input"),
+               "m": Signal("m",32,"mem",depth=4),
+               "enabled": Signal("enabled",1,"wire")}
+    assignments = [Assign("enabled",Id("en"))]
+    for i in range(129):
+        name = f"out{i}"
+        signals[name] = Signal(name,32,"output")
+        assignments.append(Assign(name,BinOp("+",Id("data"),Const(i))))
+    mod = Module(name="EnableDemand",signals=signals,assigns=assignments,
+                 always=AlwaysFF("clock",[]),ports=["clock","en","data"],
+                 mem_writes=[MemWrite("m",Const(0),Id("data"),Id("enabled")),
+                             MemWrite("m",Const(1),Id("data"),Id("en"))])
+    source = emit_cpp(mod)
+    assert "_demand_seq()" in source
+    assert "_demand_mem();" not in source
+    (tmp_path/"dut.h").write_text(source)
+    main = tmp_path/"main.cpp"
+    main.write_text('''#include "dut.h"
+int main() {
+  EnableDemandDut d;unsigned expected=0;
+  for(unsigned i=0;i<100;i++) {
+    d.en=(i%7)==0;d.data=i;
+    if(d.en)expected=i;
+    d.tick();
+    if(d.m[0]!=expected || d.m[1]!=expected)return 1;
+    for(unsigned j=0;j<4;j++)if(j>1 && d.m[j])return 2;
+  }
+}
+''')
+    binary=tmp_path/"check"
+    subprocess.run([compiler,"-std=c++17","-O2",str(main),"-o",str(binary)],check=True)
+    subprocess.run([str(binary)],check=True)
+
+
+def test_drained_enable_passes_still_prepare_and_wake_memory(tmp_path):
+    from flashsim.ir import If, NbAssign
+    compiler = shutil.which("c++")
+    if not compiler:
+        pytest.skip("C++ compiler unavailable")
+    signals = {"clock":Signal("clock",1,"input"),"en":Signal("en",1,"input"),
+               "data":Signal("data",32,"input"),"enabled":Signal("enabled",1,"wire"),
+               "m":Signal("m",32,"mem",depth=4)}
+    assignments = [Assign("enabled",Id("en"))]
+    body = []
+    for i in range(256):
+        reg=f"r{i}"
+        signals[reg]=Signal(reg,32,"reg")
+        body.append(If(Id("enabled"),[NbAssign(reg,BinOp("+",Id("data"),Const(i)))]))
+    for i in range(129):
+        name=f"out{i}"
+        signals[name]=Signal(name,32,"output")
+        assignments.append(Assign(name,BinOp("+",Id("data"),Const(i))))
+    mod=Module(name="DrainedEnable",signals=signals,assigns=assignments,
+               always=AlwaysFF("clock",body),ports=["clock","en","data"],
+               mem_writes=[MemWrite("m",Const(0),Id("data"),Id("enabled"))])
+    source=emit_cpp(mod)
+    assert "kPasses[]" in source
+    assert "_demand_mem();" not in source
+    assert "_demand_seq();" not in source
+    assert "_mem_prepare()" in source
+    (tmp_path/"dut.h").write_text(source)
+    main=tmp_path/"main.cpp"
+    main.write_text('''#include "dut.h"
+int main() {
+  DrainedEnableDut d;unsigned expected=0;bool written=false;
+  for(unsigned i=0;i<100;i++) {
+    d.en=(i%7)==0;d.data=i;
+    if(d.en){expected=i;written=true;}
+    d.tick();
+    if(d.m[0]!=expected)return 1;
+    if(d.r0!=(written?expected:0))return 2;
+    if(d.r255!=(written?expected+255:0))return 3;
+  }
+}
+''')
+    binary=tmp_path/"check"
+    subprocess.run([compiler,"-std=c++17","-O2",str(main),"-o",str(binary)],check=True)
+    subprocess.run([str(binary)],check=True)

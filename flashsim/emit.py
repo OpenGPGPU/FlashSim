@@ -2448,15 +2448,28 @@ def emit_cpp(mod: Module) -> str:
         seq_cached_pre |= expr_ids(wr.enable) & cached
     seq_calls: list[str] = []
     _emit_eval_calls(seq_cached_pre, cached, assigns, stop, seq_calls, indent=4)
+    seq_tick_calls: list[str] = []
+    _emit_eval_calls(seq_cached_pre, cached, assigns, stop, seq_tick_calls, indent=4,
+                     satisfied_passes=set(pass_bit))
     mem_en_demanded: set[str] = set()
     for wr in mod.mem_writes:
         mem_en_demanded |= _cached_deps_for_expr(wr.enable, assigns, cached, stop)
     mem_calls = list(dict.fromkeys(
         call for dep in sorted(mem_en_demanded) if (call := _eval_invoke(dep, 4))
     ))
+    # Holds only stage next-state values. Before prepare, the drained pass
+    # worklist plus sequence demand has already satisfied these exact calls.
+    # Do not discard calls nested inside a page guard.
+    seq_invokes = set(seq_calls)
+    satisfied_mem = {_eval_invoke(dep, 4) for dep in mem_en_demanded
+                     if eager_of.get(dep) in pass_bit}
+    mem_tick_calls = [call for call in mem_calls
+                      if call not in seq_invokes and call not in satisfied_mem]
     gate_demand = _PAGE_GEN and bool(seq_calls or mem_calls)
-    # Out of line so an idle tick does not build the address prologue for
-    # hundreds of `_eg != _pg` compares inside tick_nba.
+    # Keep independently callable helpers complete. Inside tick_nba, inline
+    # at most eight remaining lines after the worklist drains; larger demand
+    # sets still use the helper to keep cold address work out of its prologue.
+    # Their unchanged declarations and bodies also preserve compiler caches.
     if gate_demand and seq_calls:
         lines.append("  __attribute__((noinline)) void _demand_seq() {")
         lines.extend(seq_calls)
@@ -2499,12 +2512,18 @@ def emit_cpp(mod: Module) -> str:
         # Captured before holds. Holds do not bump pages; commit does, and
         # that bump must be visible on the next tick rather than this one.
         lines.append("    uint8_t _demand = _demand_gen != _pg_gen;")
-        if seq_calls:
-            lines.append("    if (_demand) { _demand_gen = _pg_gen; _demand_seq(); }")
+        if seq_tick_calls:
+            if len(seq_tick_calls) <= 8:
+                lines.append("    if (_demand) {")
+                lines.append("      _demand_gen = _pg_gen;")
+                lines.extend("  " + call for call in seq_tick_calls)
+                lines.append("    }")
+            else:
+                lines.append("    if (_demand) { _demand_gen = _pg_gen; _demand_seq(); }")
         else:
             lines.append("    if (_demand) _demand_gen = _pg_gen;")
     else:
-        lines.extend(seq_calls)
+        lines.extend(seq_tick_calls)
     if large:
         if write_flags:
             # Reset the dirty flags by walking the previous tick's list, not by
@@ -2621,14 +2640,16 @@ def emit_cpp(mod: Module) -> str:
         decl_at.append(f"{decl_sp}uint32_t __wa{i};")
     we_base = 4
     we_sp = " " * we_base
-    if gate_we and mem_calls:
-        lines.append("    if (_demand) _demand_mem();")
+    if gate_demand and mem_tick_calls:
+        if len(mem_tick_calls) <= 8:
+            lines.append("    if (_demand) {")
+            lines.extend("  " + call for call in mem_tick_calls)
+            lines.append("    }")
+        else:
+            lines.append("    if (_demand) _demand_mem();")
+    if gate_we:
         lines.append("    if (_demand || _we_any) _mem_prepare();")
-    elif gate_we:
-        lines.append("    if (_demand || _we_any) _mem_prepare();")
-    elif gate_demand and mem_calls:
-        lines.append("    if (_demand) _demand_mem();")
-    elif not gate_we:
+    elif not gate_demand:
         for dep in sorted(mem_en_demanded):
             call = _eval_invoke(dep, 4)
             if call:
@@ -2885,6 +2906,68 @@ def _outline_mem_ports(cls: str, body: list[str]) -> tuple[list[str], list[str],
     return prepared, declarations, helpers
 
 
+_COMMIT_CHUNK_MIN_CASES = 4096
+_COMMIT_CHUNK_CASES = 512
+
+
+def _chunk_commit_switch(cls: str, body: str) -> str | None:
+    """Bound each commit switch so the original typed cases can use -O2."""
+    cases = list(re.finditer(r"^    case (\d+)u: \{\n(.*?)^    \} break;",
+                             body, re.M | re.S))
+    if len(cases) < _COMMIT_CHUNK_MIN_CASES:
+        return None
+    start = f"void {cls}::_commit() {{\n"
+    marker = "  for (unsigned i = 0; i < _nw; i++) {"
+    if start not in body or marker not in body:
+        return None
+    prefix, method = body.split(start, 1)
+    prologue = method.split(marker, 1)[0]
+    state = {"_pg", "_pg_gen", "_bst", "_bep", "_h_need", "_h_any",
+             "_h_words", "_p_need", "_p_any", "_p_words", "_chg"}
+    converted: list[str] = []
+    for index, match in enumerate(cases):
+        if int(match[1]) != index:
+            return None
+        lines = match[2].splitlines()
+        if len(lines) < 4 or lines[-1].strip() != "}":
+            return None
+        first = lines[0].strip()
+        scalar = re.fullmatch(r"if \((\w+)__n != \1\) \{", first)
+        wide = re.fullmatch(r"if \(memcmp\((\w+)__n, \1, sizeof\(\1\)\)\) \{", first)
+        if not (scalar or wide):
+            return None
+        name = (scalar or wide)[1]
+        assignment = (f"{name} = {name}__n;" if scalar else
+                      f"memcpy({name}, {name}__n, sizeof({name}));")
+        if lines[-2].strip() != assignment:
+            return None
+        # Free helpers keep the DUT header and every unrelated shard stable.
+        # These are exactly the data members used by emitted commit cases.
+        members = state | {name, name + "__n"}
+        pattern = r"\b(" + "|".join(map(re.escape, sorted(members))) + r")\b"
+        case = re.sub(pattern, r"d->\1", match[0])
+        converted.append(case + "\n")
+    size = _COMMIT_CHUNK_CASES
+    count = (len(cases) + size - 1) // size
+    tag = f"{cls}_commit_part"
+    out = [prefix]
+    for index in range(count):
+        out.append(f"static void {tag}{index}({cls} *d, unsigned k) {{\n"
+                   "  switch (k) {\n")
+        out.extend(converted[index * size:(index + 1) * size])
+        out.append("  }\n}\n\n")
+    out.append(start + prologue +
+               f"  using Fn = void (*)({cls} *, unsigned);\n"
+               "  static const Fn parts[] = {\n")
+    out.extend(f"    {tag}{index},\n" for index in range(count))
+    out.append("  };\n"
+               "  for (unsigned i = 0; i < _nw; i++) {\n"
+               "    unsigned k = _wl[i];\n"
+               f"    if (k < {len(cases)}u) parts[k / {size}u](this, k);\n"
+               "  }\n}\n")
+    return "".join(out)
+
+
 def split_dut_methods(
     cpp: str, n_shards: int = 8
 ) -> tuple[str, list[tuple[str, str]]]:
@@ -3013,7 +3096,12 @@ def split_dut_methods(
                 "  }\n"
                 "  for (unsigned i = 0; i < n; i++) pg[ids[i]]++;\n"
                 "}\n"))
-        parts.append((f"dut_{name.lstrip('_')}.cpp", body))
+        compact = _chunk_commit_switch(cls, body) if name == "_commit" else None
+        if compact:
+            # Bounded switches use normal -O2 without optimizing one giant CFG.
+            parts.append(("dut_commit_chunks.cpp", compact))
+        else:
+            parts.append((f"dut_{name.lstrip('_')}.cpp", body))
     return header, parts
 
 
@@ -3831,6 +3919,7 @@ def _emit_eval_calls(
     stop: set[str],
     lines: list[str],
     indent: int,
+    satisfied_passes: set[int] | None = None,
 ) -> None:
     seen: set[str] = set()
     ordered: list[str] = []
@@ -3849,7 +3938,12 @@ def _emit_eval_calls(
         r = _EAGER_OF.get(name)
         if r is not None:
             # A pass pulls its own upstream; one demand per pass is enough.
-            passes.setdefault(r, name)
+            # tick_nba drains these passes before reading any sequence or
+            # memory-enable value. A broad page generation may still differ
+            # even though its direct inputs and upstream values did not;
+            # re-demanding the pass would only refresh that conservative tag.
+            if not satisfied_passes or r not in satisfied_passes:
+                passes.setdefault(r, name)
             continue
         stack.append((name, True))
         for dep in cached_deps(name, assigns, cached, stop):
