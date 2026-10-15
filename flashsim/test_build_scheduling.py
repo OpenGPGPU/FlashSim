@@ -40,12 +40,22 @@ if src==os.environ.get("FAIL_SOURCE"):sys.exit(7)
 Path(sys.argv[sys.argv.index("-o")+1]).write_bytes(b"fixture object")
 ''')
     compiler.chmod(0o755)
+    queue_capture=bindir/"xargs"
+    real_xargs=shutil.which("xargs")
+    queue_capture.write_text("#!"+sys.executable+"\n"+'''import os,sys,json,subprocess
+raw=sys.stdin.buffer.read()
+with open(os.environ["BUILD_TASKS"],"w") as f:
+    json.dump([os.fsdecode(v) for v in raw.split(b"\\0") if v],f)
+sys.exit(subprocess.run([REAL_XARGS,*sys.argv[1:]],input=raw).returncode)
+'''.replace("REAL_XARGS",repr(real_xargs)))
+    queue_capture.chmod(0o755)
     stage=tmp_path/"stage"
     (stage/"hw/misc").mkdir(parents=True)
     events=tmp_path/"events.jsonl"
     env=dict(os.environ,PATH=str(bindir)+os.pathsep+os.environ["PATH"],
              CCACHE_DISABLE="1",QEMU_SRC=str(stage),SKIP_QEMU_REBUILD="1",
-             FLASHSIM_COMPILE_JOBS="2",BUILD_EVENTS=str(events),FAIL_SOURCE=fail)
+             FLASHSIM_COMPILE_JOBS="2",BUILD_EVENTS=str(events),
+             BUILD_TASKS=str(tmp_path/"queued.json"),FAIL_SOURCE=fail)
     # Test queue and profile argument quoting without invoking a real compiler.
     profile=tmp_path/"profile with spaces.profdata"
     profile.touch()
@@ -66,7 +76,8 @@ def test_build_queue_reuses_a_slot_before_the_oldest_job_finishes(tmp_path):
         peak=max(peak,active)
         assert 0<=active<=2
     assert peak==2 and active==0
-    assert rows[0]["source"]=="dut_commit_helpers.cpp"
+    queued=json.loads((model.parent/"queued.json").read_text())
+    assert queued[:3]==["dut_commit_helpers.cpp","dut_commit_helpers.o","-O2"]
     members=subprocess.check_output(["ar","-t",str(model/"libarti_rtl_model.a")],text=True).splitlines()
     expected=[p.with_suffix(".o").name for p in sorted(model.glob("dut_*.cpp"))]+["arti_rtl_model.o"]
     assert [name for name in members if not name.startswith("__.SYMDEF")]==expected
