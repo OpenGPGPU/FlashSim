@@ -1862,6 +1862,18 @@ def _array_depth(expr: Expr, sigs: dict[str, Signal]) -> int:
     return 0
 
 
+def _dirty_tracking_declarations(count: int) -> list[str]:
+    # A full GPU can have more than 2**16 independently committed signals.
+    # The list and its insertion argument must both represent every index.
+    index_type = c_type(max(16, (count - 1).bit_length()))
+    return [
+        f"  uint8_t _w[{count}] = {{}};",
+        f"  {index_type} _wl[{count}] = {{}};",
+        "  unsigned _nw = 0;",
+        f"  void _note({index_type} i) {{ if (!_w[i]) {{ _w[i] = 1; _wl[_nw++] = i; }} }}",
+    ]
+
+
 def emit_cpp(mod: Module) -> str:
     sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
     assigns = assign_map(mod)
@@ -2275,11 +2287,7 @@ def emit_cpp(mod: Module) -> str:
             else:
                 lines.append(f"  {_storage_decl(name + '__n', sig.width)}")
         if write_flags:
-            nwf = len(write_flags)
-            lines.append(f"  uint8_t _w[{nwf}] = {{}};")
-            lines.append(f"  uint16_t _wl[{nwf}] = {{}};")
-            lines.append("  unsigned _nw = 0;")
-            lines.append("  void _note(uint16_t i) { if (!_w[i]) { _w[i] = 1; _wl[_nw++] = i; } }")
+            lines.extend(_dirty_tracking_declarations(len(write_flags)))
         if _ARRAY_INDEX:
             lines.append(f"  uint8_t _ac[{len(_ARRAY_INDEX)}] = {{}};")
             lines.append("  uint8_t _ac_any = 0;")
