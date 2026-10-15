@@ -8,7 +8,8 @@ import pytest
 
 
 @pytest.mark.parametrize("beat_bytes", [4, 8, 16, 32, 64])
-def test_memory_callbacks_masks_faults_and_sparse_writes(tmp_path, beat_bytes):
+@pytest.mark.parametrize("callback_bytes", [8, 64])
+def test_memory_callbacks_masks_faults_and_sparse_writes(tmp_path, beat_bytes, callback_bytes):
     compiler = shutil.which("c++")
     if not compiler:
         pytest.skip("C++ compiler unavailable")
@@ -23,6 +24,8 @@ def test_memory_callbacks_masks_faults_and_sparse_writes(tmp_path, beat_bytes):
     drive = template.split("template <typename T, typename U>", 1)[1].split(
         "static void mem_capture(void)", 1)[0]
     drive = "template <typename T, typename U>" + drive
+    callback_config = "#ifndef ARTI_MODEL_WRITE_CALLBACK_BYTES" + template.split(
+        "#ifndef ARTI_MODEL_WRITE_CALLBACK_BYTES", 1)[1].split("using ArtiAxiData", 1)[0]
     # Compile the production functions verbatim against a narrow DUT stub.
     prefix = r"""
 #include <algorithm>
@@ -65,8 +68,8 @@ static unsigned calls, fail_call;
 static std::array<uint8_t, 1024> memory;
 static int write_cb(uint64_t addr, const uint8_t *data, unsigned n,
                     uint64_t mask, uint64_t id) {
-  assert(n && n <= 8 && addr + n <= memory.size() && id == 7);
-  assert(mask && !(mask >> n));
+  assert(n && n <= ARTI_MODEL_WRITE_CALLBACK_BYTES && addr + n <= memory.size() && id == 7);
+  assert(mask && (n == 64 || !(mask >> n)));
   ++calls;
   if (calls == fail_call) return -1;
   for (unsigned i = 0; i < n; ++i)
@@ -101,7 +104,8 @@ static void write(unsigned size, unsigned lane, uint64_t mask, bool last=true) {
 }
 int main() {
   reset(); write(M_AXI_BYTES,0,all_strobes());
-  assert(calls==(M_AXI_BYTES+7)/8 && g_bresp.size()==1 && g_bresp.front().resp==0);
+  assert(calls==(M_AXI_BYTES+WRITE_CALLBACK_BYTES-1)/WRITE_CALLBACK_BYTES &&
+         g_bresp.size()==1 && g_bresp.front().resp==0);
   for(unsigned i=0;i<M_AXI_BYTES;++i) assert(memory[256+i]==i+1);
   reset(); unsigned sparse=M_AXI_BYTES-1;
   write(M_AXI_BYTES,0,UINT64_C(1)<<sparse);
@@ -110,6 +114,23 @@ int main() {
   reset(); write(4,M_AXI_BYTES-4,UINT64_C(15)<<(M_AXI_BYTES-4));
   assert(calls==1 && g_bresp.front().resp==0);
   for(unsigned i=0;i<M_AXI_BYTES;++i) assert(memory[256+i]==(i>=M_AXI_BYTES-4?i+1:0xaa));
+  // Preserve lane wrap without reading beyond the host data array. A failure
+  // in the first segment must survive a successful second callback.
+  if(M_AXI_BYTES>=8) {
+    reset(); write(8,M_AXI_BYTES-4,all_strobes());
+    assert(calls==2 && g_bresp.front().resp==0);
+    for(unsigned i=0;i<4;++i) {
+      assert(memory[256+M_AXI_BYTES-4+i]==M_AXI_BYTES-3+i);
+      assert(memory[256+M_AXI_BYTES+i]==i+1);
+    }
+    assert(memory[256+M_AXI_BYTES-5]==0xaa && memory[256+M_AXI_BYTES+4]==0xaa);
+    reset(); fail_call=1; write(8,M_AXI_BYTES-4,all_strobes());
+    assert(calls==2 && g_bresp.front().resp==2);
+    for(unsigned i=0;i<4;++i) {
+      assert(memory[256+M_AXI_BYTES-4+i]==0xaa);
+      assert(memory[256+M_AXI_BYTES+i]==i+1);
+    }
+  }
   reset(); g_mem_write_cb=nullptr; write(M_AXI_BYTES,0,0);
   assert(calls==0 && g_bresp.front().resp==0);
   reset(); g_mem_write_cb=nullptr; write(M_AXI_BYTES,0,1);
@@ -160,8 +181,11 @@ int main() {
 }
 """
     source = tmp_path / "check.cpp"
+    prefix = prefix.replace("using ArtiAxiData =", callback_config + "using ArtiAxiData =", 1)
     source.write_text(prefix + drive + capture + main)
     binary = tmp_path / "check"
-    subprocess.run([compiler, "-std=c++17", "-O1", f"-DBEAT_BYTES={beat_bytes}",
+    subprocess.run([compiler, "-std=c++17", "-O1", "-fsanitize=undefined",
+                    "-fno-sanitize-recover=undefined", f"-DBEAT_BYTES={beat_bytes}",
+                    f"-DARTI_MODEL_WRITE_CALLBACK_BYTES={callback_bytes}",
                     str(source), "-o", str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

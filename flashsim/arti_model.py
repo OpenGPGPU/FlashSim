@@ -379,6 +379,11 @@ unset _ccache_libexec
 # because clang -O2 never finishes on a ~300MB single TU.
 NPROC="${FLASHSIM_COMPILE_JOBS:-$(sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)}"
 SHARD_OPT="${FLASHSIM_SHARD_OPT:--O2}"
+CALLBACK_WRITE_BYTES="${FLASHSIM_WRITE_CALLBACK_BYTES:-64}"
+case "$CALLBACK_WRITE_BYTES" in
+  1|2|4|8|16|32|64) ;;
+  *) echo "FLASHSIM_WRITE_CALLBACK_BYTES must be 1, 2, 4, 8, 16, 32 or 64" >&2; exit 1 ;;
+esac
 case "$SHARD_OPT" in
   -O0|-O1|-O2|-O3) ;;
   *) echo "FLASHSIM_SHARD_OPT must be -O0, -O1, -O2 or -O3" >&2; exit 1 ;;
@@ -390,6 +395,9 @@ OBJS=()
 compile_one() {
   local src="$1" obj="$2" opt="$3"
   local CXXFLAGS_BASE=(-std=gnu++17 -fPIC -fPIE -w -Wno-parentheses-equality -fbracket-depth=4096 -I.)
+  if [[ "$src" == arti_rtl_model.cpp ]]; then
+    CXXFLAGS_BASE+=("-DARTI_MODEL_WRITE_CALLBACK_BYTES=$CALLBACK_WRITE_BYTES")
+  fi
   echo "  c++ $opt $src"
   if [[ -n "$PGO_PROFILE" ]]; then
     c++ "${CXXFLAGS_BASE[@]}" -fprofile-instr-use="$PGO_PROFILE" "$opt" -c "$src" -o "$obj"
@@ -535,6 +543,15 @@ static_assert(M_AXI_BYTES >= 4 && M_AXI_BYTES <= 64 &&
               (M_AXI_BYTES & (M_AXI_BYTES - 1)) == 0, "unsupported AXI beat size");
 static_assert(sizeof(((GpuHostSystemAxiDut *)nullptr)->io_m_axi_rdata) == M_AXI_BYTES,
               "AXI read/write data widths differ");
+#ifndef ARTI_MODEL_WRITE_CALLBACK_BYTES
+// QEMU accepts the complete beat. Legacy embedders may retain eight-byte
+// callbacks with -DARTI_MODEL_WRITE_CALLBACK_BYTES=8.
+#define ARTI_MODEL_WRITE_CALLBACK_BYTES 64
+#endif
+static constexpr unsigned WRITE_CALLBACK_BYTES = ARTI_MODEL_WRITE_CALLBACK_BYTES;
+static_assert(WRITE_CALLBACK_BYTES && WRITE_CALLBACK_BYTES <= 64 &&
+              (WRITE_CALLBACK_BYTES & (WRITE_CALLBACK_BYTES - 1)) == 0,
+              "write callback limit must be a power of two from 1 to 64");
 using ArtiAxiData = std::array<uint8_t, M_AXI_BYTES>;
 
 #ifndef ARTI_MODEL_MMIO_ADVANCE_CYCLES
@@ -922,9 +939,11 @@ static void mem_capture(void)
     unsigned done = 0;
     unsigned data_offset = lane;
     while (done < size) {
-      unsigned chunk = std::min({8u, size - done, M_AXI_BYTES - data_offset});
-      // A callback's mask covers this chunk only, even on a 64-byte bus.
-      uint64_t mask = (w.strb >> data_offset) & ((UINT64_C(1) << chunk) - 1);
+      unsigned chunk = std::min({WRITE_CALLBACK_BYTES, size - done, M_AXI_BYTES - data_offset});
+      // The callback accepts an entire AXI beat. Avoid shifting by 64 for a
+      // full-width mask; unaligned transfers still stop at the bus boundary.
+      uint64_t chunk_mask = chunk == 64 ? UINT64_MAX : (UINT64_C(1) << chunk) - 1;
+      uint64_t mask = (w.strb >> data_offset) & chunk_mask;
       // Zero strobes have no memory effect. Keep errors sticky across all
       // enabled chunks; a later success must not turn SLVERR into OKAY.
       if (mask && (!g_mem_write_cb ||
