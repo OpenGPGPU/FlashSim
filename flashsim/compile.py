@@ -61,19 +61,30 @@ def compile_file(
     mod, cpp = compile_verilog(
         path.read_text(), frontend=frontend, path=path, mlir_path=mlir_path
     )
-    # Drop stale shards from a prior split emit.
-    for stale in out_h.parent.glob("dut_*.cpp"):
-        stale.unlink()
     if split == 0:
         split = _auto_split_count(path, len(cpp))
+    wanted: set[str] = set()
     if split > 0:
         header, parts = split_dut_methods(cpp, n_shards=split)
-        out_h.write_text(header)
+        _write_generated(out_h, header)
         for name, body in parts:
-            (out_h.parent / name).write_text(body)
+            wanted.add(name)
+            _write_generated(out_h.parent / name, body)
     else:
-        out_h.write_text(cpp)
+        _write_generated(out_h, cpp)
+    # Remove only obsolete shards. Keeping identical source/header mtimes
+    # lets ccache's direct mode reuse a large model after regeneration.
+    for stale in out_h.parent.glob("dut_*.cpp"):
+        if stale.name not in wanted:
+            stale.unlink()
     return mod
+
+
+def _write_generated(path: Path, text: str) -> None:
+    data = text.encode()
+    if path.is_file() and path.read_bytes() == data:
+        return
+    path.write_bytes(data)
 
 
 def _auto_split_count(path: Path, cpp_bytes: int) -> int:
