@@ -1,0 +1,200 @@
+{
+  "binaries": {
+    "baseline": {
+      "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/wide-callbacks/8/qemu",
+      "sha256": "50eac22309a24a1c2c63c0919e0606299d701d1c2a8ba8625034ca30d746ec2e"
+    },
+    "candidate": {
+      "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/wide-callbacks/64/qemu",
+      "sha256": "3e975bdff3be6fb6eb08b902c11200ec9bd87eb0099b3a5f66ded75a4003831e"
+    }
+  },
+  "base_image": "/Users/duckdonald/workspace/arti-work/debian-gtk-arm64.qcow2",
+  "scope": "Clean3alternatingfreshguestpairs;frozenqualified4CUPGODUTobjects;bothwrappersO1withoutPGO;sameordering/device,payload,HVF/pump;640mode160x120GLbbox;captureoff.",
+  "runs": [
+    {
+      "name": "baseline",
+      "round": 0,
+      "work": "/Users/duckdonald/workspace/gpu/.artifacts/cbwall-v1/b0",
+      "gate_exit": 0,
+      "pixel_pass": true,
+      "draw_ms": [
+        9458.329
+      ]
+    },
+    {
+      "name": "candidate",
+      "round": 0,
+      "work": "/Users/duckdonald/workspace/gpu/.artifacts/cbwall-v1/c0",
+      "gate_exit": 0,
+      "pixel_pass": true,
+      "draw_ms": [
+        9503.885
+      ]
+    },
+    {
+      "name": "candidate",
+      "round": 1,
+      "work": "/Users/duckdonald/workspace/gpu/.artifacts/cbwall-v1/c1",
+      "gate_exit": 0,
+      "pixel_pass": true,
+      "draw_ms": [
+        9482.219
+      ]
+    },
+    {
+      "name": "baseline",
+      "round": 1,
+      "work": "/Users/duckdonald/workspace/gpu/.artifacts/cbwall-v1/b1",
+      "gate_exit": 0,
+      "pixel_pass": true,
+      "draw_ms": [
+        9377.909
+      ]
+    },
+    {
+      "name": "baseline",
+      "round": 2,
+      "work": "/Users/duckdonald/workspace/gpu/.artifacts/cbwall-v1/b2",
+      "gate_exit": 0,
+      "pixel_pass": true,
+      "draw_ms": [
+        9395.22
+      ]
+    },
+    {
+      "name": "candidate",
+      "round": 2,
+      "work": "/Users/duckdonald/workspace/gpu/.artifacts/cbwall-v1/c2",
+      "gate_exit": 0,
+      "pixel_pass": true,
+      "draw_ms": [
+        9558.201
+      ]
+    }
+  ],
+  "summary": {
+    "baseline": {
+      "draw_ms": [
+        9458.329,
+        9377.909,
+        9395.22
+      ],
+      "median_ms": 9395.22,
+      "reduction_percent": 0.0
+    },
+    "candidate": {
+      "draw_ms": [
+        9503.885,
+        9482.219,
+        9558.201
+      ],
+      "median_ms": 9503.885,
+      "reduction_percent": -1.1565987810822964
+    }
+  },
+  "configuration": {
+    "QEMU_ACCEL": "hvf",
+    "QEMU_CPU": "host",
+    "ARTI_MODEL_IRQ_PUMP": "1024",
+    "ARTI_MODEL_IRQ_PUMP_NS": "8000000",
+    "ARTI_MODEL_SETTLE_NS": "8000000",
+    "GTK_PROOF_SMOKE": "1",
+    "GTK_PROOF_KMS_MODE": "64x64",
+    "GTK_PROOF_WESTON_REPRO": "medium",
+    "GTK_PROOF_REPRO_ONLY": "1",
+    "GTK_PROOF_SCANOUT_ENABLE": "0",
+    "GTK_PROOF_SKIP_BUILD": "1",
+    "GTK_PROOF_SKIP_COVERAGE": "1",
+    "GTK_PROOF_SMOKE_TIMEOUT_S": "900"
+  },
+  "decision": "Retain8bytecallbackdefault;64byteoptioncorrectbutnativeGLESmedian1.1566%slower.",
+  "build": {
+    "scope": "Wrapper-only8vs64bytecallbacks;identical frozen4CUfullmodelPGODUTobjects,unprofiledO1wrappers,sameordering/device/payload",
+    "header_sha256": "5b89f4a995d5a6758ba71611cbe1fa48a13d0a3d9f051a832d318c29b823ef92",
+    "original_wrapper_sha256": "ccc56880e7a00969d081901585799087bf4e685ef7819631241295dfd9af8cb4",
+    "wrapper_sha256": "aaa61b760c4b5287ce5741425cf7e5c2531851dfd8a3516afc3e4603d8d812d6",
+    "dut_objects": {
+      "dut_0.o": "79dcd0d98a50e7dd7e285303b80bade0e0571dbb86c3ea36485f478fc6a70673",
+      "dut_1.o": "b5a527205a9f6bec2a4fb44bfcf1a240683b7c9dc57e5e711a2f5ce42d9b4212",
+      "dut_10.o": "4773d54e26f94bfa83083569a4483e606efcdd7cbc986801f6c703eca7f07834",
+      "dut_11.o": "73e0bc8be5a98d9c37bb05aeb89adb3a34ada5cd8fa3cf4ed02e5253fce7ee2a",
+      "dut_12.o": "a603c5423ef0aaf8008a4f423b2d42cb58c32d13c94e08ede432c7add814030a",
+      "dut_13.o": "6d19069068829b217df9ab9f92384187055ab6ad69bb300a78defafb591743fe",
+      "dut_14.o": "8d6015a0e15a88ba8ad7eb3d6b5d777526a3c38dca8c47278693f4a86050d9f6",
+      "dut_15.o": "273e9d5196419c54ac61c5238a35bf97630d6f4fe6e7d2a0b3249fa60b05d6a3",
+      "dut_16.o": "7dd513059a6ba89569a0a01e527e071e69f0205d8de1b7fd6e1ed55601a21403",
+      "dut_17.o": "3c7e9fa3b5a7996eaa0c3eb9ec9469a7c3aba7b066ed88370d165236a550934c",
+      "dut_18.o": "952f465c2b8e6ef6661b706c2da151cb851e14aaf13b0d3ba9e3b40edec8bf08",
+      "dut_19.o": "66d58890299b992511c5adbc1a3afbf92c13cb1f17574c53686302ea3c0873cf",
+      "dut_2.o": "e5d75137571a162fa48f502a9df8617e49e24e9bc45172e9ec41d66495b002e3",
+      "dut_20.o": "25087bf8958fdab3f3f1fef1f096bc9e94e96d309f67622c5257d6a75ada4d53",
+      "dut_21.o": "67a24fe4b4036f8d591cb2ae812813e4290532d424e2caee7a96140f64577a53",
+      "dut_22.o": "3cd292577b3eac0e06be74bf344126e94b1839ffd5c3f4aab4089dd0e0854364",
+      "dut_23.o": "02a758a31fe0e6e01998790b5006f71826a06ec71502f83f9636baefbe97bd20",
+      "dut_24.o": "8efeb565a67f87a649d017110dc6a0305d37bb9656743414948ae9c68d93bf34",
+      "dut_25.o": "10b6315cc19cf72d9d15c401db3b7b3a43faf544723d19a30e5184e80a32bc6d",
+      "dut_26.o": "f2b57bc68f214ace2860bf6a2344625a8d900b1425683a7e7f046df2e0a7eadb",
+      "dut_27.o": "80c2b90a30ebcb91288b08b483889f954fd95124f66a1e84037e821ea9b729bd",
+      "dut_28.o": "41d7f99d0527f0d45a81c9e2758b33fd2c4886db90ca9533f7e333a5185f8432",
+      "dut_29.o": "b426ba61de159e0c8311eaf491d6050909cbee3df53c5e36cf99285fd00a6b7b",
+      "dut_3.o": "4fa0f40d4850a50cd58f2fb3044feb85025316416ac13eb92ca170d2426a52d5",
+      "dut_30.o": "a0d29e4a288d62019a0f328e01d674f67b7d4679ea9be491fea759624082205e",
+      "dut_31.o": "c009670978cde763f6c8b7921d601a7ce60a971908ad62f7b9dee828e738f944",
+      "dut_4.o": "9f4b819407056b7fe50ada3fd8503432e76da3e8b7b3016b2a8944d87ef3aab3",
+      "dut_5.o": "ba8489ebc5ff9e5a761bcf011933737cc8b32c9668b5cd4e87e52d4ecc05841d",
+      "dut_6.o": "5378cad0f1f4015c8df146f758b31dc88233c655562815b9fc9cb82321c309e1",
+      "dut_7.o": "7240d52fb0a02a37339563dd187ef1a87c38d759ee3fccbd3d2b7af316661168",
+      "dut_8.o": "04f225294e39fb46a74b131fad47849ba35bc4f1b16ff703abb6f38c214e4038",
+      "dut_9.o": "c2df8ae6da0f051bc9585a315d6177320cd7947ef48abd47c743fdc3a39a7204",
+      "dut_commit_chunks.o": "e828f8900997809c3a33e652e0a8d649291ad2372af98322fcf16cb7cce5c887",
+      "dut_commit_helpers.o": "b548471cc689579008bae17428d6d2426082acd836402b6bb80dd2fb784392e5",
+      "dut_mem_ports.o": "09c9362321a8d68747dd1d56e9980533aec5e19a0629576287f9e9cc920a8583"
+    },
+    "builds": {
+      "8": {
+        "command": [
+          "c++",
+          "-std=c++17",
+          "-O1",
+          "-fPIC",
+          "-fPIE",
+          "-w",
+          "-fbracket-depth=4096",
+          "-I/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/runtime-native-coherent/model",
+          "-DARTI_MODEL_WRITE_CALLBACK_BYTES=8",
+          "-c",
+          "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/wide-callbacks/wrapper.cpp",
+          "-o",
+          "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/wide-callbacks/8/arti_rtl_model.o"
+        ],
+        "archive_sha256": "48552c38383bbab7bf4bf0af9e1b2f016cc1590d2bfe6c3dd68e1e808a4097d8",
+        "qemu_sha256": "50eac22309a24a1c2c63c0919e0606299d701d1c2a8ba8625034ca30d746ec2e"
+      },
+      "64": {
+        "command": [
+          "c++",
+          "-std=c++17",
+          "-O1",
+          "-fPIC",
+          "-fPIE",
+          "-w",
+          "-fbracket-depth=4096",
+          "-I/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/runtime-native-coherent/model",
+          "-DARTI_MODEL_WRITE_CALLBACK_BYTES=64",
+          "-c",
+          "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/wide-callbacks/wrapper.cpp",
+          "-o",
+          "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/wide-callbacks/64/arti_rtl_model.o"
+        ],
+        "archive_sha256": "09962a83a9351b3ed66871d166e224eb62387f3384f485c05816902a4429ee6e",
+        "qemu_sha256": "3e975bdff3be6fb6eb08b902c11200ec9bd87eb0099b3a5f66ded75a4003831e"
+      }
+    }
+  },
+  "qualification": "compute+21GLES+GTK64+scanoutPASS;legacy8callback82MBexactreplayPASS",
+  "limits": [
+    "UntexturedGLES microbenchmark,notfull desktop.",
+    "This changes hostcallbackgranularity,notarchitecturalcycles."
+  ]
+}

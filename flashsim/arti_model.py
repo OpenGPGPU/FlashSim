@@ -379,7 +379,7 @@ unset _ccache_libexec
 # because clang -O2 never finishes on a ~300MB single TU.
 NPROC="${FLASHSIM_COMPILE_JOBS:-$(sysctl -n hw.logicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)}"
 SHARD_OPT="${FLASHSIM_SHARD_OPT:--O2}"
-CALLBACK_WRITE_BYTES="${FLASHSIM_WRITE_CALLBACK_BYTES:-64}"
+CALLBACK_WRITE_BYTES="${FLASHSIM_WRITE_CALLBACK_BYTES:-8}"
 case "$CALLBACK_WRITE_BYTES" in
   1|2|4|8|16|32|64) ;;
   *) echo "FLASHSIM_WRITE_CALLBACK_BYTES must be 1, 2, 4, 8, 16, 32 or 64" >&2; exit 1 ;;
@@ -544,9 +544,9 @@ static_assert(M_AXI_BYTES >= 4 && M_AXI_BYTES <= 64 &&
 static_assert(sizeof(((GpuHostSystemAxiDut *)nullptr)->io_m_axi_rdata) == M_AXI_BYTES,
               "AXI read/write data widths differ");
 #ifndef ARTI_MODEL_WRITE_CALLBACK_BYTES
-// QEMU accepts the complete beat. Legacy embedders may retain eight-byte
-// callbacks with -DARTI_MODEL_WRITE_CALLBACK_BYTES=8.
-#define ARTI_MODEL_WRITE_CALLBACK_BYTES 64
+// Keep the measured eight-byte default. Hosts can opt into complete beats
+// with -DARTI_MODEL_WRITE_CALLBACK_BYTES=64 after workload qualification.
+#define ARTI_MODEL_WRITE_CALLBACK_BYTES 8
 #endif
 static constexpr unsigned WRITE_CALLBACK_BYTES = ARTI_MODEL_WRITE_CALLBACK_BYTES;
 static_assert(WRITE_CALLBACK_BYTES && WRITE_CALLBACK_BYTES <= 64 &&

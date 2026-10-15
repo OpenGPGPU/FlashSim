@@ -431,12 +431,14 @@ tied to the exact generated RTL and workload.
 
 ### Replaying real ARTI traffic
 
-AXI writes use whole-beat memory callbacks, up to 64 bytes, preserving byte
-strobes and sticky burst errors. Hosts limited to eight-byte writes can build
-with `FLASHSIM_WRITE_CALLBACK_BYTES=8` (wrapper compiler define
-`ARTI_MODEL_WRITE_CALLBACK_BYTES=8`). When replaying a trace recorded with that
-limit, pass `--write-callback-bytes 8` to the trace builder. Callback boundaries
-must match the trace; wider callbacks change host overhead, not RTL cycles.
+AXI writes retain eight-byte memory callbacks by default. Whole-beat callbacks
+up to 64 bytes are available with `FLASHSIM_WRITE_CALLBACK_BYTES=64` (wrapper
+compiler define `ARTI_MODEL_WRITE_CALLBACK_BYTES=64`), preserving byte strobes
+and sticky burst errors. In a clean six-guest four-CU GLES experiment, 64-byte
+callbacks were 1.2% slower, so they are not the default
+([experiment data](docs/write-callback-experiment-2026-10-16.json)). Pass the matching
+`--write-callback-bytes` value to the trace builder when overriding the limit.
+Callback boundaries must match the trace; this option does not change RTL cycles.
 
 `scripts/build_arti_trace.py MODEL OUTPUT` builds a recorder archive and a
 standalone `OUTPUT/replay` executable, reusing the generated DUT objects. It
