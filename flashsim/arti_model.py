@@ -383,13 +383,13 @@ case "$SHARD_OPT" in
   -O0|-O1|-O2|-O3) ;;
   *) echo "FLASHSIM_SHARD_OPT must be -O0, -O1, -O2 or -O3" >&2; exit 1 ;;
 esac
-CXXFLAGS_BASE=(-std=gnu++17 -fPIC -fPIE -w -Wno-parentheses-equality -fbracket-depth=4096 -I.)
 # Keep this opt-in: a profile from a tiny smoke test can over-specialize the
 # model and make a full-system workload slower.
 OBJS=()
 
 compile_one() {
   local src="$1" obj="$2" opt="$3"
+  local CXXFLAGS_BASE=(-std=gnu++17 -fPIC -fPIE -w -Wno-parentheses-equality -fbracket-depth=4096 -I.)
   echo "  c++ $opt $src"
   if [[ -n "$PGO_PROFILE" ]]; then
     c++ "${CXXFLAGS_BASE[@]}" -fprofile-instr-use="$PGO_PROFILE" "$opt" -c "$src" -o "$obj"
@@ -413,30 +413,29 @@ if ((${#SHARDS[@]} > 0)); then
   # uses the normal shard optimization level without optimizing the huge
   # switch. On the current 640x480 GTK model, sampling found that loop was
   # the largest active function when compiled inside the -O0 commit TU.
-  # Keep the number of compiler processes bounded.  The old loop launched
-  # every shard at once, which made the larger multi-CU model compete for all
-  # memory even though NPROC had already been detected above.
-  running=0
-  pids=()
+  # A work queue fills a slot as soon as any compiler exits. Waiting for
+  # PIDs in launch order left most slots idle behind a large early shard.
+  [[ "$NPROC" =~ ^[1-9][0-9]*$ ]] || {
+    echo "FLASHSIM_COMPILE_JOBS must be a positive integer" >&2; exit 1;
+  }
+  export -f compile_one
+  export PGO_PROFILE PGO_GENERATE
+  tasks=()
   for src in "${SHARDS[@]}"; do
     obj="${src%.cpp}.o"
     OBJS+=("$obj")
-    if [[ "$src" == "dut_commit.cpp" ]]; then
-      compile_one "$src" "$obj" -O0 &
-    else
-      compile_one "$src" "$obj" "$SHARD_OPT" &
-    fi
-    pids+=("$!")
-    running=$((running + 1))
-    if ((running >= NPROC)); then
-      wait "${pids[0]}"
-      pids=("${pids[@]:1}")
-      running=$((running - 1))
-    fi
+    opt="$SHARD_OPT"
+    [[ "$src" != "dut_commit.cpp" ]] || opt=-O0
+    tasks+=("$src" "$obj" "$opt")
   done
-  for pid in "${pids[@]}"; do
-    wait "$pid"
-  done
+  # Compile the largest sources first to reduce the final serial tail.
+  # Keep OBJS in filename order so scheduling does not reorder the archive.
+  python3 -c 'import os,sys
+v=sys.argv[1:]
+tasks=[v[i:i+3] for i in range(0,len(v),3)]
+for task in sorted(tasks,key=lambda t:os.path.getsize(t[0]),reverse=True):
+    for arg in task:sys.stdout.buffer.write(os.fsencode(arg)+b"\0")' "${tasks[@]}" | \
+    xargs -0 -n 3 -P "$NPROC" bash -c 'compile_one "$@"' _
   compile_one arti_rtl_model.cpp arti_rtl_model.o -O1
   OBJS+=(arti_rtl_model.o)
 else
