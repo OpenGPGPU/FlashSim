@@ -2491,9 +2491,20 @@ def emit_cpp(mod: Module) -> str:
             continue
         _emit_eval_method(name, assigns, sigs, stop, cached, lines, wire_part[name])
     for r, order in enumerate(eager_regions):
-        _emit_eager_region(r, order, wire_part[order[0]], assigns, sigs, stop, cached, cdeps, lines)
+        part = wire_part[order[0]]
+        ready_body = _emit_eager_region(r, order, part, assigns, sigs, stop, cached, cdeps, lines)
         if r in pass_bit:
-            lines.append(f"  void _pn{r}() {{ {_eval_invoke(order[0], 0)} }}")
+            region = set(order)
+            foreign = {d for w in order for d in cdeps.get(w, ()) if d not in region}
+            # Only this dispatch context has already drained every predecessor.
+            # Lazy/output eager callers retain their complete dependency walk.
+            if r in drained:
+                lines.append(f"  void _pn{r}() {{")
+                lines.append(f"    if (_eg{r} == _pg[{part}]) return;")
+                lines.extend(ready_body)
+                lines.append("  }")
+            else:
+                lines.append(f"  void _pn{r}() {{ {_eval_invoke(order[0], 0)} }}")
     for name in outputs:
         if name not in cached:
             lines.append(f"  void eval_{name}() {{}}")
@@ -3320,7 +3331,7 @@ def _emit_eager_region(
     cached: set[str],
     cdeps: dict[str, list[str]],
     lines: list[str],
-) -> None:
+) -> list[str]:
     """`_eager{r}()`: every wire of region r in dependency order.
 
     Foreign deps go first: the region closure guarantees none of them reads
@@ -3339,6 +3350,7 @@ def _emit_eager_region(
             demanded.add(call)
             lines.append(call)
     dp = _PASS_PAGE[r]
+    ready_body_start = len(lines)
     lines.append(f"    _eg{r} = _pg[{part}];")
     lines.append(f"    if (_ed{r} == _pg[{dp}] && !_up{r}) return;")
     lines.append(f"    _ed{r} = _pg[{dp}];")
@@ -3346,6 +3358,7 @@ def _emit_eager_region(
     nchunks = (len(order) + _EAGER_CHUNK - 1) // _EAGER_CHUNK
     for k in range(nchunks):
         lines.append(f"    _eager{r}_{k}();")
+    ready_body = lines[ready_body_start:]
     lines.append("  }")
     lines.append("")
     _EAGER_DONE = region | set(foreign)
@@ -3381,6 +3394,7 @@ def _emit_eager_region(
         lines.append("  }")
         lines.append("")
     _EAGER_DONE = set()
+    return ready_body
 
 
 def _emit_eval_method(
