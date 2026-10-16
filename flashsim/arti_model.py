@@ -327,6 +327,8 @@ def write_arti_model(out_dir: Path) -> tuple[Path, Path, Path]:
 
 BUILD_EMBEDDED = r'''#!/usr/bin/env bash
 set -euo pipefail
+# Keep pathname expansion and archive member order independent of host locale.
+export LC_ALL=C
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 QEMU_SRC=${QEMU_SRC:?must be set}
 # The rest of this script runs from the generated model directory. Resolve
