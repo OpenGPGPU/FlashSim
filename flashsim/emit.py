@@ -1576,7 +1576,8 @@ def _bulk_state_constructor(cpp: str, cls: str,
             if char in "([{":
                 nesting.append(char)
             elif char in ")]}":
-                assert nesting and nesting.pop() == {")": "(", "]": "[", "}": "{"}[char]
+                opening = nesting.pop() if nesting else None
+                assert opening == {")": "(", "]": "[", "}": "{"}[char]
             elif char == "," and not nesting:
                 result.append(text[begin:pos].strip())
                 begin = pos + 1

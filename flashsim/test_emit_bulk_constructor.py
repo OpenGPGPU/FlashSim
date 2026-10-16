@@ -1,6 +1,7 @@
 """Large DUTs must preserve late member initializers on supported compilers."""
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -96,3 +97,23 @@ def test_bulk_constructor_threshold_counts_declarators():
     source = "struct Paired {\n  uint32_t first = 0, second = 2;\n};\n"
     assert "Paired() {" in _bulk_state_constructor(source, "Paired", min_fields=2)
     assert _bulk_state_constructor(source, "Paired", min_fields=3) == source
+
+
+def test_bulk_constructor_with_optimized_python(tmp_path):
+    source = '''#include <cstdint>
+#include <cstring>
+struct Paired {
+  uint64_t first[2] = {1, 2}, second[2] = {3, 4};
+  uint32_t third = (void(0), 5), fourth = 6;
+};
+int main() {
+  Paired p;
+  return p.first[0]!=1 || p.first[1]!=2 || p.second[0]!=3 ||
+         p.second[1]!=4 || p.third!=5 || p.fourth!=6;
+}
+'''
+    code = ("import sys; from flashsim.emit import _bulk_state_constructor; "
+            "print(_bulk_state_constructor(sys.argv[1], 'Paired', min_fields=1))")
+    transformed = subprocess.check_output(
+        [sys.executable, "-O", "-c", code, source], text=True)
+    compile_and_run(tmp_path, transformed, "optimized-python")
