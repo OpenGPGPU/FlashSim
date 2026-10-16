@@ -1470,6 +1470,50 @@ def _pass_summary_init(nwords: int) -> str:
     return ", ".join(parts)
 
 
+def _drained_regions(regions: list[list[str]], eager_of: dict[str, int],
+                     cdeps: dict[str, list[str]], pass_bit: dict[int, int]) -> set[int]:
+    """Ready regions with a complete, earlier ready dependency closure.
+
+    Custom eager grouping can place a producer after its consumer. Retain
+    lazy evaluation for that domain rather than assume the ascending drain
+    has refreshed dependencies that are not themselves scheduled.
+    """
+    drained: set[int] = set()
+    for r in sorted(pass_bit):
+        region = set(regions[r])
+        foreign = {d for w in regions[r] for d in cdeps.get(w, ()) if d not in region}
+        if all(eager_of.get(d) in drained for d in foreign):
+            drained.add(r)
+    return drained
+
+
+def _force_wake_method(nparts: int, nholds: int, npasses: int,
+                       page_generation: bool) -> list[str]:
+    """Force a complete evaluation without leaving worklist summaries stale."""
+    lines = ["  void _force_wake_all() {"]
+    if nparts:
+        lines.append(f"    for (unsigned i = 0; i < {nparts}u; ++i) ++_pg[i];")
+    if page_generation:
+        lines.append("    ++_pg_gen;")
+    for count, pending, summary, summary_count in (
+        (nholds, "_h_busy", "_h_any", "_h_words"),
+        (npasses, "_p_need", "_p_any", "_p_words"),
+    ):
+        if not count:
+            continue
+        nwords = (count + 63) // 64
+        lines.append(f"    for (unsigned i = 0; i < {nwords}u; ++i) {pending}[i] = ~0ull;")
+        if count & 63:
+            lines.append(f"    {pending}[{nwords - 1}] = {(1 << (count & 63)) - 1:#x}ull;")
+        masks = _pass_summary_init(nwords).split(", ")
+        for i, mask in enumerate(masks):
+            lines.append(f"    {summary}[{i}] = {mask};")
+        lines.append(f"    {summary_count} = {len(masks)}u;")
+    lines.append("  }")
+    lines.append("")
+    return lines
+
+
 def _emit_pass_wake(passes, lines: list[str], indent: int) -> None:
     words: dict[int, int] = defaultdict(int)
     for r in passes:
@@ -2049,6 +2093,7 @@ def emit_cpp(mod: Module) -> str:
         ):
             woken.add(r)
     pass_bit = {r: i for i, r in enumerate(sorted(woken))}
+    drained = _drained_regions(eager_regions, eager_of, cdeps, pass_bit)
     leaf_passes: dict[str, list[int]] = defaultdict(list)
     for r in sorted(woken):
         for leaf in pass_direct[r]:
@@ -2059,7 +2104,7 @@ def emit_cpp(mod: Module) -> str:
         if name in leaf_parts or name in leaf_holds or name in leaf_passes
     }
     array_writes = [n for n in writes if sigs[n].depth]
-    global _WIRE_PART, _EAGER_OF, _REGION_HOLDS, _PASS_CONSUMERS, _PASS_PAGE, _PASS_BIT, _LEAF_PASSES, _WRITE_INDEX, _WRITE_WIDE, _LEAF_HOLDS, _HOLD_WAKE_TABLES, _HOLD_WAKE_PACKED, _ARRAY_INDEX, _HOLD_TAKEN, _LARGE, _WAKE_PACK_WORDS
+    global _WIRE_PART, _EAGER_OF, _REGION_HOLDS, _PASS_CONSUMERS, _PASS_PAGE, _PASS_BIT, _LEAF_PASSES, _WRITE_INDEX, _WRITE_WIDE, _LEAF_HOLDS, _HOLD_WAKE_TABLES, _HOLD_WAKE_PACKED, _ARRAY_INDEX, _HOLD_TAKEN, _LARGE, _WAKE_PACK_WORDS, _EAGER_DONE
     _WIRE_PART = wire_part
     _EAGER_OF = eager_of
     _REGION_HOLDS = region_holds
@@ -2439,6 +2484,7 @@ def emit_cpp(mod: Module) -> str:
         lines.append(f"    memcpy(_in_snap, &{inputs[0]}, sizeof(_in_snap));")
     lines.append("  }")
     lines.append("")
+    lines.extend(_force_wake_method(nparts, len(hold_buckets), len(pass_bit), _PAGE_GEN))
     for name in sorted(cached):
         if name in eager_of:
             lines.append(f"  void eval_{name}() {{ {_eval_invoke(name, 0)} }}")
@@ -2453,6 +2499,10 @@ def emit_cpp(mod: Module) -> str:
             lines.append(f"  void eval_{name}() {{}}")
             lines.append("")
     if large:
+        # tick_nba drains these passes in dependency order before dispatching
+        # holds. NBA evaluation only writes next-state storage, so their
+        # current-state combinational values stay fresh until commit.
+        _EAGER_DONE = {name for name, region in eager_of.items() if region in drained}
         for i, (_key, stmts) in enumerate(hold_buckets):
             word, bit = i >> 6, i & 63
             mask = f"(1ull << {bit})"
@@ -2496,6 +2546,7 @@ def emit_cpp(mod: Module) -> str:
             )
             lines.append("  }")
             lines.append("")
+        _EAGER_DONE = set()
         if write_flags:
             lines.append("  void _commit() {")
             lines.append("    _cc += _nw;")

@@ -1033,24 +1033,39 @@ static int gpu_active(void)
 // the host touches the device, force every hold group and bump generations.
 // Host policy only — no design-specific register names. Set
 // ARTI_MODEL_HOLD_BOOST=0 to run pure skip-eval.
+// New generated models expose a coherent wakeup for holds, passes and
+// generation summaries. Keep older generated headers link-compatible.
+template <typename Model>
+static auto force_model_wake(Model *model, int)
+    -> decltype(model->_force_wake_all(), void())
+{
+  model->_force_wake_all();
+}
+
+template <typename Model>
+static void force_model_wake(Model *model, long)
+{
+  const unsigned n =
+      (unsigned)(sizeof(model->_h_busy) / sizeof(model->_h_busy[0]));
+  for (unsigned i = 0; i < n; i++)
+    model->_h_busy[i] = ~0ull;
+  // The dispatch loop walks _h_any (one bit per hold word), so force-busting
+  // _h_busy alone would leave every hold asleep.
+  const unsigned na = (unsigned)(sizeof(model->_h_any) / sizeof(model->_h_any[0]));
+  for (unsigned i = 0; i < na; i++)
+    model->_h_any[i] = ~0ull;
+  const unsigned np =
+      (unsigned)(sizeof(model->_pg) / sizeof(model->_pg[0]));
+  for (unsigned i = 0; i < np; i++)
+    model->_pg[i]++;
+}
+
 static void force_hold_boost(void)
 {
   if (!g_hold_boost)
     return;
   g_hold_boost--;
-  const unsigned n =
-      (unsigned)(sizeof(g_rtl->_h_busy) / sizeof(g_rtl->_h_busy[0]));
-  for (unsigned i = 0; i < n; i++)
-    g_rtl->_h_busy[i] = ~0ull;
-  // The dispatch loop walks _h_any (one bit per hold word), so force-busting
-  // _h_busy alone would leave every hold asleep.
-  const unsigned na = (unsigned)(sizeof(g_rtl->_h_any) / sizeof(g_rtl->_h_any[0]));
-  for (unsigned i = 0; i < na; i++)
-    g_rtl->_h_any[i] = ~0ull;
-  const unsigned np =
-      (unsigned)(sizeof(g_rtl->_pg) / sizeof(g_rtl->_pg[0]));
-  for (unsigned i = 0; i < np; i++)
-    g_rtl->_pg[i]++;
+  force_model_wake(g_rtl, 0);
 }
 
 // combo_fn runs before the posedge (must poke: mem_drive just updated
