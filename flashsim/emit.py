@@ -1542,6 +1542,8 @@ _HOLD_TAKEN = ""
 _LARGE = False
 _LARGE_WRITES = 256
 _HOLD_GROUP = 24
+# Keep large models below compiler limits for implicit ctor initializer lists.
+_BULK_CONSTRUCTOR_MIN_FIELDS = 65536
 # When set, every page bump also increments `_pg_gen` so tick_nba can skip
 # the eager-demand scan on ticks where no leaf changed.
 _PAGE_GEN = False
@@ -1550,6 +1552,78 @@ _PAGE_GEN = False
 def _note_page_gen(lines: list[str], indent: int) -> None:
     if _PAGE_GEN:
         lines.append(f"{' ' * indent}_pg_gen++;")
+
+def _bulk_state_constructor(cpp: str, cls: str,
+                            min_fields: int = _BULK_CONSTRUCTOR_MIN_FIELDS) -> str:
+    """Initialize generated arithmetic storage without a huge ctor init list."""
+    start = cpp.index(f"struct {cls} {{")
+    prefix, body = cpp[:start], cpp[start:]
+    field = re.compile(
+        r"^  (?P<type_decl>(?:alignas\(\d+\) )?"
+        r"(?P<type>uint(?:8|16|32|64)_t|unsigned __int128|unsigned|bool)) "
+        r"(?P<declarators>[^;\n]+);\n?$"
+    )
+    declarator = re.compile(
+        r"^(?P<name>\w+)(?P<dims>(?:\[[^\]\n]+\])*)"
+        r"(?:\s*=\s*(?P<init>.+))?$"
+    )
+
+    def split_declarators(text: str) -> list[str]:
+        # Scalar generation counters share a declaration. Array initializers
+        # and parenthesized expressions may themselves contain commas.
+        result, begin, nesting = [], 0, []
+        for pos, char in enumerate(text):
+            if char in "([{":
+                nesting.append(char)
+            elif char in ")]}":
+                assert nesting and nesting.pop() == {")": "(", "]": "[", "}": "{"}[char]
+            elif char == "," and not nesting:
+                result.append(text[begin:pos].strip())
+                begin = pos + 1
+        assert not nesting
+        result.append(text[begin:].strip())
+        return result
+
+    lines = body.splitlines(True)
+    depth, initialized = 0, 0
+    members = []
+    end = None
+    for index, line in enumerate(lines):
+        if depth == 1:
+            match = field.match(line)
+            if match:
+                declarations = [declarator.fullmatch(part)
+                                for part in split_declarators(match["declarators"])]
+                assert all(declarations), (cls, line)
+                if any(part["init"] is not None for part in declarations):
+                    initialized += sum(part["init"] is not None for part in declarations)
+                    members.append((index, match, declarations))
+        depth += line.count("{") - line.count("}")
+        if depth == 0:
+            end = index
+            break
+    if initialized < min_fields:
+        return cpp
+    assert end is not None
+    restore = [f"  {cls}() {{", "    memset(static_cast<void*>(this), 0, sizeof(*this));"]
+    for index, match, declarations in members:
+        names = ", ".join(part["name"] + part["dims"] for part in declarations)
+        lines[index] = "  " + match["type_decl"] + " " + names + ";\n"
+        for part in declarations:
+            initial = part["init"]
+            if initial is None or initial.replace(" ", "").lower() in (
+                    "0", "0u", "0ull", "{}", "{0}", "{0u}"):
+                continue
+            if part["dims"]:
+                name = "__bulk_initial_" + part["name"]
+                restore.append(f"    static const {match['type']} {name}{part['dims']} = {initial};")
+                restore.append(f"    memcpy({part['name']}, {name}, sizeof({part['name']}));")
+            else:
+                restore.append(f"    {part['name']} = {initial};")
+    restore += ["  }", ""]
+    lines[end] = "\n".join(restore) + lines[end]
+    return prefix + "".join(lines)
+
 
 def _eval_invoke(name: str, indent: int) -> str:
     sp = " " * indent
@@ -2836,7 +2910,7 @@ def emit_cpp(mod: Module) -> str:
     _WAKE_PACK_WORDS = 0
     _LARGE = False
     _PAGE_GEN = False
-    return "\n".join(lines) + "\n"
+    return _bulk_state_constructor("\n".join(lines) + "\n", f"{mod.name}Dut")
 
 
 # Methods that stay in the class body even when splitting: tiny helpers called
