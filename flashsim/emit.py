@@ -1339,6 +1339,33 @@ def _hold_wake_packed(
     return tables
 
 
+def _sparse_hold_masks(holds: tuple[int, ...]) -> list[tuple[int, int]]:
+    words: dict[int, int] = defaultdict(int)
+    for hold in holds:
+        words[hold >> 6] |= 1 << (hold & 63)
+    return sorted(words.items())
+
+
+def _hold_wake_sparse(
+    leaf_holds: dict[str, list[int]],
+) -> dict[tuple[int, ...], tuple[int, int]]:
+    """Dense hold sets as nonzero word-mask pairs, without scanning zero words.
+
+    A pair of uint64 values occupies 16 bytes versus two bytes per legacy
+    hold ID. Require at least eight IDs per
+    touched word, keeping constant-table storage no larger than the ID list.
+    """
+    tables: dict[tuple[int, ...], tuple[int, int]] = {}
+    for leaf in sorted(leaf_holds):
+        holds = tuple(leaf_holds[leaf])
+        if len(holds) <= _BUMP_INLINE or holds in tables:
+            continue
+        count = len(_sparse_hold_masks(holds))
+        if count and 8 * count <= len(holds):
+            tables[holds] = (len(tables), count)
+    return tables
+
+
 def _bump_sig(
     leaf: str, leaf_parts: dict[str, list[int]]
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -1391,6 +1418,13 @@ def _emit_bump_sig(
         lines.append(
             f"{sp}fs_wake_mask(_h_need, _h_any, &_h_words, _hwm{packed}, "
             f"{_WAKE_PACK_WORDS}u);"
+        )
+        return
+    sparse = _HOLD_WAKE_SPARSE.get(holds)
+    if sparse is not None:
+        i, count = sparse
+        lines.append(
+            f"{sp}fs_wake_sparse(_h_need, _h_any, &_h_words, _hws{i}, {count}u);"
         )
         return
     i = _HOLD_WAKE_TABLES[holds]
@@ -1581,6 +1615,7 @@ _WRITE_WIDE: set[str] = set()
 _LEAF_HOLDS: dict[str, list[int]] = {}
 _HOLD_WAKE_TABLES: dict[tuple[int, ...], int] = {}
 _HOLD_WAKE_PACKED: dict[tuple[int, ...], int] = {}
+_HOLD_WAKE_SPARSE: dict[tuple[int, ...], tuple[int, int]] = {}
 _ARRAY_INDEX: dict[str, int] = {}
 _HOLD_TAKEN = ""
 _LARGE = False
@@ -2104,7 +2139,7 @@ def emit_cpp(mod: Module) -> str:
         if name in leaf_parts or name in leaf_holds or name in leaf_passes
     }
     array_writes = [n for n in writes if sigs[n].depth]
-    global _WIRE_PART, _EAGER_OF, _REGION_HOLDS, _PASS_CONSUMERS, _PASS_PAGE, _PASS_BIT, _LEAF_PASSES, _WRITE_INDEX, _WRITE_WIDE, _LEAF_HOLDS, _HOLD_WAKE_TABLES, _HOLD_WAKE_PACKED, _ARRAY_INDEX, _HOLD_TAKEN, _LARGE, _WAKE_PACK_WORDS, _EAGER_DONE
+    global _WIRE_PART, _EAGER_OF, _REGION_HOLDS, _PASS_CONSUMERS, _PASS_PAGE, _PASS_BIT, _LEAF_PASSES, _WRITE_INDEX, _WRITE_WIDE, _LEAF_HOLDS, _HOLD_WAKE_TABLES, _HOLD_WAKE_PACKED, _HOLD_WAKE_SPARSE, _ARRAY_INDEX, _HOLD_TAKEN, _LARGE, _WAKE_PACK_WORDS, _EAGER_DONE
     _WIRE_PART = wire_part
     _EAGER_OF = eager_of
     _REGION_HOLDS = region_holds
@@ -2117,6 +2152,7 @@ def emit_cpp(mod: Module) -> str:
     _LEAF_HOLDS = leaf_holds
     wake_sets = {**leaf_holds, **region_holds}
     _HOLD_WAKE_TABLES = _hold_wake_tables(wake_sets)
+    _HOLD_WAKE_SPARSE = _hold_wake_sparse(wake_sets)
     _WAKE_PACK_WORDS = (len(hold_buckets) + 63) // 64 if hold_buckets else 0
     _HOLD_WAKE_PACKED = (
         _hold_wake_packed(wake_sets, _WAKE_PACK_WORDS) if _wake_pack_enabled() else {}
@@ -2325,6 +2361,15 @@ def emit_cpp(mod: Module) -> str:
         "    any[k >> 12] |= 1ull << ((k >> 6) & 63);",
         "  }",
         "}",
+        "static inline void fs_wake_sparse(uint64_t *need, uint64_t *any, unsigned *words,",
+        "                                  const uint64_t (*m)[2], unsigned n) {",
+        "  for (unsigned i = 0; i < n; i++) {",
+        "    unsigned w = (unsigned)m[i][0];",
+        "    need[w] |= m[i][1];",
+        "    if (!any[w >> 6]) ++*words;",
+        "    any[w >> 6] |= 1ull << (w & 63);",
+        "  }",
+        "}",
         "static inline void fs_wake_mask(uint64_t *need, uint64_t *any, unsigned *words,",
         "                             const uint64_t *m, unsigned n) {",
         "  for (unsigned i = 0; i < n; i++) {",
@@ -2341,6 +2386,9 @@ def emit_cpp(mod: Module) -> str:
     for key, idx in sorted(_HOLD_WAKE_TABLES.items(), key=lambda kv: kv[1]):
         inner = ", ".join(str(p) for p in key)
         lines.append(f"static const uint16_t _hw{idx}[] = {{{inner}}};")
+    for key, (idx, _count) in sorted(_HOLD_WAKE_SPARSE.items(), key=lambda kv: kv[1][0]):
+        entries = ", ".join(f"{{{word}u, {mask:#x}ull}}" for word, mask in _sparse_hold_masks(key))
+        lines.append(f"static const uint64_t _hws{idx}[][2] = {{{entries}}};")
     nwm = _WAKE_PACK_WORDS
     for key, idx in sorted(_HOLD_WAKE_PACKED.items(), key=lambda kv: kv[1]):
         mask = [0] * nwm
@@ -2970,6 +3018,7 @@ def emit_cpp(mod: Module) -> str:
     _LEAF_HOLDS = {}
     _HOLD_WAKE_TABLES = {}
     _HOLD_WAKE_PACKED = {}
+    _HOLD_WAKE_SPARSE = {}
     _WAKE_PACK_WORDS = 0
     _LARGE = False
     _PAGE_GEN = False
