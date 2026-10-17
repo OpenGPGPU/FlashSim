@@ -383,16 +383,17 @@ def _dce(
     for wr in mem_writes or []:
         live |= expr_ids(wr.addr) | expr_ids(wr.data) | expr_ids(wr.enable)
         live.add(wr.mem)
-    changed = True
-    while changed:
-        changed = False
-        for name in list(live):
-            if name not in assigns:
-                continue
-            for dep in expr_ids(assigns[name]):
-                if dep not in live:
-                    live.add(dep)
-                    changed = True
+    # The assignment graph is fixed during this pass. Queue each newly live
+    # name once rather than rescanning the entire growing live set per layer.
+    pending = list(live)
+    while pending:
+        name = pending.pop()
+        if name not in assigns:
+            continue
+        for dep in expr_ids(assigns[name]):
+            if dep not in live:
+                live.add(dep)
+                pending.append(dep)
     assigns = {n: e for n, e in assigns.items() if n in live}
     return assigns, body
 

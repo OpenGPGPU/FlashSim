@@ -37,6 +37,13 @@ generated DUT to reuse the emitted C++ and skip the Python lowering pass. Set
 `-O2`; the generated `dut_commit.cpp` shard is kept at O0 because it is a
 large dirty-list switch with little effect on the normal runtime path.
 
+Dead-code elimination uses a worklist to visit each reachable assignment once.
+This avoids repeatedly scanning the growing live set on deep dependency chains.
+The change preserves assignment order and every output, sequential-read and
+memory-write root. On the full four-CU desktop model, the optimized IR is
+byte-identical to the previous optimizer's captured output. This improves model
+generation; generated simulation behavior and runtime code remain unchanged.
+
 ARTI A/B (needs a probe initramfs under `$WORK/initramfs.cpio.gz`; build via
 `arti-work` probe setup or copy from a prior run):
 
@@ -608,6 +615,12 @@ cycles). GPU rows include vs 4-thread Verilator:
 | Gpu | **87×** | | closed CU; idle after warp finish |
 | GpuSystem | **77×** | **364×** | 1 CU + L2 + DMA; FS ~5.5 MHz vs 1T 0.07 / 4T 0.015 MHz |
 | GpuHostAxi | **17×** | **144×** | AXI ID read, then idle; FS ~32 MHz vs 1T 1.8 / 4T 0.22 MHz |
+
+Absolute MHz depends on CU count, generated configuration and active logic per
+tick. These low-activity system tests benefit from skipping completed or idle
+engines. For desktop workloads, report the current model's active rendering,
+idle and complete-trace rates separately, together with elapsed time and tick
+counts. Measure backend speedups with the same RTL and stimulus on both sides.
 
 Those 2026-09-17 numbers predate the O(dirty) dirty-flag reset. Re-measured
 2026-09-28 on the same benches (6 stages × 4 mix rounds, so absolute MHz is not
