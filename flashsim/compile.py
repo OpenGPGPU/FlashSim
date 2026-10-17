@@ -10,6 +10,7 @@ from flashsim.circt_frontend import (
     verilog_sources,
 )
 from flashsim.emit import emit_cpp, split_dut_methods
+from flashsim.data_regions import group_primitive_storage
 from flashsim.ir import Module
 from flashsim.opt import optimize
 from flashsim.parse import parse_verilog
@@ -56,6 +57,12 @@ def compile_file(
     `dut_{split-1}.cpp` beside the header so each shard can be -O2'd in
     parallel (needed for GpuHostSystemAxi-sized tops).
     """
+    try:
+        region_fields = int(os.environ.get("FLASHSIM_DATA_REGION_FIELDS", "0"))
+    except ValueError as exc:
+        raise ValueError("FLASHSIM_DATA_REGION_FIELDS must be an integer >= 0") from exc
+    if region_fields < 0:
+        raise ValueError("FLASHSIM_DATA_REGION_FIELDS must be >= 0")
     out_h.parent.mkdir(parents=True, exist_ok=True)
     mlir_path = out_h.parent / "hw.mlir" if _resolve_frontend(frontend) == "circt" else None
     mod, cpp = compile_verilog(
@@ -66,12 +73,14 @@ def compile_file(
     wanted: set[str] = set()
     if split > 0:
         header, parts = split_dut_methods(cpp, n_shards=split)
-        _write_generated(out_h, header)
+        _write_generated(out_h, group_primitive_storage(
+            header, f"{mod.name}Dut", region_fields))
         for name, body in parts:
             wanted.add(name)
             _write_generated(out_h.parent / name, body)
     else:
-        _write_generated(out_h, cpp)
+        _write_generated(out_h, group_primitive_storage(
+            cpp, f"{mod.name}Dut", region_fields))
     # Remove only obsolete shards. Keeping identical source/header mtimes
     # lets ccache's direct mode reuse a large model after regeneration.
     for stale in out_h.parent.glob("dut_*.cpp"):

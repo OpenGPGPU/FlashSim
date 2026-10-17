@@ -37,6 +37,16 @@ generated DUT to reuse the emitted C++ and skip the Python lowering pass. Set
 `-O2`; the generated `dut_commit.cpp` shard is kept at O0 because it is a
 large dirty-list switch with little effect on the normal runtime path.
 
+`FLASHSIM_DATA_REGION_FIELDS=1024` optionally groups the primitive storage
+prefix of large, bulk-initialized DUTs into data-only base classes. This bounds
+the compiler's type/alias metadata search while retaining member names and
+byte positions. It is off by default. Cuts avoid base tail padding, and
+compile-time size, alignment and position checks reject incompatible layouts.
+Grouping runs after method splitting, so evaluator shard sources stay unchanged.
+Rebuild every object and wrapper against the same generated header; never mix
+flat-header and grouped-header objects. This is a compile-time experiment,
+not a claimed simulator-runtime improvement.
+
 Ready eager passes share a typed guard table in the worklist dispatcher,
 reducing calls through thousands of small per-region wrappers. The dispatcher
 preserves generation/data cache updates, pending flags and every eager chunk's
