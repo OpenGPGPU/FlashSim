@@ -1,0 +1,1790 @@
+{
+  "summary": {
+    "recorded_at": 1792208899.070286,
+    "status": "Production immutable invalidation blocks qualified on the unchanged four-CU desktop RTL.",
+    "change": "Predecode literal immutable uint16 page lists into fixed eight/four-cell blocks and scalar remainders. Portable unsigned increments preserve every multiplicity and modulo-2^32 result; dynamic, partial, shadowed or unknown uses retain the generic helper.",
+    "legacy_flag": "FLASHSIM_COMMIT_BLOCKS=0",
+    "unchanged_RTL": true,
+    "unchanged_header": true,
+    "changed_generated_source": "dut_commit_chunks.cpp",
+    "added_generated_source": "dut_commit_blocks.cpp",
+    "generic_helper_unchanged": true,
+    "eligible_tables": 1724,
+    "rewritten_calls": 4253,
+    "increment_multisets_exact": true,
+    "profile_scope": "Rebuild only the commit caller using the existing compatible CFG profile and original source basename, with both profile mismatch warnings treated as errors. New tiny helper uses O2 without PGO. All remaining archive objects are byte-identical to the selected shared-dispatch baseline.",
+    "timing_scope": "Final packaged libraries, three balanced fresh processes per variant and workload, Latin-square order with equal mean position. Fixed current Mesa64 trace and identical native inputs. No competing qualification jobs during timing. All RAM, counters and strict replay outputs match.",
+    "timings": {
+      "solid64": {
+        "medians": {
+          "pre_dispatch": 0.629860417,
+          "main": 0.598740125,
+          "candidate": 0.579904792
+        },
+        "time_saved_vs_main_percent": 3.1458277495599485,
+        "time_saved_vs_pre_dispatch_percent": 7.931221529674238
+      },
+      "spatial64": {
+        "medians": {
+          "pre_dispatch": 0.762751916,
+          "main": 0.732219583,
+          "candidate": 0.703224958
+        },
+        "time_saved_vs_main_percent": 3.9598264882790057,
+        "time_saved_vs_pre_dispatch_percent": 7.804235787721058
+      },
+      "large256": {
+        "medians": {
+          "pre_dispatch": 11.876125792,
+          "main": 11.322210416,
+          "candidate": 11.117865667
+        },
+        "time_saved_vs_main_percent": 1.8048132077746137,
+        "time_saved_vs_pre_dispatch_percent": 6.384743124822567
+      },
+      "mesa64": {
+        "medians": {
+          "pre_dispatch": 24.302408417,
+          "main": 23.500117958,
+          "candidate": 22.306446417
+        },
+        "time_saved_vs_main_percent": 5.079427869823294,
+        "time_saved_vs_pre_dispatch_percent": 8.213021383525865
+      }
+    },
+    "qualification": {
+      "package_tests": 120,
+      "focused_tests": 6,
+      "sanitized_reference_cases": 4103,
+      "native_formats": 40,
+      "native_controls": 18,
+      "current_packedwhite_fixtures": 9,
+      "VM_cases": 18,
+      "GLES_cases": 21,
+      "GTK64_white_transitions": [
+        0,
+        1,
+        0,
+        1,
+        0,
+        1
+      ],
+      "full640_actual_guest_and_redraw_passed": true,
+      "full640_images_manually_reviewed": true,
+      "strict_current64": {
+        "calls": 46936,
+        "ticks": 3619433,
+        "commits": 53609559,
+        "holds": 396954443,
+        "dma_reads": 42352,
+        "dma_writes": 481479,
+        "dma_bytes": 6301000,
+        "seconds": 22.709092542,
+        "truncated_tail": false,
+        "warmup_calls": 0,
+        "sample": 0
+      },
+      "strict_full640": {
+        "calls": 151931,
+        "ticks": 16856198,
+        "commits": 929570796,
+        "holds": 5651201054,
+        "dma_reads": 584122,
+        "dma_writes": 3610593,
+        "dma_bytes": 64577632,
+        "seconds": 418.658412292,
+        "truncated_tail": false,
+        "warmup_calls": 0,
+        "sample": 0
+      },
+      "complete_native_RAM_and_all_counters_exact": true
+    },
+    "limitations": [
+      "Full640 functional guest and strict replay overlap; their elapsed times do not establish a paired whole-desktop speedup.",
+      "Published gains use final packaged libraries, not the larger preliminary direct-object screen gains.",
+      "Original idle MHz, old 39kHz desktop recording and active rendering measure different logic activity; do not extrapolate one rate to another workload.",
+      "Installed/default QEMU is unchanged; qualification uses an explicitly linked private executable.",
+      "Private validators reuse older descriptive scope strings; archive hashes, current inputs and explicit exact-output checks identify this host-only change."
+    ],
+    "installed_qemu_sha256": "ba65addea4834f852ac67c82f3c2ca02eec213fe334e0d9b07e94f508b2b43a0"
+  },
+  "production_equivalence": {
+    "passed": true,
+    "header_unchanged": true,
+    "other_generated_sources_unchanged": true,
+    "production_pass_output_byte_identical_to_screened_sources": true,
+    "caller_sha256": "2bbbb722035f5bd4ee2a5bad75667956673593f7348f593e5f4cc81085eb7e99",
+    "helper_sha256": "a500ef00f9458397af11a4ca197b9b00bfd4adca41d67617ebb8d15c7278041b",
+    "scope": "Apply the exact production post-split transform to the qualified unchanged header and legacy commit caller. Both outputs are byte-identical to the already screened compiled candidate; the rest of the splitter is unchanged."
+  },
+  "build": {
+    "optimized": {
+      "model": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/model",
+      "header_sha256": "822ea28949824cff47057707e46f2ce5c1cd3453892a8ff82266bc8a87f00dd9",
+      "source_sha256": {
+        "dut_9.cpp": "e1692a1eb888d1a643d14a07547efafcb2b33dac022415a08f2def2b28aa7512",
+        "dut_8.cpp": "400a70f3573d082e6d99417a7bfa30cd6450f1960f5c83060900ecdbc69926bc",
+        "dut_21.cpp": "e74865380201e75f0e6c461fdff40cbbee586582691a11ca7692166b9897f3ab",
+        "dut_20.cpp": "6f6fce64c26606eff4a81f0fd42be40a10905e9d9dee34bf317da13e52a8507e",
+        "dut_22.cpp": "f1e367685f34ba11ca477dbff09405313f4d5d576b41665abb96d969cf44a4c1",
+        "dut_23.cpp": "af0611f417767aa577acc5f253459a4298989808996cb7faf30518730b77c838",
+        "dut_27.cpp": "b29c47eab215f38178f7e54c45acefcc8bafda6a33c61b1cbcdc921b9e2bf0f6",
+        "dut_26.cpp": "4ac5d4dbe3516623bc374bca041e01e582f64c2e93820c3ab0397528d08c980a",
+        "dut_24.cpp": "fdbf15b386a85db85980989a1b1cd25330acab31aef6ae27e2a90c34bfb3e69e",
+        "dut_30.cpp": "58b69440ef154b628caca8363a2569fd3ed0542500adb5d10771c7a73e06ce65",
+        "dut_18.cpp": "8706326bb3e49b27ca86ed9661e0846ee279f7e0e9788a60c40a81a76bd9f389",
+        "dut_19.cpp": "c99bd2378b60de9ca63f628b7890bb4fd0c5f024b3dd61e3f781ff4408722fd8",
+        "dut_31.cpp": "c7ca2acfc261a954f0c6a5c3d7d9063df0432d37fd362dd2aa4bbed04b828ba9",
+        "dut_25.cpp": "2e334dbb90a457ed706ba18de8da6059e4566d422b2f11c86db21284b03c1558",
+        "dut_commit_blocks.cpp": "a500ef00f9458397af11a4ca197b9b00bfd4adca41d67617ebb8d15c7278041b",
+        "dut_28.cpp": "7ea0106de15f9c95a5c388949017a659d5e2773e7ac17f6824c0c151af225631",
+        "dut_14.cpp": "b95f27b9a8dde60b38014696d0ca9437956b5c718e2360a5e82b95d516deb93a",
+        "dut_15.cpp": "5c8b2648e2c5d0eb555dd35e9303733a363e4ea1e51e48344e96bce45bf7fddc",
+        "dut_29.cpp": "a28a0af2b5a1a4bc58e60d32867aec319d422197e9c2bb1dca30eef4fc085612",
+        "dut_17.cpp": "c16c1621011dcf53dfa5b9b963c089bb4f0beb6ce50aab7eecf28f19f4a071eb",
+        "dut_16.cpp": "cc51fe0119d0062ad546be16cb309582d49785fb5d20557a721687265714cd66",
+        "dut_commit_helpers.cpp": "3554c37c2e57c62d716ba1c58c979062b3d00c4e4edf7729294dbb2a3281403e",
+        "arti_rtl_model.cpp": "c175500879fd56d74d9fbc60cf5ff9bb00be5f7351bdecdd93d02f6329546c3b",
+        "dut_12.cpp": "a3d7304069d432395bbc3437568c62551a6867bdc02be46f6a6db03e5ffc5f7d",
+        "dut_13.cpp": "8c303e975a5afe7ceb4cceeb07733eee971e74f0f5b85bbb6a0a8bd6fe8bf22a",
+        "arti_smoke.cpp": "eb3699b736aeae965aa933baf8a648681f9b651d74daa6dd39daf047a805697a",
+        "dut_11.cpp": "5f318e38655af9c76dde257d3f3edb0a4ac5912b03b418a191cfb04f1b34df62",
+        "dut_10.cpp": "c64af161ce3800d2870b3f797cfc85166cfc117837f7e0bdcb89ba44b9f7ec5b",
+        "dut_0.cpp": "b917aae44b176d3ebc359c7eb2cac98190c141fc5d524a1da47e1bfad12937b3",
+        "dut_1.cpp": "b53ac282a394fb4288948789467125cdaa61e973589ec33f3df6f7dd74306e5a",
+        "dut_3.cpp": "9fe6a68d3abdb8d5ca84d0a0896bcfa6a952d9046518d57e400e8b0cbfee5fc1",
+        "dut_mem_ports.cpp": "60154bb889f26305ca2bc75f5cbee009be266ed20068b5c65e9dac611cc8c993",
+        "dut_commit_chunks.cpp": "2bbbb722035f5bd4ee2a5bad75667956673593f7348f593e5f4cc81085eb7e99",
+        "dut_2.cpp": "09b46e229fbbb458cfd2e8a7dbdb408f6fbb0c6d344a0c449e918a0dc2e9402a",
+        "dut_6.cpp": "30341d4613375e9fb97b40fc65d5073f458a1243e8b069339e43af13f9113a27",
+        "dut_7.cpp": "8dd7b991bcf2a3b77bd6f897d8911b500461f6efa83abfc183b6a190e720cd64",
+        "dut_5.cpp": "df60bfb99bb7cd2cacabb7c58c16eab59feda6cd5a90893279022d5d0dab82df",
+        "dut_4.cpp": "7f1e4f795a0cee29017d3bb24c2a12565b042970b1bc987d2f8008c4d8268bee"
+      },
+      "train": false,
+      "profile_sha256": "98055db9eaae8a96653cc3008b56446af74fb9b2dfcfabc453e1a9e3d7bd78d7",
+      "archive_sha256": "7d93d75ec0fc5f170bf21f348cf310cb608aa2d46bd5eb3bc0df99f9d6b6dc0f",
+      "reused_archive_sha256": "683513ffa7de88c2b6cbabdc3a8122d4deb5fe52f6c656274267a1b12e07a4f0",
+      "reused_member_sha256": {
+        "dut_0.o": "7d5ec78613ca67a8fc2084c41d83310b85537b9842199ed8dc9ec91febbc6014",
+        "dut_1.o": "7181dbe3ad109789f4235a260b9ddc60f05986693e5042bad906916999f6986b",
+        "dut_10.o": "321cf5808b25ec18435aebca4c7c184ca61c624fd207a07399c8e1b0ee0b74cb",
+        "dut_11.o": "c449f98a57fa0d961ad97057c6ad9b05ca363137598c7a35c1a1454e9c55c1a9",
+        "dut_12.o": "9dde3bdd5af0bb412c4d42a597ea50c018cb16731e1f9c06190d8d52b6b932ae",
+        "dut_13.o": "7cd67c7a8dad9b0b8750bf5f2ea3a7e0cde8eef5c3439704437106d7e6c2bda9",
+        "dut_14.o": "1c49ee037714f2241e9a880f1621d26dd091c2fa516bf178467a6873bdf07222",
+        "dut_15.o": "b4bd8e8843bc81410a1e1bdda3468d54639dcec188af4b437acaefcae71b8a65",
+        "dut_16.o": "1495233c65c0340c0bf3ea982bcfc302d0328ad8ef6a30449e9ea64844840960",
+        "dut_17.o": "b05defe26a1826dbc1f3ecf4a4b014faa1590263ade24dc9a33fcd9c6019c85c",
+        "dut_18.o": "d8c62db3051c623c35d0977266008d96c8cc0c3285a62e667c1e211231f27a62",
+        "dut_19.o": "917e4a880754d11708dfc2ee5c6120dfcbcbba2cc0f1a057b3df4abe2732a9d8",
+        "dut_2.o": "1768b2c3f2a5439357b683843a093e5a5269a0c04009af2039a3d68077b8c68e",
+        "dut_20.o": "d27925b6dfaf88890baf7070115ad619196dc16764af87e4280519ebc7acd6e4",
+        "dut_21.o": "1f756e31bda1818d998d426cf5fcc0ec4b278d6b88a5bbe6b883af5c17a7b089",
+        "dut_22.o": "01c4db5edec97e2e8581bba9de023872fb614201fe9e568243e3be430a81c365",
+        "dut_23.o": "98e61b5e6ab86dbdf680d673c8f09c98fff59cc553fca2b4836aa1af2475c818",
+        "dut_24.o": "5ee3f6f72508ee0bbba7349ba3ce6d4a298fc7877557e31fbf5f5a27f55cba78",
+        "dut_25.o": "f2e0b89c27e8a50225600cd3bd9361dc55d7bc2fe25a255bb5fcb8d1639da7e7",
+        "dut_26.o": "e837d2950ef2fc22fbfc5b0b8f98d36ccd86df3c29c7c97a89cd209c465e48a9",
+        "dut_27.o": "ff3865291db8df6fcc38d167d1abc33f81b2608c1ba7a6c9cce4603ae43e04a2",
+        "dut_28.o": "d504c137b2a078d975165fe52086d57a83a071fa9475e16713d000b71f4ecdbe",
+        "dut_29.o": "b88359d28ae25762a9f14be977821a2be53a0cde240aeb8214e75808087996e0",
+        "dut_3.o": "28358dd857cebcf40aab404749cf423cfba50d6d505bc60fe60e5c4a954734b3",
+        "dut_30.o": "5454776f2801720fc1fc8f254443ec3fa7de39365ecbef3f92e579aba69c70e3",
+        "dut_31.o": "4654e7c06bf33161de032eb2b471944616325c132181b9b54f773c0ad1bd59bc",
+        "dut_4.o": "3575eb5cfb00730e591e979b71d8f36415d0227f6e680f6bdaeec9a6e082e3bd",
+        "dut_5.o": "c6e7ca5c9ad9b8a5565cb212abdfff5a59cf0592f94a661559f0ee27ee4846b9",
+        "dut_6.o": "9933576514bbd1c02d0bc64364f99cb6d06eb2040e4bde2c8956ca8efb8f2b8c",
+        "dut_7.o": "e2ef29780e973b7a686221bf8ba43865e2e54575df2699e26191a60759bf98f2",
+        "dut_8.o": "1195f5e1d04d1f59bdd46ccd247985322d59b0f82cb229f3b1a4d5416fac9adb",
+        "dut_9.o": "dfe0cb8f14ed2fb9de8302de2b6f08a4a440086281f27af4cd27edb80e4fbc70",
+        "dut_commit_helpers.o": "b548471cc689579008bae17428d6d2426082acd836402b6bb80dd2fb784392e5",
+        "dut_mem_ports.o": "28499f2f90b378efc1c4ee7f1d3d6a9ed307e949c6380b353f99d59a594a85b6",
+        "arti_rtl_model.o": "18434f3145156bf635fcb4d98fbb8ee5f86abcb41135197470282a6831027949"
+      },
+      "changed_member": "dut_commit_chunks.o",
+      "dispatcher_profile_sha256": "716fd4fc4e4ca18b3176ef6e9cb7d5e0881849b544c42fa7d015c5827af6458e",
+      "scope": "Production post-split pass equals screened source bytes. Reuse all selected objects except one compatible-profile commit caller, adding one O2 block helper. Header and RTL unchanged. No full generation or new profile collection required; compiler profile mismatch diagnostics were errors. Qualify exact native RAM/counters, VM/GLES/current GTK64 and strict fixed traces before final packaged-archive timing/full640.",
+      "added_member": "dut_commit_blocks.o",
+      "caller_profile_compatible": true,
+      "new_helper_flags": [
+        "-O2"
+      ]
+    },
+    "trace-optimized": {
+      "model": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/model",
+      "header_sha256": "822ea28949824cff47057707e46f2ce5c1cd3453892a8ff82266bc8a87f00dd9",
+      "source_sha256": {
+        "dut_9.cpp": "e1692a1eb888d1a643d14a07547efafcb2b33dac022415a08f2def2b28aa7512",
+        "dut_8.cpp": "400a70f3573d082e6d99417a7bfa30cd6450f1960f5c83060900ecdbc69926bc",
+        "dut_21.cpp": "e74865380201e75f0e6c461fdff40cbbee586582691a11ca7692166b9897f3ab",
+        "dut_20.cpp": "6f6fce64c26606eff4a81f0fd42be40a10905e9d9dee34bf317da13e52a8507e",
+        "dut_22.cpp": "f1e367685f34ba11ca477dbff09405313f4d5d576b41665abb96d969cf44a4c1",
+        "dut_23.cpp": "af0611f417767aa577acc5f253459a4298989808996cb7faf30518730b77c838",
+        "dut_27.cpp": "b29c47eab215f38178f7e54c45acefcc8bafda6a33c61b1cbcdc921b9e2bf0f6",
+        "dut_26.cpp": "4ac5d4dbe3516623bc374bca041e01e582f64c2e93820c3ab0397528d08c980a",
+        "dut_24.cpp": "fdbf15b386a85db85980989a1b1cd25330acab31aef6ae27e2a90c34bfb3e69e",
+        "dut_30.cpp": "58b69440ef154b628caca8363a2569fd3ed0542500adb5d10771c7a73e06ce65",
+        "dut_18.cpp": "8706326bb3e49b27ca86ed9661e0846ee279f7e0e9788a60c40a81a76bd9f389",
+        "dut_19.cpp": "c99bd2378b60de9ca63f628b7890bb4fd0c5f024b3dd61e3f781ff4408722fd8",
+        "dut_31.cpp": "c7ca2acfc261a954f0c6a5c3d7d9063df0432d37fd362dd2aa4bbed04b828ba9",
+        "dut_25.cpp": "2e334dbb90a457ed706ba18de8da6059e4566d422b2f11c86db21284b03c1558",
+        "dut_commit_blocks.cpp": "a500ef00f9458397af11a4ca197b9b00bfd4adca41d67617ebb8d15c7278041b",
+        "dut_28.cpp": "7ea0106de15f9c95a5c388949017a659d5e2773e7ac17f6824c0c151af225631",
+        "dut_14.cpp": "b95f27b9a8dde60b38014696d0ca9437956b5c718e2360a5e82b95d516deb93a",
+        "dut_15.cpp": "5c8b2648e2c5d0eb555dd35e9303733a363e4ea1e51e48344e96bce45bf7fddc",
+        "dut_29.cpp": "a28a0af2b5a1a4bc58e60d32867aec319d422197e9c2bb1dca30eef4fc085612",
+        "dut_17.cpp": "c16c1621011dcf53dfa5b9b963c089bb4f0beb6ce50aab7eecf28f19f4a071eb",
+        "dut_16.cpp": "cc51fe0119d0062ad546be16cb309582d49785fb5d20557a721687265714cd66",
+        "dut_commit_helpers.cpp": "3554c37c2e57c62d716ba1c58c979062b3d00c4e4edf7729294dbb2a3281403e",
+        "arti_rtl_model.cpp": "c175500879fd56d74d9fbc60cf5ff9bb00be5f7351bdecdd93d02f6329546c3b",
+        "dut_12.cpp": "a3d7304069d432395bbc3437568c62551a6867bdc02be46f6a6db03e5ffc5f7d",
+        "dut_13.cpp": "8c303e975a5afe7ceb4cceeb07733eee971e74f0f5b85bbb6a0a8bd6fe8bf22a",
+        "arti_smoke.cpp": "eb3699b736aeae965aa933baf8a648681f9b651d74daa6dd39daf047a805697a",
+        "dut_11.cpp": "5f318e38655af9c76dde257d3f3edb0a4ac5912b03b418a191cfb04f1b34df62",
+        "dut_10.cpp": "c64af161ce3800d2870b3f797cfc85166cfc117837f7e0bdcb89ba44b9f7ec5b",
+        "dut_0.cpp": "b917aae44b176d3ebc359c7eb2cac98190c141fc5d524a1da47e1bfad12937b3",
+        "dut_1.cpp": "b53ac282a394fb4288948789467125cdaa61e973589ec33f3df6f7dd74306e5a",
+        "dut_3.cpp": "9fe6a68d3abdb8d5ca84d0a0896bcfa6a952d9046518d57e400e8b0cbfee5fc1",
+        "dut_mem_ports.cpp": "60154bb889f26305ca2bc75f5cbee009be266ed20068b5c65e9dac611cc8c993",
+        "dut_commit_chunks.cpp": "2bbbb722035f5bd4ee2a5bad75667956673593f7348f593e5f4cc81085eb7e99",
+        "dut_2.cpp": "09b46e229fbbb458cfd2e8a7dbdb408f6fbb0c6d344a0c449e918a0dc2e9402a",
+        "dut_6.cpp": "30341d4613375e9fb97b40fc65d5073f458a1243e8b069339e43af13f9113a27",
+        "dut_7.cpp": "8dd7b991bcf2a3b77bd6f897d8911b500461f6efa83abfc183b6a190e720cd64",
+        "dut_5.cpp": "df60bfb99bb7cd2cacabb7c58c16eab59feda6cd5a90893279022d5d0dab82df",
+        "dut_4.cpp": "7f1e4f795a0cee29017d3bb24c2a12565b042970b1bc987d2f8008c4d8268bee"
+      },
+      "train": false,
+      "profile_sha256": "98055db9eaae8a96653cc3008b56446af74fb9b2dfcfabc453e1a9e3d7bd78d7",
+      "archive_sha256": "8f6b56c7b01890a3df11a247c8f18ae4530420309583b4a1696832d6b4a2e931",
+      "original_archive_sha256": "69776a3531c9332a83293b6abcf7e478dda333700ee75427e92a2fcfe120418f",
+      "trace_wrapper_object_sha256": "2402e74c1361d6105a62a1551151f48f770532aed7cca3299a84def92d9e8151",
+      "trace_wrapper_source_sha256": "80487c2b6f7f6f5205892594509754ece4bed0db56b6489f70a2a74a8d5366a2",
+      "scope": "Production post-split pass equals screened source bytes. Reuse all selected objects except one compatible-profile commit caller, adding one O2 block helper. Header and RTL unchanged. No full generation or new profile collection required; compiler profile mismatch diagnostics were errors. Qualify exact native RAM/counters, VM/GLES/current GTK64 and strict fixed traces before final packaged-archive timing/full640.",
+      "reused_archive_sha256": "154b6a7e9366606d9841aeb395006be73755ad5bad1ce91eb322fc522b293f9a",
+      "reused_member_sha256": {
+        "dut_0.o": "7d5ec78613ca67a8fc2084c41d83310b85537b9842199ed8dc9ec91febbc6014",
+        "dut_1.o": "7181dbe3ad109789f4235a260b9ddc60f05986693e5042bad906916999f6986b",
+        "dut_10.o": "321cf5808b25ec18435aebca4c7c184ca61c624fd207a07399c8e1b0ee0b74cb",
+        "dut_11.o": "c449f98a57fa0d961ad97057c6ad9b05ca363137598c7a35c1a1454e9c55c1a9",
+        "dut_12.o": "9dde3bdd5af0bb412c4d42a597ea50c018cb16731e1f9c06190d8d52b6b932ae",
+        "dut_13.o": "7cd67c7a8dad9b0b8750bf5f2ea3a7e0cde8eef5c3439704437106d7e6c2bda9",
+        "dut_14.o": "1c49ee037714f2241e9a880f1621d26dd091c2fa516bf178467a6873bdf07222",
+        "dut_15.o": "b4bd8e8843bc81410a1e1bdda3468d54639dcec188af4b437acaefcae71b8a65",
+        "dut_16.o": "1495233c65c0340c0bf3ea982bcfc302d0328ad8ef6a30449e9ea64844840960",
+        "dut_17.o": "b05defe26a1826dbc1f3ecf4a4b014faa1590263ade24dc9a33fcd9c6019c85c",
+        "dut_18.o": "d8c62db3051c623c35d0977266008d96c8cc0c3285a62e667c1e211231f27a62",
+        "dut_19.o": "917e4a880754d11708dfc2ee5c6120dfcbcbba2cc0f1a057b3df4abe2732a9d8",
+        "dut_2.o": "1768b2c3f2a5439357b683843a093e5a5269a0c04009af2039a3d68077b8c68e",
+        "dut_20.o": "d27925b6dfaf88890baf7070115ad619196dc16764af87e4280519ebc7acd6e4",
+        "dut_21.o": "1f756e31bda1818d998d426cf5fcc0ec4b278d6b88a5bbe6b883af5c17a7b089",
+        "dut_22.o": "01c4db5edec97e2e8581bba9de023872fb614201fe9e568243e3be430a81c365",
+        "dut_23.o": "98e61b5e6ab86dbdf680d673c8f09c98fff59cc553fca2b4836aa1af2475c818",
+        "dut_24.o": "5ee3f6f72508ee0bbba7349ba3ce6d4a298fc7877557e31fbf5f5a27f55cba78",
+        "dut_25.o": "f2e0b89c27e8a50225600cd3bd9361dc55d7bc2fe25a255bb5fcb8d1639da7e7",
+        "dut_26.o": "e837d2950ef2fc22fbfc5b0b8f98d36ccd86df3c29c7c97a89cd209c465e48a9",
+        "dut_27.o": "ff3865291db8df6fcc38d167d1abc33f81b2608c1ba7a6c9cce4603ae43e04a2",
+        "dut_28.o": "d504c137b2a078d975165fe52086d57a83a071fa9475e16713d000b71f4ecdbe",
+        "dut_29.o": "b88359d28ae25762a9f14be977821a2be53a0cde240aeb8214e75808087996e0",
+        "dut_3.o": "28358dd857cebcf40aab404749cf423cfba50d6d505bc60fe60e5c4a954734b3",
+        "dut_30.o": "5454776f2801720fc1fc8f254443ec3fa7de39365ecbef3f92e579aba69c70e3",
+        "dut_31.o": "4654e7c06bf33161de032eb2b471944616325c132181b9b54f773c0ad1bd59bc",
+        "dut_4.o": "3575eb5cfb00730e591e979b71d8f36415d0227f6e680f6bdaeec9a6e082e3bd",
+        "dut_5.o": "c6e7ca5c9ad9b8a5565cb212abdfff5a59cf0592f94a661559f0ee27ee4846b9",
+        "dut_6.o": "9933576514bbd1c02d0bc64364f99cb6d06eb2040e4bde2c8956ca8efb8f2b8c",
+        "dut_7.o": "e2ef29780e973b7a686221bf8ba43865e2e54575df2699e26191a60759bf98f2",
+        "dut_8.o": "1195f5e1d04d1f59bdd46ccd247985322d59b0f82cb229f3b1a4d5416fac9adb",
+        "dut_9.o": "dfe0cb8f14ed2fb9de8302de2b6f08a4a440086281f27af4cd27edb80e4fbc70",
+        "dut_commit_helpers.o": "b548471cc689579008bae17428d6d2426082acd836402b6bb80dd2fb784392e5",
+        "dut_mem_ports.o": "28499f2f90b378efc1c4ee7f1d3d6a9ed307e949c6380b353f99d59a594a85b6",
+        "arti_rtl_model.o": "2402e74c1361d6105a62a1551151f48f770532aed7cca3299a84def92d9e8151"
+      },
+      "changed_member": "dut_commit_chunks.o",
+      "dispatcher_profile_sha256": "716fd4fc4e4ca18b3176ef6e9cb7d5e0881849b544c42fa7d015c5827af6458e",
+      "added_member": "dut_commit_blocks.o",
+      "caller_profile_compatible": true,
+      "new_helper_flags": [
+        "-O2"
+      ]
+    }
+  },
+  "unit_tests": {
+    "passed": true,
+    "recorded_at": 1792208050.183773,
+    "package_tests": 120,
+    "focused_tests": 6,
+    "sanitizer_cases": 4103,
+    "source_sha256": {
+      "emit.py": "7b888cf2532e8bbaf674045b9c39df2a26dffca9105bd4e819f83ac81bc33c6f",
+      "test_commit_blocks.py": "bc56248d76c93cda07bd50bc0e72979856343fdb76c4a7e62b61be148b393fb6",
+      "test_emit_commit_helpers.py": "3ca85479a5babe3ad1d042433150619c39e6a99be040db46f5df2c86c87a2558"
+    }
+  },
+  "observer_density": {
+    "small": {
+      "increments": 131333460,
+      "eligible_increment_fraction": 0.935457300827984,
+      "eligible_call_fraction": 0.47050160171001887,
+      "cells_in_runs_at_least": {
+        "4": 0.8385475795734004,
+        "8": 0.773302492753941,
+        "16": 0.0017656353529405225,
+        "32": 0.0007319688371874159
+      }
+    },
+    "large": {
+      "increments": 2031400626,
+      "eligible_increment_fraction": 0.9362606512261654,
+      "eligible_call_fraction": 0.47761590421364664,
+      "cells_in_runs_at_least": {
+        "4": 0.8398242115142481,
+        "8": 0.7756185539346191,
+        "16": 0.0017964260487532211,
+        "32": 0.0007376329320871244
+      }
+    },
+    "mesa64": {
+      "increments": 6222862861,
+      "eligible_increment_fraction": 0.9471755170662438,
+      "eligible_call_fraction": 0.5395965356618885,
+      "cells_in_runs_at_least": {
+        "4": 0.8451403459267074,
+        "8": 0.7745673801054058,
+        "16": 0.0008066258428188106,
+        "32": 0.00047947899008022183
+      }
+    }
+  },
+  "rejected_variable_run_helper": {
+    "scope": "Selected main PGO baseline. Candidate retains every selected archive member except commit chunks, rebuilt using the exact same CFG profile under the same source basename. A new small run helper uses O2; original generic helper remains byte-identical in the archive. No whole-model generation/retraining. Require compiler profile compatibility plus exact RAM, clocks, holds, commits and DMA.",
+    "passed": true,
+    "promising": false,
+    "summary": {
+      "solid64": {
+        "medians": {
+          "baseline": 0.599141083,
+          "candidate": 0.60732625
+        },
+        "time_saved_percent": -1.3661501826941036
+      },
+      "spatial64": {
+        "medians": {
+          "baseline": 0.726952083,
+          "candidate": 0.738106667
+        },
+        "time_saved_percent": -1.5344318093108766
+      },
+      "large256": {
+        "medians": {
+          "baseline": 11.353682583,
+          "candidate": 11.482303708
+        },
+        "time_saved_percent": -1.1328582075439186
+      },
+      "mesa64": {
+        "medians": {
+          "baseline": 23.522948291,
+          "candidate": 23.887091875
+        },
+        "time_saved_percent": -1.5480354736796542
+      }
+    }
+  },
+  "host_benchmark": {
+    "pid": 98139,
+    "started": 1792208050.27106,
+    "stage": "terminal",
+    "stages": [
+      {
+        "name": "solid64-0-pre_dispatch",
+        "exit_status": 0,
+        "seconds": 0.7298615409526974
+      },
+      {
+        "name": "solid64-1-main",
+        "exit_status": 0,
+        "seconds": 0.6270986672025174
+      },
+      {
+        "name": "solid64-2-candidate",
+        "exit_status": 0,
+        "seconds": 0.603273208020255
+      },
+      {
+        "name": "solid64-3-main",
+        "exit_status": 0,
+        "seconds": 0.6183869999367744
+      },
+      {
+        "name": "solid64-4-candidate",
+        "exit_status": 0,
+        "seconds": 0.6115665829274803
+      },
+      {
+        "name": "solid64-5-pre_dispatch",
+        "exit_status": 0,
+        "seconds": 0.6974652910139412
+      },
+      {
+        "name": "solid64-6-candidate",
+        "exit_status": 0,
+        "seconds": 0.602535666897893
+      },
+      {
+        "name": "solid64-7-pre_dispatch",
+        "exit_status": 0,
+        "seconds": 0.7078221670817584
+      },
+      {
+        "name": "solid64-8-main",
+        "exit_status": 0,
+        "seconds": 0.6292530419304967
+      },
+      {
+        "name": "spatial64-0-pre_dispatch",
+        "exit_status": 0,
+        "seconds": 0.8399932500906289
+      },
+      {
+        "name": "spatial64-1-main",
+        "exit_status": 0,
+        "seconds": 0.7599961659871042
+      },
+      {
+        "name": "spatial64-2-candidate",
+        "exit_status": 0,
+        "seconds": 0.726296333828941
+      },
+      {
+        "name": "spatial64-3-main",
+        "exit_status": 0,
+        "seconds": 0.7481345839332789
+      },
+      {
+        "name": "spatial64-4-candidate",
+        "exit_status": 0,
+        "seconds": 0.7372090409044176
+      },
+      {
+        "name": "spatial64-5-pre_dispatch",
+        "exit_status": 0,
+        "seconds": 0.8375103329308331
+      },
+      {
+        "name": "spatial64-6-candidate",
+        "exit_status": 0,
+        "seconds": 0.7339454172179103
+      },
+      {
+        "name": "spatial64-7-pre_dispatch",
+        "exit_status": 0,
+        "seconds": 0.8376411669887602
+      },
+      {
+        "name": "spatial64-8-main",
+        "exit_status": 0,
+        "seconds": 0.7620945000089705
+      },
+      {
+        "name": "large256-0-pre_dispatch",
+        "exit_status": 0,
+        "seconds": 11.888948292005807
+      },
+      {
+        "name": "large256-1-main",
+        "exit_status": 0,
+        "seconds": 11.464820791967213
+      },
+      {
+        "name": "large256-2-candidate",
+        "exit_status": 0,
+        "seconds": 11.187525083078071
+      },
+      {
+        "name": "large256-3-main",
+        "exit_status": 0,
+        "seconds": 11.399437291081995
+      },
+      {
+        "name": "large256-4-candidate",
+        "exit_status": 0,
+        "seconds": 11.225009334040806
+      },
+      {
+        "name": "large256-5-pre_dispatch",
+        "exit_status": 0,
+        "seconds": 12.029579875059426
+      },
+      {
+        "name": "large256-6-candidate",
+        "exit_status": 0,
+        "seconds": 11.183730875141919
+      },
+      {
+        "name": "large256-7-pre_dispatch",
+        "exit_status": 0,
+        "seconds": 11.996465375181288
+      },
+      {
+        "name": "large256-8-main",
+        "exit_status": 0,
+        "seconds": 11.28025658405386
+      },
+      {
+        "name": "mesa64-0-pre_dispatch",
+        "exit_status": 0,
+        "seconds": 24.45376787497662
+      },
+      {
+        "name": "mesa64-1-main",
+        "exit_status": 0,
+        "seconds": 23.507650875020772
+      },
+      {
+        "name": "mesa64-2-candidate",
+        "exit_status": 0,
+        "seconds": 22.61743350001052
+      },
+      {
+        "name": "mesa64-3-main",
+        "exit_status": 0,
+        "seconds": 23.620057082967833
+      },
+      {
+        "name": "mesa64-4-candidate",
+        "exit_status": 0,
+        "seconds": 22.225908207939938
+      },
+      {
+        "name": "mesa64-5-pre_dispatch",
+        "exit_status": 0,
+        "seconds": 24.358752583852038
+      },
+      {
+        "name": "mesa64-6-candidate",
+        "exit_status": 0,
+        "seconds": 22.31400337512605
+      },
+      {
+        "name": "mesa64-7-pre_dispatch",
+        "exit_status": 0,
+        "seconds": 24.349322583992034
+      },
+      {
+        "name": "mesa64-8-main",
+        "exit_status": 0,
+        "seconds": 23.478557416936383
+      }
+    ],
+    "samples": [
+      {
+        "workload": "solid64",
+        "variant": "pre_dispatch",
+        "index": 0,
+        "result": {
+          "passed": true,
+          "ticks": 8823,
+          "explicit_ticks": 0,
+          "seconds": 0.629860417,
+          "commits": 1388084,
+          "holds": 8185941,
+          "holds_wrote": 1397119,
+          "reads": 898,
+          "writes": 5834,
+          "read_bytes": 57472,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "solid64",
+        "variant": "main",
+        "index": 1,
+        "result": {
+          "passed": true,
+          "ticks": 8823,
+          "explicit_ticks": 0,
+          "seconds": 0.598740125,
+          "commits": 1388084,
+          "holds": 8185941,
+          "holds_wrote": 1397119,
+          "reads": 898,
+          "writes": 5834,
+          "read_bytes": 57472,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "solid64",
+        "variant": "candidate",
+        "index": 2,
+        "result": {
+          "passed": true,
+          "ticks": 8823,
+          "explicit_ticks": 0,
+          "seconds": 0.575601167,
+          "commits": 1388084,
+          "holds": 8185941,
+          "holds_wrote": 1397119,
+          "reads": 898,
+          "writes": 5834,
+          "read_bytes": 57472,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "solid64",
+        "variant": "main",
+        "index": 3,
+        "result": {
+          "passed": true,
+          "ticks": 8823,
+          "explicit_ticks": 0,
+          "seconds": 0.591115458,
+          "commits": 1388084,
+          "holds": 8185941,
+          "holds_wrote": 1397119,
+          "reads": 898,
+          "writes": 5834,
+          "read_bytes": 57472,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "solid64",
+        "variant": "candidate",
+        "index": 4,
+        "result": {
+          "passed": true,
+          "ticks": 8823,
+          "explicit_ticks": 0,
+          "seconds": 0.583592542,
+          "commits": 1388084,
+          "holds": 8185941,
+          "holds_wrote": 1397119,
+          "reads": 898,
+          "writes": 5834,
+          "read_bytes": 57472,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "solid64",
+        "variant": "pre_dispatch",
+        "index": 5,
+        "result": {
+          "passed": true,
+          "ticks": 8823,
+          "explicit_ticks": 0,
+          "seconds": 0.624776708,
+          "commits": 1388084,
+          "holds": 8185941,
+          "holds_wrote": 1397119,
+          "reads": 898,
+          "writes": 5834,
+          "read_bytes": 57472,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "solid64",
+        "variant": "candidate",
+        "index": 6,
+        "result": {
+          "passed": true,
+          "ticks": 8823,
+          "explicit_ticks": 0,
+          "seconds": 0.579904792,
+          "commits": 1388084,
+          "holds": 8185941,
+          "holds_wrote": 1397119,
+          "reads": 898,
+          "writes": 5834,
+          "read_bytes": 57472,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "solid64",
+        "variant": "pre_dispatch",
+        "index": 7,
+        "result": {
+          "passed": true,
+          "ticks": 8823,
+          "explicit_ticks": 0,
+          "seconds": 0.630546167,
+          "commits": 1388084,
+          "holds": 8185941,
+          "holds_wrote": 1397119,
+          "reads": 898,
+          "writes": 5834,
+          "read_bytes": 57472,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "solid64",
+        "variant": "main",
+        "index": 8,
+        "result": {
+          "passed": true,
+          "ticks": 8823,
+          "explicit_ticks": 0,
+          "seconds": 0.602559541,
+          "commits": 1388084,
+          "holds": 8185941,
+          "holds_wrote": 1397119,
+          "reads": 898,
+          "writes": 5834,
+          "read_bytes": 57472,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "spatial64",
+        "variant": "pre_dispatch",
+        "index": 0,
+        "result": {
+          "passed": true,
+          "ticks": 11304,
+          "explicit_ticks": 0,
+          "seconds": 0.766109666,
+          "commits": 1610429,
+          "holds": 9726318,
+          "holds_wrote": 1619629,
+          "reads": 1113,
+          "writes": 5812,
+          "read_bytes": 71232,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "spatial64",
+        "variant": "main",
+        "index": 1,
+        "result": {
+          "passed": true,
+          "ticks": 11304,
+          "explicit_ticks": 0,
+          "seconds": 0.7330705,
+          "commits": 1610429,
+          "holds": 9726318,
+          "holds_wrote": 1619629,
+          "reads": 1113,
+          "writes": 5812,
+          "read_bytes": 71232,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "spatial64",
+        "variant": "candidate",
+        "index": 2,
+        "result": {
+          "passed": true,
+          "ticks": 11304,
+          "explicit_ticks": 0,
+          "seconds": 0.701298125,
+          "commits": 1610429,
+          "holds": 9726318,
+          "holds_wrote": 1619629,
+          "reads": 1113,
+          "writes": 5812,
+          "read_bytes": 71232,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "spatial64",
+        "variant": "main",
+        "index": 3,
+        "result": {
+          "passed": true,
+          "ticks": 11304,
+          "explicit_ticks": 0,
+          "seconds": 0.723982125,
+          "commits": 1610429,
+          "holds": 9726318,
+          "holds_wrote": 1619629,
+          "reads": 1113,
+          "writes": 5812,
+          "read_bytes": 71232,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "spatial64",
+        "variant": "candidate",
+        "index": 4,
+        "result": {
+          "passed": true,
+          "ticks": 11304,
+          "explicit_ticks": 0,
+          "seconds": 0.712853584,
+          "commits": 1610429,
+          "holds": 9726318,
+          "holds_wrote": 1619629,
+          "reads": 1113,
+          "writes": 5812,
+          "read_bytes": 71232,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "spatial64",
+        "variant": "pre_dispatch",
+        "index": 5,
+        "result": {
+          "passed": true,
+          "ticks": 11304,
+          "explicit_ticks": 0,
+          "seconds": 0.762751916,
+          "commits": 1610429,
+          "holds": 9726318,
+          "holds_wrote": 1619629,
+          "reads": 1113,
+          "writes": 5812,
+          "read_bytes": 71232,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "spatial64",
+        "variant": "candidate",
+        "index": 6,
+        "result": {
+          "passed": true,
+          "ticks": 11304,
+          "explicit_ticks": 0,
+          "seconds": 0.703224958,
+          "commits": 1610429,
+          "holds": 9726318,
+          "holds_wrote": 1619629,
+          "reads": 1113,
+          "writes": 5812,
+          "read_bytes": 71232,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "spatial64",
+        "variant": "pre_dispatch",
+        "index": 7,
+        "result": {
+          "passed": true,
+          "ticks": 11304,
+          "explicit_ticks": 0,
+          "seconds": 0.762086875,
+          "commits": 1610429,
+          "holds": 9726318,
+          "holds_wrote": 1619629,
+          "reads": 1113,
+          "writes": 5812,
+          "read_bytes": 71232,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "spatial64",
+        "variant": "main",
+        "index": 8,
+        "result": {
+          "passed": true,
+          "ticks": 11304,
+          "explicit_ticks": 0,
+          "seconds": 0.732219583,
+          "commits": 1610429,
+          "holds": 9726318,
+          "holds_wrote": 1619629,
+          "reads": 1113,
+          "writes": 5812,
+          "read_bytes": 71232,
+          "write_bytes": 43152,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "large256",
+        "variant": "pre_dispatch",
+        "index": 0,
+        "result": {
+          "passed": true,
+          "ticks": 129786,
+          "explicit_ticks": 0,
+          "seconds": 11.748049584,
+          "commits": 24230299,
+          "holds": 145305253,
+          "holds_wrote": 24368676,
+          "reads": 15716,
+          "writes": 88216,
+          "read_bytes": 1005824,
+          "write_bytes": 663696,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "large256",
+        "variant": "main",
+        "index": 1,
+        "result": {
+          "passed": true,
+          "ticks": 129786,
+          "explicit_ticks": 0,
+          "seconds": 11.3764665,
+          "commits": 24230299,
+          "holds": 145305253,
+          "holds_wrote": 24368676,
+          "reads": 15716,
+          "writes": 88216,
+          "read_bytes": 1005824,
+          "write_bytes": 663696,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "large256",
+        "variant": "candidate",
+        "index": 2,
+        "result": {
+          "passed": true,
+          "ticks": 129786,
+          "explicit_ticks": 0,
+          "seconds": 11.117865667,
+          "commits": 24230299,
+          "holds": 145305253,
+          "holds_wrote": 24368676,
+          "reads": 15716,
+          "writes": 88216,
+          "read_bytes": 1005824,
+          "write_bytes": 663696,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "large256",
+        "variant": "main",
+        "index": 3,
+        "result": {
+          "passed": true,
+          "ticks": 129786,
+          "explicit_ticks": 0,
+          "seconds": 11.322210416,
+          "commits": 24230299,
+          "holds": 145305253,
+          "holds_wrote": 24368676,
+          "reads": 15716,
+          "writes": 88216,
+          "read_bytes": 1005824,
+          "write_bytes": 663696,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "large256",
+        "variant": "candidate",
+        "index": 4,
+        "result": {
+          "passed": true,
+          "ticks": 129786,
+          "explicit_ticks": 0,
+          "seconds": 11.142705208,
+          "commits": 24230299,
+          "holds": 145305253,
+          "holds_wrote": 24368676,
+          "reads": 15716,
+          "writes": 88216,
+          "read_bytes": 1005824,
+          "write_bytes": 663696,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "large256",
+        "variant": "pre_dispatch",
+        "index": 5,
+        "result": {
+          "passed": true,
+          "ticks": 129786,
+          "explicit_ticks": 0,
+          "seconds": 11.900843792,
+          "commits": 24230299,
+          "holds": 145305253,
+          "holds_wrote": 24368676,
+          "reads": 15716,
+          "writes": 88216,
+          "read_bytes": 1005824,
+          "write_bytes": 663696,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "large256",
+        "variant": "candidate",
+        "index": 6,
+        "result": {
+          "passed": true,
+          "ticks": 129786,
+          "explicit_ticks": 0,
+          "seconds": 11.098436458,
+          "commits": 24230299,
+          "holds": 145305253,
+          "holds_wrote": 24368676,
+          "reads": 15716,
+          "writes": 88216,
+          "read_bytes": 1005824,
+          "write_bytes": 663696,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "large256",
+        "variant": "pre_dispatch",
+        "index": 7,
+        "result": {
+          "passed": true,
+          "ticks": 129786,
+          "explicit_ticks": 0,
+          "seconds": 11.876125792,
+          "commits": 24230299,
+          "holds": 145305253,
+          "holds_wrote": 24368676,
+          "reads": 15716,
+          "writes": 88216,
+          "read_bytes": 1005824,
+          "write_bytes": 663696,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "large256",
+        "variant": "main",
+        "index": 8,
+        "result": {
+          "passed": true,
+          "ticks": 129786,
+          "explicit_ticks": 0,
+          "seconds": 11.196975292,
+          "commits": 24230299,
+          "holds": 145305253,
+          "holds_wrote": 24368676,
+          "reads": 15716,
+          "writes": 88216,
+          "read_bytes": 1005824,
+          "write_bytes": 663696,
+          "faults": 0,
+          "completion": 34395,
+          "shader_config": 67635216
+        },
+        "all_RAM_and_all_counters_exact": true
+      },
+      {
+        "workload": "mesa64",
+        "variant": "pre_dispatch",
+        "index": 0,
+        "result": {
+          "calls": 46936,
+          "ticks": 3619433,
+          "commits": 53609559,
+          "holds": 396954443,
+          "dma_reads": 42352,
+          "dma_writes": 481479,
+          "dma_bytes": 6301000,
+          "seconds": 24.401355375,
+          "truncated_tail": false,
+          "warmup_calls": 0,
+          "sample": 0
+        },
+        "all_strict_trace_results_and_counters_exact": true
+      },
+      {
+        "workload": "mesa64",
+        "variant": "main",
+        "index": 1,
+        "result": {
+          "calls": 46936,
+          "ticks": 3619433,
+          "commits": 53609559,
+          "holds": 396954443,
+          "dma_reads": 42352,
+          "dma_writes": 481479,
+          "dma_bytes": 6301000,
+          "seconds": 23.500117958,
+          "truncated_tail": false,
+          "warmup_calls": 0,
+          "sample": 0
+        },
+        "all_strict_trace_results_and_counters_exact": true
+      },
+      {
+        "workload": "mesa64",
+        "variant": "candidate",
+        "index": 2,
+        "result": {
+          "calls": 46936,
+          "ticks": 3619433,
+          "commits": 53609559,
+          "holds": 396954443,
+          "dma_reads": 42352,
+          "dma_writes": 481479,
+          "dma_bytes": 6301000,
+          "seconds": 22.61125575,
+          "truncated_tail": false,
+          "warmup_calls": 0,
+          "sample": 0
+        },
+        "all_strict_trace_results_and_counters_exact": true
+      },
+      {
+        "workload": "mesa64",
+        "variant": "main",
+        "index": 3,
+        "result": {
+          "calls": 46936,
+          "ticks": 3619433,
+          "commits": 53609559,
+          "holds": 396954443,
+          "dma_reads": 42352,
+          "dma_writes": 481479,
+          "dma_bytes": 6301000,
+          "seconds": 23.613791333,
+          "truncated_tail": false,
+          "warmup_calls": 0,
+          "sample": 0
+        },
+        "all_strict_trace_results_and_counters_exact": true
+      },
+      {
+        "workload": "mesa64",
+        "variant": "candidate",
+        "index": 4,
+        "result": {
+          "calls": 46936,
+          "ticks": 3619433,
+          "commits": 53609559,
+          "holds": 396954443,
+          "dma_reads": 42352,
+          "dma_writes": 481479,
+          "dma_bytes": 6301000,
+          "seconds": 22.21881675,
+          "truncated_tail": false,
+          "warmup_calls": 0,
+          "sample": 0
+        },
+        "all_strict_trace_results_and_counters_exact": true
+      },
+      {
+        "workload": "mesa64",
+        "variant": "pre_dispatch",
+        "index": 5,
+        "result": {
+          "calls": 46936,
+          "ticks": 3619433,
+          "commits": 53609559,
+          "holds": 396954443,
+          "dma_reads": 42352,
+          "dma_writes": 481479,
+          "dma_bytes": 6301000,
+          "seconds": 24.302408417,
+          "truncated_tail": false,
+          "warmup_calls": 0,
+          "sample": 0
+        },
+        "all_strict_trace_results_and_counters_exact": true
+      },
+      {
+        "workload": "mesa64",
+        "variant": "candidate",
+        "index": 6,
+        "result": {
+          "calls": 46936,
+          "ticks": 3619433,
+          "commits": 53609559,
+          "holds": 396954443,
+          "dma_reads": 42352,
+          "dma_writes": 481479,
+          "dma_bytes": 6301000,
+          "seconds": 22.306446417,
+          "truncated_tail": false,
+          "warmup_calls": 0,
+          "sample": 0
+        },
+        "all_strict_trace_results_and_counters_exact": true
+      },
+      {
+        "workload": "mesa64",
+        "variant": "pre_dispatch",
+        "index": 7,
+        "result": {
+          "calls": 46936,
+          "ticks": 3619433,
+          "commits": 53609559,
+          "holds": 396954443,
+          "dma_reads": 42352,
+          "dma_writes": 481479,
+          "dma_bytes": 6301000,
+          "seconds": 24.293817917,
+          "truncated_tail": false,
+          "warmup_calls": 0,
+          "sample": 0
+        },
+        "all_strict_trace_results_and_counters_exact": true
+      },
+      {
+        "workload": "mesa64",
+        "variant": "main",
+        "index": 8,
+        "result": {
+          "calls": 46936,
+          "ticks": 3619433,
+          "commits": 53609559,
+          "holds": 396954443,
+          "dma_reads": 42352,
+          "dma_writes": 481479,
+          "dma_bytes": 6301000,
+          "seconds": 23.47244675,
+          "truncated_tail": false,
+          "warmup_calls": 0,
+          "sample": 0
+        },
+        "all_strict_trace_results_and_counters_exact": true
+      }
+    ],
+    "scope": "Final packaged archives: pre-dispatch baseline, selected shared-dispatch main, and immutable-block candidate. Identical useful currentpackedwhite renders and fixed currentMesa64 trace; three balanced fresh processes each, Latin-square order equalizes average time position. No competing qualification jobs. Every RAM byte and all counters/trace callbacks identical.",
+    "archives": {
+      "pre_dispatch": "69776a3531c9332a83293b6abcf7e478dda333700ee75427e92a2fcfe120418f",
+      "main": "683513ffa7de88c2b6cbabdc3a8122d4deb5fe52f6c656274267a1b12e07a4f0",
+      "candidate": "7d93d75ec0fc5f170bf21f348cf310cb608aa2d46bd5eb3bc0df99f9d6b6dc0f"
+    },
+    "trace_sha256": "00cd8d66437ea33734ef577bbbb00b57d01681ad24f8f49b495d58bdcea1d252",
+    "header_sha256": "822ea28949824cff47057707e46f2ce5c1cd3453892a8ff82266bc8a87f00dd9",
+    "runners": {
+      "pre_dispatch-small": {
+        "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/texture-word-route-native/optimized-host/candidate-small",
+        "sha256": "86107bf13d8d4e027f69b1db3284cc9a264f773367b5b9d4c8a5ce9307409bb1"
+      },
+      "pre_dispatch-large": {
+        "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/texture-word-route-native/optimized-host/candidate-large",
+        "sha256": "23264412ab76b32a3903e1a7953cb56666a12880a15506c3a179c20ec9617118"
+      },
+      "main-small": {
+        "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/host-benchmark/candidate-small",
+        "sha256": "94e4105acdaffa58eec62e7b267abf3fed1f8a3d2277ea79c8b22861e322c190"
+      },
+      "main-large": {
+        "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/host-benchmark/candidate-large",
+        "sha256": "f64944c8e2c692d7160802c71650a241b379d5c54d15e6deda477afdfc72a27a"
+      },
+      "candidate-small": {
+        "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/screen-optimized-small",
+        "sha256": "dbd2b8854e8464504c9bbcd2890822de98ae7d88c7617edb97dd08ec35f35e24"
+      },
+      "candidate-large": {
+        "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/screen-optimized-large",
+        "sha256": "fa38e3ac9b1e626a0fb533bea2410128e9f92b2e02ae2320be63f170928d7b52"
+      }
+    },
+    "passed": true,
+    "finished": 1792208378.48495,
+    "summary": {
+      "solid64": {
+        "medians": {
+          "pre_dispatch": 0.629860417,
+          "main": 0.598740125,
+          "candidate": 0.579904792
+        },
+        "time_saved_vs_main_percent": 3.1458277495599485,
+        "time_saved_vs_pre_dispatch_percent": 7.931221529674238
+      },
+      "spatial64": {
+        "medians": {
+          "pre_dispatch": 0.762751916,
+          "main": 0.732219583,
+          "candidate": 0.703224958
+        },
+        "time_saved_vs_main_percent": 3.9598264882790057,
+        "time_saved_vs_pre_dispatch_percent": 7.804235787721058
+      },
+      "large256": {
+        "medians": {
+          "pre_dispatch": 11.876125792,
+          "main": 11.322210416,
+          "candidate": 11.117865667
+        },
+        "time_saved_vs_main_percent": 1.8048132077746137,
+        "time_saved_vs_pre_dispatch_percent": 6.384743124822567
+      },
+      "mesa64": {
+        "medians": {
+          "pre_dispatch": 24.302408417,
+          "main": 23.500117958,
+          "candidate": 22.306446417
+        },
+        "time_saved_vs_main_percent": 5.079427869823294,
+        "time_saved_vs_pre_dispatch_percent": 8.213021383525865
+      }
+    },
+    "host_gate": true
+  },
+  "idle": {
+    "pid": 98202,
+    "started": 1792208115.629696,
+    "stage": "terminal",
+    "samples": [
+      {
+        "variant": "baseline",
+        "index": 0,
+        "result": {
+          "ticks": 10000000,
+          "seconds": 0.595894834,
+          "commits": 0,
+          "holds": 0,
+          "holds_wrote": 0,
+          "dma": 0,
+          "shader_config": 67635216
+        }
+      },
+      {
+        "variant": "candidate",
+        "index": 1,
+        "result": {
+          "ticks": 10000000,
+          "seconds": 0.4969305,
+          "commits": 0,
+          "holds": 0,
+          "holds_wrote": 0,
+          "dma": 0,
+          "shader_config": 67635216
+        }
+      },
+      {
+        "variant": "candidate",
+        "index": 2,
+        "result": {
+          "ticks": 10000000,
+          "seconds": 0.495029542,
+          "commits": 0,
+          "holds": 0,
+          "holds_wrote": 0,
+          "dma": 0,
+          "shader_config": 67635216
+        }
+      },
+      {
+        "variant": "baseline",
+        "index": 3,
+        "result": {
+          "ticks": 10000000,
+          "seconds": 0.503665167,
+          "commits": 0,
+          "holds": 0,
+          "holds_wrote": 0,
+          "dma": 0,
+          "shader_config": 67635216
+        }
+      },
+      {
+        "variant": "baseline",
+        "index": 4,
+        "result": {
+          "ticks": 10000000,
+          "seconds": 0.492715459,
+          "commits": 0,
+          "holds": 0,
+          "holds_wrote": 0,
+          "dma": 0,
+          "shader_config": 67635216
+        }
+      },
+      {
+        "variant": "candidate",
+        "index": 5,
+        "result": {
+          "ticks": 10000000,
+          "seconds": 0.489148375,
+          "commits": 0,
+          "holds": 0,
+          "holds_wrote": 0,
+          "dma": 0,
+          "shader_config": 67635216
+        }
+      }
+    ],
+    "scope": "Matched selected main versus uniform dispatcher, exactly10million idle ticks per freshprocess, three balanced samples each. Start after all full640 functional jobs end to avoid contention. Require zero DMA, commits and holds.",
+    "passed": true,
+    "finished": 1792208856.2914062,
+    "medians": {
+      "baseline": 0.503665167,
+      "candidate": 0.495029542
+    },
+    "MHz": {
+      "baseline": 19.854460175523712,
+      "candidate": 20.200814601080918
+    },
+    "candidate_over_baseline": 0.9828544327346743
+  },
+  "guest_current64": {
+    "started": 1792207846.006464,
+    "pid": 96380,
+    "stage": "terminal",
+    "replays": [
+      {
+        "mode": 0,
+        "base": "0x0",
+        "invalidate": 0,
+        "passed": true
+      },
+      {
+        "mode": 0,
+        "base": "0x0",
+        "invalidate": 1,
+        "passed": true
+      },
+      {
+        "mode": 0,
+        "base": "0x40000000",
+        "invalidate": 0,
+        "passed": true
+      },
+      {
+        "mode": 0,
+        "base": "0x40000000",
+        "invalidate": 1,
+        "passed": true
+      },
+      {
+        "mode": 0,
+        "base": "0x80000000",
+        "invalidate": 0,
+        "passed": true
+      },
+      {
+        "mode": 0,
+        "base": "0x80000000",
+        "invalidate": 1,
+        "passed": true
+      },
+      {
+        "mode": 1,
+        "base": "0x0",
+        "invalidate": 0,
+        "passed": true
+      },
+      {
+        "mode": 1,
+        "base": "0x0",
+        "invalidate": 1,
+        "passed": true
+      },
+      {
+        "mode": 1,
+        "base": "0x40000000",
+        "invalidate": 0,
+        "passed": true
+      },
+      {
+        "mode": 1,
+        "base": "0x40000000",
+        "invalidate": 1,
+        "passed": true
+      },
+      {
+        "mode": 1,
+        "base": "0x80000000",
+        "invalidate": 0,
+        "passed": true
+      },
+      {
+        "mode": 1,
+        "base": "0x80000000",
+        "invalidate": 1,
+        "passed": true
+      },
+      {
+        "mode": 2,
+        "base": "0x0",
+        "invalidate": 0,
+        "passed": true
+      },
+      {
+        "mode": 2,
+        "base": "0x0",
+        "invalidate": 1,
+        "passed": true
+      },
+      {
+        "mode": 2,
+        "base": "0x40000000",
+        "invalidate": 0,
+        "passed": true
+      },
+      {
+        "mode": 2,
+        "base": "0x40000000",
+        "invalidate": 1,
+        "passed": true
+      },
+      {
+        "mode": 2,
+        "base": "0x80000000",
+        "invalidate": 0,
+        "passed": true
+      },
+      {
+        "mode": 2,
+        "base": "0x80000000",
+        "invalidate": 1,
+        "passed": true
+      }
+    ],
+    "qemu_sha256": "b93fe966d271aa7474b6e60b43603cf20b1e6889871691c4a1a65b890188de40",
+    "archive_sha256": "8f6b56c7b01890a3df11a247c8f18ae4530420309583b4a1696832d6b4a2e931",
+    "proof": "/Users/duckdonald/workspace/gpu/.artifacts/srq-ib-current-opt64",
+    "profile": false,
+    "scope": "Private boundedtexture/directresponseDecode/flowreply on current fourCU RTL; old training payload preserved or explicit currentpackedwhite payload selected;cap28; explicitfirst9scratchcontract,immutablevalidatedread/writeusage,DMAaliasguard andunchangedMesaoptin. StandaloneDRMdefault/optin/all4096pixels+outputcanaries,18VMreplays,21GLES,quadbatch/offscreen/private-depth/GTK64strictscanout; desktopflagselectsfull640only. Nohostspeedclaim.",
+    "exit_status": 0,
+    "guest_seconds": 85.2228252501227,
+    "markers": {
+      "OPENGPU TRANSIENT STAGING PASS: hardware=1": true,
+      "output_usage=1": true,
+      "GTK Wayland/OpenGPU smoke proof: PASS": true,
+      "Gtk-smoke scanout proof: PASS": true,
+      "fragment staging transient=1": true,
+      "compute completed; RNU=1 RDN=0": true,
+      "OPENGPU PRIVATE DEPTH DISCARD PASS:": true,
+      "Native shader suite: PASS": true,
+      "OPENGPU GL FILL PASS": true,
+      "OPENGPU GL OFFSCREEN PASS:": true
+    },
+    "native_cases": 21,
+    "quad_batch_pass": true,
+    "payload_unchanged": true,
+    "trace_requested": false,
+    "trace_present": true,
+    "passed": true,
+    "finished": 1792207933.114017
+  },
+  "guest_full640": {
+    "started": 1792208379.694699,
+    "pid": 921,
+    "stage": "terminal",
+    "replays": [],
+    "qemu_sha256": "b93fe966d271aa7474b6e60b43603cf20b1e6889871691c4a1a65b890188de40",
+    "archive_sha256": "8f6b56c7b01890a3df11a247c8f18ae4530420309583b4a1696832d6b4a2e931",
+    "proof": "/Users/duckdonald/workspace/gpu/.artifacts/srq-ib-current-full640",
+    "profile": false,
+    "scope": "Private boundedtexture/directresponseDecode/flowreply on current fourCU RTL; old training payload preserved or explicit currentpackedwhite payload selected;cap28; explicitfirst9scratchcontract,immutablevalidatedread/writeusage,DMAaliasguard andunchangedMesaoptin. StandaloneDRMdefault/optin/all4096pixels+outputcanaries,18VMreplays,21GLES,quadbatch/offscreen/private-depth/GTK64strictscanout; desktopflagselectsfull640only. Nohostspeedclaim.",
+    "exit_status": 0,
+    "guest_seconds": 467.2920069999527,
+    "markers": {
+      "OPENGPU TRANSIENT STAGING PASS: hardware=1": true,
+      "output_usage=1": true,
+      "GTK Wayland/OpenGPU smoke proof: PASS": true,
+      "Gtk-smoke scanout proof: PASS": true,
+      "fragment staging transient=1": true
+    },
+    "native_cases": 0,
+    "quad_batch_pass": true,
+    "payload_unchanged": true,
+    "trace_requested": false,
+    "trace_present": true,
+    "passed": true,
+    "finished": 1792208847.1816509
+  },
+  "full_desktop": {
+    "pid": 98200,
+    "started": 1792208114.443885,
+    "stage": "terminal",
+    "scope": "After final balanced packaged-archive timings: existing qualified full640 strict trace and actualfull640 guest/redraw concurrently, functional elapsed only. Disk is byte-verified APFS clone; installed executable unchanged.",
+    "proof_path": "/Users/duckdonald/workspace/gpu/.artifacts/srq-ib-current-full640",
+    "guest_receipt": "guest-ib-current-full640.json",
+    "job_pids": {
+      "replay": 920,
+      "guest": 921
+    },
+    "passed": true,
+    "finished": 1792208848.789783,
+    "strict_full640": {
+      "calls": 151931,
+      "ticks": 16856198,
+      "commits": 929570796,
+      "holds": 5651201054,
+      "dma_reads": 584122,
+      "dma_writes": 3610593,
+      "dma_bytes": 64577632,
+      "seconds": 418.658412292,
+      "truncated_tail": false,
+      "warmup_calls": 0,
+      "sample": 0
+    },
+    "trace_sha256": "b2de20471eef4ed84ce25b4394a7cbb07bbe370a85c0c7962f51d09b36d3d523"
+  },
+  "visual_review": {
+    "passed": true,
+    "reviewed_at": 1792208898.4370508,
+    "method": "Manual inspection of PNG conversions of the completed full640 QMP initial frame and verified redraw frame. Readable OpenGPU GTK smoke window on Debian wallpaper; green panel changes to orange with intact window, text and controls.",
+    "frames": [
+      {
+        "source": ".artifacts/srq-ib-current-full640/gtk-smoke-qmp.ppm",
+        "sha256": "4068959aec7cac9758a31b42c9a822550caf31c67d49cead0df41bf49a6f6ff7",
+        "review_png": ".artifacts/srq-ib-current-full640/review-qmp.png",
+        "review_png_sha256": "9d601b2fed5cdd15c67d44683154edef560a55d25f18998cf056bc64652074a9",
+        "panel": "green"
+      },
+      {
+        "source": ".artifacts/srq-ib-current-full640/gtk-smoke-verified.ppm",
+        "sha256": "7df9b33f6467cb84a3bedcff9fa98bfa1a90b597c0b223288f807b3dc9a982e9",
+        "review_png": ".artifacts/srq-ib-current-full640/review-verified.png",
+        "review_png_sha256": "3c6d6fda7fa2b38dfbd5f83cad83b25b2f95965f3f3d5e449c0977dc72051aee",
+        "panel": "orange"
+      }
+    ]
+  },
+  "evidence": {
+    "qualification-state.json": {
+      "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/qualification-state.json",
+      "sha256": "a58792d1d185de8bc610d09c00493740af5981419ff9cf3dee341ba08c194a75"
+    },
+    "unit-tests-state.json": {
+      "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/unit-tests-state.json",
+      "sha256": "2859fc34c907f65ca3825d26b80e30a95000ff2f286945c7a1e4ba4568777e71"
+    },
+    "host-benchmark-state.json": {
+      "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/host-benchmark-state.json",
+      "sha256": "37271e885143f28fbb24c19127ec6cabef7d1868b2386aec3c84be7c5c14bb72"
+    },
+    "full-desktop-state.json": {
+      "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/full-desktop-state.json",
+      "sha256": "eab95978ea944695eabcac9ef8de209c197163b518c63b9fafe35e20ee8f7e51"
+    },
+    "idle-state.json": {
+      "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/idle-state.json",
+      "sha256": "731d8edfe5f7025450d3f0060791f1252d93577e93fbf3f19846077a168f6dc1"
+    },
+    "native-screen-optimized-state.json": {
+      "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/native-screen-optimized-state.json",
+      "sha256": "e990ac05098ba00b1a60533b2c394018a4f8bfa57874c54463cefafb7985e2e1"
+    },
+    "guest-ib-current-opt64.json": {
+      "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/guest-ib-current-opt64.json",
+      "sha256": "955e573952eb82b89077475f900b6a4b138e2e4b676ee77c2256872cb401afc1"
+    },
+    "guest-ib-current-full640.json": {
+      "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/guest-ib-current-full640.json",
+      "sha256": "8f97e7f1536a0e8324f2cf1a9183ec736bb0679d4757ca9727ce0a7b1acf651f"
+    },
+    "production-equivalence.json": {
+      "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/production-equivalence.json",
+      "sha256": "62c7abceeee686a3732938eecd120483f298d17071207bd5328370307f676afb"
+    },
+    "visual-review.json": {
+      "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/visual-review.json",
+      "sha256": "2a285d00a3c9e212344e4d0d30460bce44de36756e6bea3ec29401a48f4c1549"
+    },
+    "encoding.json": {
+      "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/encoding.json",
+      "sha256": "426755c00c19e2de7f648c3e8a7dfd4aec651a6fcb504e7864ae5760e4b3bf51"
+    },
+    "selected-screen-state.json": {
+      "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/selected-screen-state.json",
+      "sha256": "a16eb0aa7bca9162f4f58f656e11596ba503dcb351da3986a5add7934244ad35"
+    },
+    "package-tests.log": {
+      "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/invalidation-blocks-native/package-tests.log",
+      "sha256": "89315c04a721619c2eb037d57f1ef930e8cc8551a1fdd8a1e23c0cf7c64cd847"
+    }
+  }
+}

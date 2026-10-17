@@ -51,6 +51,18 @@ full 640×480 desktop, redraw and strict trace pass. Only the dispatcher source
 changes; the header and 36 other compiled objects are reused unchanged. See
 the [qualification and all timing samples](docs/uniform-pass-dispatch-2026-10-17.json).
 
+Dense immutable commit-invalidation lists use predecoded eight/four-cell blocks
+plus scalar remainders, allowing portable counter increments to vectorize.
+Duplicates and unsigned wraparound are preserved; unknown, mutable, partial or
+shadowed lists keep the generic helper. Set `FLASHSIM_COMMIT_BLOCKS=0` during
+generation for the legacy path. This host optimization is independent of RTL
+lanes and shader VLEN. On the same four-CU model, final balanced measurements
+save another **5.08%** on Mesa64 and **1.80–3.96%** on native renders, with
+identical RAM, cycles and counters. Both host changes together save **8.21%**
+on that fixed Mesa64 trace. The actual full desktop and redraw, strict replay,
+120 package tests and 4,103 sanitized reference cases pass. See the
+[qualification and all final samples](docs/invalidation-blocks-2026-10-17.json).
+
 Dead-code elimination uses a worklist to visit each reachable assignment once.
 This avoids repeatedly scanning the growing live set on deep dependency chains.
 The change preserves assignment order and every output, sequential-read and

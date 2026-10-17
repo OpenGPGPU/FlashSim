@@ -3237,6 +3237,115 @@ def _chunk_commit_switch(cls: str, body: str) -> str | None:
     return "".join(out)
 
 
+def _invalidation_blocks(ids: list[int]) -> tuple[list[int], int] | None:
+    """Pack dense page increments into fixed 8/4-cell blocks and scalar tails.
+
+    Counters are ordinary uint32 storage: addition modulo 2**32 commutes.
+    Keep every occurrence, including duplicates, while moving scalar tails
+    behind the vector blocks. Arbitrary/mutable ID lists keep the old helper.
+    """
+    if not ids or any(i < 0 or i > 65535 for i in ids):
+        return None
+    blocks8: list[int] = []
+    blocks4: list[int] = []
+    scalars: list[int] = []
+    start, count = ids[0], 1
+    runs: list[tuple[int, int]] = []
+    for i in ids[1:]:
+        if i == start + count:
+            count += 1
+        else:
+            runs.append((start, count))
+            start, count = i, 1
+    runs.append((start, count))
+    for start, count in runs:
+        while count >= 8:
+            blocks8.append(start)
+            start += 8
+            count -= 8
+        if count >= 4:
+            blocks4.append(start)
+            start += 4
+            count -= 4
+        scalars.extend(range(start, start + count))
+    vector_cells = len(blocks8) * 8 + len(blocks4) * 4
+    # Avoid extra stream setup for small or mostly scattered tables. These
+    # bounds also keep both metadata header counts in uint16 storage.
+    if (vector_cells < 16 or vector_cells * 2 < len(ids)
+            or max(len(blocks8), len(blocks4), len(scalars)) > 65535):
+        return None
+    return [len(blocks8), len(blocks4), *blocks8, *blocks4, *scalars], len(scalars)
+
+
+def _outline_static_commit_blocks(header: str, cls: str,
+                                   body: str) -> tuple[str, str | None]:
+    """Specialize only literal immutable tables with no shadow/unknown uses.
+
+    This post-split transform leaves the DUT header and unrelated shards
+    byte-identical. Counting all name uses rejects members, local shadows,
+    aliases and partial/dynamic lengths rather than assuming pointer identity
+    proves immutable contents. The generic helper remains unchanged.
+    """
+    helper = f"{cls}_commit_bump"
+    if (os.environ.get("FLASHSIM_COMMIT_BLOCKS", "1") == "0"
+            or helper + "(" not in body):
+        return body, None
+    code = body.replace('#include "dut.h"', '')
+    if '"' in code or "'" in code:
+        return body, None
+    declarations = list(re.finditer(
+        r"^static const uint16_t (_inv\d+)\[\] = \{([0-9, ]+)\};$", header, re.M))
+    definitions = Counter(m[1] for m in declarations)
+    tables = {m[1]: list(map(int, re.findall(r"\d+", m[2])))
+              for m in declarations if definitions[m[1]] == 1
+              and re.fullmatch(r"\s*\d+(?:\s*,\s*\d+)*\s*", m[2])}
+    text = header + body
+    uses = Counter(re.findall(r"\b_inv\d+\b", text))
+    calls = list(re.finditer(
+        rf"\b(?:fs_bump|{re.escape(helper)})\(\s*(?:_pg|d->_pg)\s*,\s*"
+        r"(_inv\d+)\s*,\s*(\d+)u\s*\)", text))
+    known = Counter(m[1] for m in calls
+                    if m[1] in tables and int(m[2]) == len(tables[m[1]]))
+    selected = {}
+    for name, ids in tables.items():
+        if uses[name] == 1 + known[name] and known[name]:
+            encoded = _invalidation_blocks(ids)
+            if encoded is not None:
+                selected[name] = encoded
+    used: set[str] = set()
+    fast = helper + "_blocks"
+    pattern = re.compile(rf"{re.escape(helper)}\((d->_pg|_pg), (_inv\d+), (\d+)u\)")
+
+    def replace(match):
+        name = match[2]
+        if name not in selected:
+            return match[0]
+        used.add(name)
+        return f"{fast}({match[1]}, {name}_blocks, {selected[name][1]}u)"
+
+    transformed = pattern.sub(replace, body)
+    if not used:
+        return body, None
+    prefix = [f"extern void {fast}(uint32_t *, const uint16_t *, unsigned);"]
+    for name in sorted(used):
+        values = ", ".join(map(str, selected[name][0]))
+        prefix.append(f"static const uint16_t {name}_blocks[] = {{{values}}};")
+    transformed = transformed.replace('#include "dut.h"\n',
+        '#include "dut.h"\n' + "\n".join(prefix) + "\n", 1)
+    source = f'''#include <cstdint>
+void {fast}(uint32_t*pg,const uint16_t*data,unsigned scalars) {{
+ unsigned n8=data[0],n4=data[1];data+=2;
+ for(unsigned i=0;i<n8;i++) {{uint32_t*p=pg+data[i];p[0]++;p[1]++;p[2]++;p[3]++;p[4]++;p[5]++;p[6]++;p[7]++;}}
+ data+=n8;
+ for(unsigned i=0;i<n4;i++) {{uint32_t*p=pg+data[i];p[0]++;p[1]++;p[2]++;p[3]++;}}
+ data+=n4;
+ for(;scalars>=4;scalars-=4,data+=4){{pg[data[0]]++;pg[data[1]]++;pg[data[2]]++;pg[data[3]]++;}}
+ for(unsigned i=0;i<scalars;i++)pg[data[i]]++;
+}}
+'''
+    return transformed, source
+
+
 def split_dut_methods(
     cpp: str, n_shards: int = 8
 ) -> tuple[str, list[tuple[str, str]]]:
@@ -3366,6 +3475,15 @@ def split_dut_methods(
                 "  for (unsigned i = 0; i < n; i++) pg[ids[i]]++;\n"
                 "}\n"))
         compact = _chunk_commit_switch(cls, body) if name == "_commit" else None
+        if name == "_commit":
+            transformed, block_helper = _outline_static_commit_blocks(
+                header, cls, compact if compact else body)
+            if block_helper is not None:
+                parts.append(("dut_commit_blocks.cpp", block_helper))
+                if compact:
+                    compact = transformed
+                else:
+                    body = transformed
         if compact:
             # Bounded switches use normal -O2 without optimizing one giant CFG.
             parts.append(("dut_commit_chunks.cpp", compact))
