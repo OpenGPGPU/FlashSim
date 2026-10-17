@@ -37,6 +37,20 @@ generated DUT to reuse the emitted C++ and skip the Python lowering pass. Set
 `-O2`; the generated `dut_commit.cpp` shard is kept at O0 because it is a
 large dirty-list switch with little effect on the normal runtime path.
 
+Ready eager passes share a typed guard table in the worklist dispatcher,
+reducing calls through thousands of small per-region wrappers. The dispatcher
+preserves generation/data cache updates, pending flags and every eager chunk's
+order. Regions outside the already-drained dependency closure retain their
+complete lazy evaluation path. Set `FLASHSIM_UNIFORM_PASSES=0` when generating
+a model to select the legacy wrappers for a controlled comparison.
+
+On the qualified four-CU desktop model, balanced same-work O2/PGO measurements
+save **3.13%** on an actual Mesa64 trace and **3.72–4.92%** on native renders.
+Idle throughput is about 2% lower. All native RAM and counters match, and the
+full 640×480 desktop, redraw and strict trace pass. Only the dispatcher source
+changes; the header and 36 other compiled objects are reused unchanged. See
+the [qualification and all timing samples](docs/uniform-pass-dispatch-2026-10-17.json).
+
 Dead-code elimination uses a worklist to visit each reachable assignment once.
 This avoids repeatedly scanning the growing live set on deep dependency chains.
 The change preserves assignment order and every output, sequential-read and

@@ -1562,7 +1562,81 @@ def _emit_pass_wake(passes, lines: list[str], indent: int) -> None:
         )
 
 
-def _emit_pass_dispatch(lines: list[str], npw: int, npass: int) -> None:
+def _emit_pass_tables(lines: list[str], cls: str, pass_bit: dict[int, int],
+                      drained: set[int], regions: list[list[str]],
+                      wire_part: dict[str, int]) -> list[str] | None:
+    """Share ready-pass guards while retaining lazy dependency fallbacks.
+
+    Address-taking thousands of tiny `_pn` wrappers adds an instruction-cache
+    and branch cost on active models. Their guards have identical structure;
+    encode just their typed member pointers and page IDs in a table instead.
+    Non-drained regions still invoke their complete original dependency walk.
+    Keep the wrappers available for diagnostics and the legacy control mode.
+    """
+    passes = sorted(pass_bit)
+    uniform = os.environ.get("FLASHSIM_UNIFORM_PASSES", "1") != "0" and bool(drained)
+    lines.append(f"    using PassFn = void ({cls}::*)();")
+    lines.append("    static const PassFn kPasses[] = {")
+    for i, r in enumerate(passes):
+        target = f"_eager{r}_0" if uniform and r in drained else f"_pn{r}"
+        comma = "," if i + 1 < len(passes) else ""
+        lines.append(f"      &{cls}::{target}{comma}")
+    lines.append("    };")
+    if not uniform:
+        return None
+    fallback = any(r not in drained for r in passes)
+    lines.extend([
+        "    struct PassGuard {",
+        f"      uint32_t {cls}::*generation;",
+        f"      uint32_t {cls}::*data;",
+        f"      uint8_t {cls}::*pending;",
+        "      unsigned page, data_page;",
+        "    };",
+        "    static const PassGuard kPassGuards[] = {",
+    ])
+    extra: list[str] = []
+    for i, r in enumerate(passes):
+        comma = "," if i + 1 < len(passes) else ""
+        if r not in drained:
+            lines.append(f"      {{nullptr, nullptr, nullptr, 0u, 0u}}{comma}")
+            continue
+        part = wire_part[regions[r][0]]
+        lines.append(f"      {{&{cls}::_eg{r}, &{cls}::_ed{r}, &{cls}::_up{r}, "
+                     f"{part}u, {_PASS_PAGE[r]}u}}{comma}")
+        nchunks = (len(regions[r]) + _EAGER_CHUNK - 1) // _EAGER_CHUNK
+        if nchunks > 1:
+            # The bitmap index is not the region ID: unused regions leave gaps.
+            extra.append(f"                case {i}u:")
+            extra.extend(f"                  _eager{r}_{k}();" for k in range(1, nchunks))
+            extra.append("                  break;")
+    lines.append("    };")
+    body = ["            const auto &guard = kPassGuards[i];"]
+    if fallback:
+        body.extend([
+            "            if (!guard.generation) { (this->*kPasses[i])(); }",
+            "            else {",
+        ])
+    body.extend([
+        "            if (this->*guard.generation != _pg[guard.page]) {",
+        # This write must happen even when the data guard skips evaluation.
+        "              this->*guard.generation = _pg[guard.page];",
+        "              if (this->*guard.data != _pg[guard.data_page] || this->*guard.pending) {",
+        "                this->*guard.data = _pg[guard.data_page];",
+        "                this->*guard.pending = 0;",
+        "                (this->*kPasses[i])();",
+    ])
+    if extra:
+        body.append("                switch (i) {")
+        body.extend(extra)
+        body.extend(["                  default: break;", "                }"])
+    body.extend(["              }", "            }"])
+    if fallback:
+        body.append("            }")
+    return body
+
+
+def _emit_pass_dispatch(lines: list[str], npw: int, npass: int,
+                        body: list[str] | None = None) -> None:
     """Drain woken passes through a summary-of-words bitmap.
 
     A flat scan re-reads every `_p_need` word on every tick. Passes are
@@ -1589,7 +1663,12 @@ def _emit_pass_dispatch(lines: list[str], npw: int, npass: int) -> None:
     lines.append("          unsigned b = (unsigned)__builtin_ctzll(bits);")
     lines.append("          _p_need[w] = bits & (bits - 1ull);")
     lines.append("          unsigned i = (w << 6) + b;")
-    lines.append(f"          if (i < {npass}u) (this->*kPasses[i])();")
+    if body is None:
+        lines.append(f"          if (i < {npass}u) (this->*kPasses[i])();")
+    else:
+        lines.append(f"          if (i < {npass}u) {{")
+        lines.extend(body)
+        lines.append("          }")
     lines.append("        }")
     lines.append(
         "        if (!_p_need[w]) { _p_any[sw] &= ~(1ull << si); "
@@ -2690,13 +2769,9 @@ def emit_cpp(mod: Module) -> str:
     if pass_bit:
         cls = f"{mod.name}Dut"
         npw = (len(pass_bit) + 63) // 64
-        lines.append(f"    using PassFn = void ({cls}::*)();")
-        lines.append("    static const PassFn kPasses[] = {")
-        for i, r in enumerate(sorted(pass_bit)):
-            comma = "," if i + 1 < len(pass_bit) else ""
-            lines.append(f"      &{cls}::_pn{r}{comma}")
-        lines.append("    };")
-        _emit_pass_dispatch(lines, npw, len(pass_bit))
+        dispatch_body = _emit_pass_tables(lines, cls, pass_bit, drained,
+                                         eager_regions, wire_part)
+        _emit_pass_dispatch(lines, npw, len(pass_bit), dispatch_body)
     seq_body = live_stmts if large else always_body
     seq_cached = always_cond_reads(seq_body) & cached
     for wr in mod.mem_writes:

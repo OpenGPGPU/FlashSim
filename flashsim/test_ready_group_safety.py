@@ -9,19 +9,22 @@ from flashsim import emit
 from flashsim.ir import AlwaysFF, Assign, BinOp, Const, Id, Module, NbAssign, Signal
 
 
-def test_later_unscheduled_producer_updates_registers(tmp_path, monkeypatch):
+@pytest.mark.parametrize("uniform", ["0", "1"])
+def test_later_unscheduled_producer_updates_registers(tmp_path, monkeypatch, uniform):
+    monkeypatch.setenv("FLASHSIM_UNIFORM_PASSES", uniform)
     compiler = shutil.which("c++")
     if not compiler:
         pytest.skip("C++ compiler unavailable")
     monkeypatch.setattr(emit, "_LARGE_WRITES", 8)
-    monkeypatch.setattr(emit, "_EAGER_KEY_RE", re.compile(r"(a|z)"))
+    monkeypatch.setattr(emit, "_EAGER_KEY_RE", re.compile(r"(a_ready|a_target|z_source)"))
     monkeypatch.setattr(emit, "cached_wires", lambda mod, assigns: set(assigns))
     signals = {name: Signal(name, width, kind) for name, width, kind in [
         ("clock", 1, "input"), ("a", 32, "input"), ("b", 32, "input"),
         ("out", 32, "output"), ("z_source_t0", 32, "wire"),
-        ("a_target_t0", 32, "wire")
+        ("a_target_t0", 32, "wire"), ("a_ready_t0", 32, "wire")
     ]}
     assigns = [
+        Assign("a_ready_t0", Id("b")),
         Assign("z_source_t0", BinOp("+", Id("a"), Const(1, 32))),
         Assign("a_target_t0", BinOp("^", Id("z_source_t0"), Id("b"))),
         Assign("out", Id("r0")),
@@ -34,19 +37,24 @@ def test_later_unscheduled_producer_updates_registers(tmp_path, monkeypatch):
     for i in range(9):
         signals[f"r{i}"] = Signal(f"r{i}", 32, "reg")
         body.append(NbAssign(f"r{i}", BinOp("+", Id("a_target_t0"), Const(i, 32))))
+    signals["r9"] = Signal("r9", 32, "reg")
+    body.append(NbAssign("r9", Id("a_ready_t0")))
     mod = Module("GroupingProof", signals, assigns, AlwaysFF("clock", body),
                  ["clock", "a", "b", "out"])
-    (tmp_path / "dut.h").write_text(emit.emit_cpp(mod))
+    cpp = emit.emit_cpp(mod)
+    if uniform == "1":
+        assert "if (!guard.generation)" in cpp, "exercise mixed ready/lazy dispatch"
+    (tmp_path / "dut.h").write_text(cpp)
     source = tmp_path / "check.cpp"
     source.write_text('''#include "dut.h"
 int main() {
   GroupingProofDut d;
   d.a=2; d.b=1; d.tick();
-  if(d.r0!=2 || d.r8!=10)return 1;
+  if(d.r0!=2 || d.r8!=10 || d.r9!=1)return 1;
   d.a=5; d.tick();
-  if(d.r0!=7 || d.r8!=15)return 2;
+  if(d.r0!=7 || d.r8!=15 || d.r9!=1)return 2;
   d.b=3; d.tick();
-  return d.r0==5 && d.r8==13 ? 0 : 3;
+  return d.r0==5 && d.r8==13 && d.r9==3 ? 0 : 3;
 }
 ''')
     binary = tmp_path / "check"

@@ -1,0 +1,1432 @@
+{
+  "recorded_at": 1792205688.2463,
+  "status": "Production uniform-pass dispatcher qualified for the unchanged four-CU Debian desktop model.",
+  "change": "Share canonical ready-pass generation/data/pending guards through a typed member-pointer table. Directly call eager chunks in order; non-drained regions retain complete legacy dependency evaluation. Legacy generation mode remains available through FLASHSIM_UNIFORM_PASSES=0.",
+  "generator_emit_sha256": "5ea2fe1de444f8868428c1919b3c76a08eee916d12fc45a2f3211e505ece2b55",
+  "unchanged_RTL": true,
+  "unchanged_header": true,
+  "generated_CPP_files_changed": [
+    "dut_0.cpp"
+  ],
+  "correctness": {
+    "package_tests": 117,
+    "strengthened_mixed_ready_lazy_modes": 2,
+    "sanitized_guard_cases": "200 trials: generation wrap, data-unchanged generation-cache write, pending forcing evaluation, repeated wakes, gapped IDs, three chunks, lazy fallback and same-tick cross-word wakes",
+    "canonical_table_rows_audited": 17446,
+    "multichunk_regions_audited": 6,
+    "native_formats": 40,
+    "controls": 18,
+    "current_packedwhite_fixtures": 9,
+    "VM_cases": 18,
+    "GLES_cases": 21,
+    "current64_strict": {
+      "calls": 46936,
+      "ticks": 3619433,
+      "commits": 53609559,
+      "holds": 396954443,
+      "dma_reads": 42352,
+      "dma_writes": 481479,
+      "dma_bytes": 6301000,
+      "seconds": 23.44647575,
+      "truncated_tail": false,
+      "warmup_calls": 0,
+      "sample": 0
+    },
+    "full640_strict": {
+      "calls": 151931,
+      "ticks": 16856198,
+      "commits": 929570796,
+      "holds": 5651201054,
+      "dma_reads": 584122,
+      "dma_writes": 3610593,
+      "dma_bytes": 64577632,
+      "seconds": 429.294332,
+      "truncated_tail": false,
+      "warmup_calls": 0,
+      "sample": 0
+    },
+    "actual_full640_guest_passed": true,
+    "manual_images_reviewed": true,
+    "all_native_RAM_and_every_counter_unchanged": true
+  },
+  "profile_scope": "Own72 representative executions train only the changed dispatcher object. Both timed variants retain byte-identical selected main O2/PGO objects for the remaining36 translation units. This isolates the host change without recompiling unchanged objects.",
+  "storage_recovery": {
+    "cleanup": {
+      "recorded_at": 1792204938.702653,
+      "reason": "Remove only owned, unused, reconstructible intermediates after completed training; remove the failed partial guest copy. Preserve source/profile/trace/result inputs and selected optimized binaries.",
+      "files": [
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/training/libarti_rtl_model.a",
+          "sha256": "230297cc13ed43bc822132e019087391c0f855925e9ed64d8516fef6b62cc84e",
+          "size": 226858816,
+          "reconstructible": true,
+          "removed": true
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/trace-training/libarti_rtl_model.a",
+          "sha256": "aa0adb3c6545c6ddd0aee96623872ba2445f072f395c658e4cf51d44e5f45983",
+          "size": 226988464,
+          "reconstructible": true,
+          "removed": true
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/qemu-training",
+          "sha256": "eb947795ada5cf07ff55d23b0a715c1a842987866fc8c9658ee1f8afbfaa4bd1",
+          "size": 152680384,
+          "reconstructible": true,
+          "removed": true
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/trace-training/replay",
+          "sha256": "db18a41c838554c9b09328579c07ff5a5b9cdff85ff935ed91d6be35d05c1193",
+          "size": 116282504,
+          "reconstructible": true,
+          "removed": true
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/srq-upd-current-full640/guest.qcow2",
+          "sha256": "306d88cddfad40d3e59593bc2d280f72edf149b9101c8d8d120d04e4fd2b3868",
+          "size": 1855979520,
+          "reconstructible": true,
+          "removed": true
+        }
+      ]
+    },
+    "guest_disk_creation": {
+      "recorded_at": 1792205013.810324,
+      "old_sha256": "80c78151ca3172a3e773fc9f4e50e1e43e254eb52f6df87ea48bcadd13934568",
+      "new_sha256": "9afd5c9a8e45bb510998057d0e08ede1c371b35b6fa0bdfb88f45409995f118a",
+      "change": "Only temporary guest disk creation: APFS copy-on-write clone instead of full copy; cmp requires byte-identical initial disk. Source base image, driver payload, QEMU and simulated RTL unchanged."
+    },
+    "profiles": {
+      "pid": 85251,
+      "started": 1792205593.8089972,
+      "stage": "terminal",
+      "files": [
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt0-solid-gradient-baseline-73556.profraw",
+          "sha256": "e5d8db1c7ff59f4f75ad63acdc8fe96d36e0798a0f0b67c86c4a6a8ab8ed50aa",
+          "allocated_before": 1351680,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt0-solid-gradient-candidate-73559.profraw",
+          "sha256": "db035f14fa2bf67dcc353c40369d82fd7cdf519458616164cb1efc9a377435b1",
+          "allocated_before": 16642048,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt0-solid-uniform-baseline-73548.profraw",
+          "sha256": "cda8cbeb6697e66cbaa69473985715e4e463c50053b97257b58b0143665462f8",
+          "allocated_before": 16642048,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt0-solid-uniform-candidate-73553.profraw",
+          "sha256": "81428464ac50fe9fdaf62c065b8398674af2a5d69f7fb7d8052f368dfa0a6429",
+          "allocated_before": 16642048,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt0-spatial-gradient-baseline-73571.profraw",
+          "sha256": "4f79721a764b3fd255306b5101d8dc6960cb81c8ebac8a8b028cb092f8d5b923",
+          "allocated_before": 16642048,
+          "allocated_after": 1368064,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt0-spatial-gradient-candidate-73574.profraw",
+          "sha256": "66ae6a0d3f3f553d19f6543a3abb46b221be70177fec328e6663f2e4064296f3",
+          "allocated_before": 16642048,
+          "allocated_after": 1368064,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt0-spatial-uniform-baseline-73564.profraw",
+          "sha256": "7d77a34e841256a39e62e7aeb22e7f6bd8866e72979cdb82d1dfd10839eac488",
+          "allocated_before": 16642048,
+          "allocated_after": 1363968,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt0-spatial-uniform-candidate-73567.profraw",
+          "sha256": "94fcfb990b39431e89367c69fc1fe2bc209fea8f6b92ef3ec445b6291eaa9855",
+          "allocated_before": 16642048,
+          "allocated_after": 1363968,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt1-solid-gradient-baseline-73586.profraw",
+          "sha256": "fe7891996cb70bccecafd675fc0377199c775dd1f4b4c0084b16cc72857378c7",
+          "allocated_before": 16642048,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt1-solid-gradient-candidate-73590.profraw",
+          "sha256": "69f13f9671f0789525b667104e3d65e16ef060d94464e6a3a2139750fd19f986",
+          "allocated_before": 16642048,
+          "allocated_after": 1339392,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt1-solid-uniform-baseline-73579.profraw",
+          "sha256": "8908c77de130d0297aaa846a1986bab19183029c997115ff501d58696fa6d939",
+          "allocated_before": 16642048,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt1-solid-uniform-candidate-73582.profraw",
+          "sha256": "2cc5272c29b9a97abac1b9d32245e095de537821054bc115ff9bd16163c7ba57",
+          "allocated_before": 16642048,
+          "allocated_after": 1339392,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt1-spatial-gradient-baseline-73601.profraw",
+          "sha256": "105198e2e0123fb1f6b3694ad2d30cc925b0a886169025c5aa84110ee9643cf3",
+          "allocated_before": 16642048,
+          "allocated_after": 1368064,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt1-spatial-gradient-candidate-73605.profraw",
+          "sha256": "c4517f8f41f0fa75309022b74bf8fdc5f1e8b6fbb5e0c67d39e42641fbcef3d0",
+          "allocated_before": 16642048,
+          "allocated_after": 1347584,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt1-spatial-uniform-baseline-73593.profraw",
+          "sha256": "28ea9b6dfd365c6634ed01e488364956802db4b5c04549a5de6c9768f3acace3",
+          "allocated_before": 16642048,
+          "allocated_after": 1363968,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt1-spatial-uniform-candidate-73597.profraw",
+          "sha256": "26f3cc76ada20fa2631624c8aaeffccae7615529ee7fea0556cc94f7bb38a523",
+          "allocated_before": 16642048,
+          "allocated_after": 1347584,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt2-solid-gradient-baseline-73616.profraw",
+          "sha256": "08d5903ec13467b0f8478f59baa77b0abc9763c5f8dbbaf67c2d89a421fad22e",
+          "allocated_before": 16642048,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt2-solid-gradient-candidate-73620.profraw",
+          "sha256": "e30b62a15ddfb694d6aa7a9350aea7102f49874f1c9e04963342623d7c12c196",
+          "allocated_before": 16642048,
+          "allocated_after": 1339392,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt2-solid-uniform-baseline-73609.profraw",
+          "sha256": "9b1eabe11ca28de7f02b5f60a8405de77dd124ee3472f2f7952046666f8c1799",
+          "allocated_before": 16642048,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt2-solid-uniform-candidate-73613.profraw",
+          "sha256": "42de8835f99960ef67f1291d85f366558abdeae4563a2aa174a37ffa73b36d73",
+          "allocated_before": 16642048,
+          "allocated_after": 1339392,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt2-spatial-gradient-baseline-73632.profraw",
+          "sha256": "18210f398d9f972552c89fcda3748e580ed654c36062591ce8a5fe3e67ddd364",
+          "allocated_before": 16642048,
+          "allocated_after": 1368064,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt2-spatial-gradient-candidate-73635.profraw",
+          "sha256": "a85e342cb9fc61eceee48dcc42cf7f789ad45764162f19605949b86335684a01",
+          "allocated_before": 16642048,
+          "allocated_after": 1347584,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt2-spatial-uniform-baseline-73624.profraw",
+          "sha256": "6ad913860e22baada1bd4d0751c3840922cc20ae022c8ee83a6bdc678b1df5dd",
+          "allocated_before": 16642048,
+          "allocated_after": 1363968,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt2-spatial-uniform-candidate-73628.profraw",
+          "sha256": "45140f86ce5ea5c517dc8bedd10de281664ae3c2e898a6c077a521ffa9487bec",
+          "allocated_before": 16642048,
+          "allocated_after": 1347584,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt3-solid-gradient-baseline-73738.profraw",
+          "sha256": "f38bf8ccb5a5eb62153d8f9e36475f8988ddc6cbe0b7cd449781b11bd197cc2f",
+          "allocated_before": 16642048,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt3-solid-gradient-candidate-73769.profraw",
+          "sha256": "991ab975188189451ad43b37d28268be7b5b91bd873a06e7ceb3565a1f9ae4a0",
+          "allocated_before": 16642048,
+          "allocated_after": 1339392,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt3-solid-uniform-baseline-73653.profraw",
+          "sha256": "a77219384685b11281f76d52499d0d4a715d47cea8b8b52f230c7a3fec45a856",
+          "allocated_before": 16642048,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt3-solid-uniform-candidate-73656.profraw",
+          "sha256": "08dd4d7e892dd92f19a78a25f70e13d1179f3d83828a21485749b4b5f439f6c4",
+          "allocated_before": 16642048,
+          "allocated_after": 1339392,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt3-spatial-gradient-baseline-73835.profraw",
+          "sha256": "9502a71968b1a009a384af2190242c907fa1d61121f244d3a26d8c3762e054ce",
+          "allocated_before": 16642048,
+          "allocated_after": 1368064,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt3-spatial-gradient-candidate-73840.profraw",
+          "sha256": "529ad8e58be62b32628f60de9658bfbd1c7e5e8eddf0d4c33b984f017f358f04",
+          "allocated_before": 16642048,
+          "allocated_after": 1347584,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt3-spatial-uniform-baseline-73774.profraw",
+          "sha256": "ab7a00f00af491119bcdb43f3ffc2172e48a7effe4e59056790785b60de88ae8",
+          "allocated_before": 16642048,
+          "allocated_after": 1363968,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt3-spatial-uniform-candidate-73832.profraw",
+          "sha256": "57aca8d58443c1d10b6d28a3abb7c692698b011c841e0b2c29366aa93c2f0a07",
+          "allocated_before": 16642048,
+          "allocated_after": 1347584,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt4-solid-gradient-baseline-73850.profraw",
+          "sha256": "2e3a1abdab53a01a4f6f4960649925d003188f02d4fa39cdbf63c5ccd15880a9",
+          "allocated_before": 16642048,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt4-solid-gradient-candidate-73854.profraw",
+          "sha256": "924ca2342cfeb34c35911220a958a808cb2efe1ab95d4d6c4693c51e9870ef7b",
+          "allocated_before": 16642048,
+          "allocated_after": 1339392,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt4-solid-uniform-baseline-73843.profraw",
+          "sha256": "b8119bee997078ee63aad6abdd5e4a530960046be0ff3f63eeb8257acc90677a",
+          "allocated_before": 16642048,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt4-solid-uniform-candidate-73847.profraw",
+          "sha256": "cf8fad77cfdff9c7a73df3664eded130c3a9ec80db24aca47d6f32875d034533",
+          "allocated_before": 16642048,
+          "allocated_after": 1339392,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt4-spatial-gradient-baseline-73866.profraw",
+          "sha256": "d563a7e99c0482a51c636b532e266ea6ac1333ca6eddb0a74d238782d4ba737c",
+          "allocated_before": 16642048,
+          "allocated_after": 1368064,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt4-spatial-gradient-candidate-73870.profraw",
+          "sha256": "805e65eacc4ab5a17629b1b1694fae667332343192cf7efb212c4c4c62d6223a",
+          "allocated_before": 16642048,
+          "allocated_after": 1347584,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt4-spatial-uniform-baseline-73858.profraw",
+          "sha256": "cb2c6206b6a77ae28b28357cdab85256e01acf3aa3433f259bdeadb57e99f287",
+          "allocated_before": 16642048,
+          "allocated_after": 1363968,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/native/fmt4-spatial-uniform-candidate-73862.profraw",
+          "sha256": "f9714c137d2b0a301da29335fd5388a945e19895da3ab3212cceff09017208c5",
+          "allocated_before": 16642048,
+          "allocated_after": 1347584,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/controls/mode0-gradient-solid-73876.profraw",
+          "sha256": "253328deda68139ce10378b23794f1baf75361e4b11261d4af3bd396df022973",
+          "allocated_before": 16642048,
+          "allocated_after": 1335296,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/controls/mode0-gradient-spatial-73880.profraw",
+          "sha256": "8982555635c3e9bb67bf9ab1265b212870ada8d4e626fe355852bd6833626bf7",
+          "allocated_before": 16642048,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/controls/mode0-uniform-solid-73873.profraw",
+          "sha256": "0c1eec606572f6c070c2d775bf0693d6ff01dc1fde7a74b35a1581973ec1651d",
+          "allocated_before": 16642048,
+          "allocated_after": 1335296,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/controls/mode0-uniform-spatial-73874.profraw",
+          "sha256": "e55bb995e2ac8e2084e238ca3dc5dc554f92c6ca2c40bf29bad3f00d55e75c5d",
+          "allocated_before": 16642048,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/controls/mode1-gradient-solid-73888.profraw",
+          "sha256": "30f35708fe9d17160bd8fddccf8d94c686254541044c9b5d69689ff69af8bb35",
+          "allocated_before": 16642048,
+          "allocated_after": 1335296,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/controls/mode1-gradient-spatial-73891.profraw",
+          "sha256": "9e944ef0716130b3d251a9617b6642b7b7d1800e36618a5f657b87798325028c",
+          "allocated_before": 16642048,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/controls/mode1-uniform-solid-73884.profraw",
+          "sha256": "23b21d67d2eb9f9dc81e4836b3a15ca13851fb59aa344198fccd461744edaf7b",
+          "allocated_before": 16642048,
+          "allocated_after": 1335296,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/controls/mode1-uniform-spatial-73886.profraw",
+          "sha256": "f1efb4f3564696c6f5a36f5664b383f68e136285bdf8dad8831881106d5aa1f2",
+          "allocated_before": 16642048,
+          "allocated_after": 1351680,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/controls/mode2-gradient-solid-73906.profraw",
+          "sha256": "585ab1bc01bc79b476b69308dfab024de2f17c4e1f3fb9fc2ac7f53347db4f54",
+          "allocated_before": 16642048,
+          "allocated_after": 1331200,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/controls/mode2-gradient-spatial-73908.profraw",
+          "sha256": "9f993612c36c9e7265f2ed63e8fab2dd87715202e0292e47d9bfa1201298a606",
+          "allocated_before": 16642048,
+          "allocated_after": 1347584,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/controls/mode2-uniform-solid-73896.profraw",
+          "sha256": "45f99660d12199bc932d632990f75eb8ca44b4e76e0de3fc6c7cfb4518068409",
+          "allocated_before": 16642048,
+          "allocated_after": 1331200,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/controls/mode2-uniform-spatial-73898.profraw",
+          "sha256": "19dca71b19b4da23566de86116ff8f9ae5b71da28035ee61d76913abae2217fe",
+          "allocated_before": 16642048,
+          "allocated_after": 1347584,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/guest/guest-74936.profraw",
+          "sha256": "199d794d8e55f28b850fb2027f7e0b425ed84ecf3141e59ed898ce6158d7f921",
+          "allocated_before": 16637952,
+          "allocated_after": 1617920,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm0-base0-inv0-74037.profraw",
+          "sha256": "6ca3dfc348efea119169a0ddcc7ce69adf92804c1d6fbef10521d7fc298a5cbe",
+          "allocated_before": 16637952,
+          "allocated_after": 1130496,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm0-base0-inv1-74040.profraw",
+          "sha256": "b6a6f55d4a746f1e6db34e03b0386b0d40c4bee28f10e7feb0a54406ab95aab7",
+          "allocated_before": 16637952,
+          "allocated_after": 1130496,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm0-base40000000-inv0-74041.profraw",
+          "sha256": "99d651d8831477cecedd402a69f4c3039c3f208b08592cc7b3e904d2d139f59d",
+          "allocated_before": 16637952,
+          "allocated_after": 1130496,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm0-base40000000-inv1-74042.profraw",
+          "sha256": "c40c6c609d90a899549c1705aa6b6762950f8680e6c370fad186dcc4420e0f06",
+          "allocated_before": 16637952,
+          "allocated_after": 1130496,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm0-base80000000-inv0-74404.profraw",
+          "sha256": "d4c761fb4cf6c31d1be89f4d841db7e3e137b8b23ba3d5b42bedb13c051ba8cb",
+          "allocated_before": 16637952,
+          "allocated_after": 1130496,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm0-base80000000-inv1-74716.profraw",
+          "sha256": "5a7f623498665e500b7497116b8d7660afe3d45f883f4814a0025ca5a71df227",
+          "allocated_before": 16637952,
+          "allocated_after": 1130496,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm1-base0-inv0-74814.profraw",
+          "sha256": "dafed20e40b582f719f08180b2dc00d497d6e7b8a694b2a8612b7e99774437c1",
+          "allocated_before": 16637952,
+          "allocated_after": 1134592,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm1-base0-inv1-74851.profraw",
+          "sha256": "e9465e99539890aff1e9f42fd503e8166cd10cca335ee8689ae3c1968672ba45",
+          "allocated_before": 16637952,
+          "allocated_after": 1134592,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm1-base40000000-inv0-74853.profraw",
+          "sha256": "53a46cffa9eb5f9ac4b76ff7c4f26d62c3cf2130c4c0a190e8c9f4d28339ad84",
+          "allocated_before": 16637952,
+          "allocated_after": 1134592,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm1-base40000000-inv1-74854.profraw",
+          "sha256": "ed9948e10f553a640348c9be7637dbd5bf6fc5a9b87e94b33df62512b5a6a0c9",
+          "allocated_before": 16637952,
+          "allocated_after": 1134592,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm1-base80000000-inv0-74855.profraw",
+          "sha256": "5cc0d42d1d9b2fbaa2dd51b0918b637593aff26042e1de7469188cd80ee01f66",
+          "allocated_before": 16637952,
+          "allocated_after": 1134592,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm1-base80000000-inv1-74856.profraw",
+          "sha256": "0e3ee6ec1d18185c71100d31d7a16b0885b2856790c48bab251a1223dfd97e80",
+          "allocated_before": 16637952,
+          "allocated_after": 1134592,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm2-base0-inv0-74857.profraw",
+          "sha256": "d947d0ba4a749cec71f4463671a46f38f331440366aa29f08b27e1d16dc25086",
+          "allocated_before": 16637952,
+          "allocated_after": 1134592,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm2-base0-inv1-74858.profraw",
+          "sha256": "6fe6cd45c7db4c2c717954a474226d4c4c2f8d6820412834ed2f15adfe922c07",
+          "allocated_before": 16637952,
+          "allocated_after": 1134592,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm2-base40000000-inv0-74860.profraw",
+          "sha256": "fe1c1aec2b0c1b5a5415463cb5d0d815c4fcdc953b60a75fa8d0f3026408f038",
+          "allocated_before": 16637952,
+          "allocated_after": 1134592,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm2-base40000000-inv1-74863.profraw",
+          "sha256": "38abdbee80d55c8bb6af2060b477b255548b89555b480d5fe6ab6f4a1b4e8da1",
+          "allocated_before": 16637952,
+          "allocated_after": 1134592,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm2-base80000000-inv0-74866.profraw",
+          "sha256": "b3ae690d00c789271bc3998e546a3ff8cbb4008ae5dff35f54be9d9a9d6a1b6e",
+          "allocated_before": 16637952,
+          "allocated_after": 1134592,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/upd-train64/replay/vm2-base80000000-inv1-74867.profraw",
+          "sha256": "fda8aefe460cada06da0568182bbf0a6fb8cebb96bb31be532962c9a6e931450",
+          "allocated_before": 16637952,
+          "allocated_after": 1134592,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        },
+        {
+          "path": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/profiles/replay/mesa64-75624.profraw",
+          "sha256": "0b309b57da3f4bae8c46acd5a99ca79d967a2860e14a363dfe6d43894f6a404d",
+          "allocated_before": 16650240,
+          "allocated_after": 1622016,
+          "compression_attributes": [
+            "com.apple.provenance"
+          ]
+        }
+      ],
+      "scope": "Transparent filesystem compression of this experiment own immutable raw profile inputs only. Verify every file against its recorded SHA before and after. No profile bytes or paths removed; no source/result/trace files modified. Run after timed measurements finish.",
+      "passed": true,
+      "finished": 1792205600.9901812,
+      "bytes_reclaimed": 1089015808,
+      "all_72_profile_paths_and_bytes_preserved": true
+    },
+    "scope": "Initial guest disk copy failed before boot when the filesystem filled. Preserve failed receipts; resume the original live replay. Retry the guest with a byte-verified APFS clone. Remove only unused reconstructible training binaries and the failed partial disk; preserve all source, profiles, traces and result data. Transparent compression preserves all72 raw profile paths and SHA256 hashes."
+  },
+  "host_summary": {
+    "solid64": {
+      "medians": {
+        "baseline": 0.624063333,
+        "candidate": 0.600818084
+      },
+      "ratio": 0.9627517789127982,
+      "time_saved_percent": 3.7248221087201827
+    },
+    "spatial64": {
+      "medians": {
+        "baseline": 0.765787542,
+        "candidate": 0.728353292
+      },
+      "ratio": 0.9511166636346247,
+      "time_saved_percent": 4.888333636537534
+    },
+    "large256": {
+      "medians": {
+        "baseline": 11.872122083,
+        "candidate": 11.287640834
+      },
+      "ratio": 0.9507685951244609,
+      "time_saved_percent": 4.923140487553912
+    },
+    "mesa64": {
+      "medians": {
+        "baseline": 24.30689475,
+        "candidate": 23.547000541
+      },
+      "ratio": 0.9687375036253859,
+      "time_saved_percent": 3.126249637461409
+    }
+  },
+  "host_samples": [
+    {
+      "workload": "solid64",
+      "variant": "baseline",
+      "index": 0,
+      "result": {
+        "passed": true,
+        "ticks": 8823,
+        "explicit_ticks": 0,
+        "seconds": 0.626225375,
+        "commits": 1388084,
+        "holds": 8185941,
+        "holds_wrote": 1397119,
+        "reads": 898,
+        "writes": 5834,
+        "read_bytes": 57472,
+        "write_bytes": 43152,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "solid64",
+      "variant": "candidate",
+      "index": 1,
+      "result": {
+        "passed": true,
+        "ticks": 8823,
+        "explicit_ticks": 0,
+        "seconds": 0.604761708,
+        "commits": 1388084,
+        "holds": 8185941,
+        "holds_wrote": 1397119,
+        "reads": 898,
+        "writes": 5834,
+        "read_bytes": 57472,
+        "write_bytes": 43152,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "solid64",
+      "variant": "candidate",
+      "index": 2,
+      "result": {
+        "passed": true,
+        "ticks": 8823,
+        "explicit_ticks": 0,
+        "seconds": 0.5962935,
+        "commits": 1388084,
+        "holds": 8185941,
+        "holds_wrote": 1397119,
+        "reads": 898,
+        "writes": 5834,
+        "read_bytes": 57472,
+        "write_bytes": 43152,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "solid64",
+      "variant": "baseline",
+      "index": 3,
+      "result": {
+        "passed": true,
+        "ticks": 8823,
+        "explicit_ticks": 0,
+        "seconds": 0.623608833,
+        "commits": 1388084,
+        "holds": 8185941,
+        "holds_wrote": 1397119,
+        "reads": 898,
+        "writes": 5834,
+        "read_bytes": 57472,
+        "write_bytes": 43152,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "solid64",
+      "variant": "baseline",
+      "index": 4,
+      "result": {
+        "passed": true,
+        "ticks": 8823,
+        "explicit_ticks": 0,
+        "seconds": 0.624063333,
+        "commits": 1388084,
+        "holds": 8185941,
+        "holds_wrote": 1397119,
+        "reads": 898,
+        "writes": 5834,
+        "read_bytes": 57472,
+        "write_bytes": 43152,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "solid64",
+      "variant": "candidate",
+      "index": 5,
+      "result": {
+        "passed": true,
+        "ticks": 8823,
+        "explicit_ticks": 0,
+        "seconds": 0.600818084,
+        "commits": 1388084,
+        "holds": 8185941,
+        "holds_wrote": 1397119,
+        "reads": 898,
+        "writes": 5834,
+        "read_bytes": 57472,
+        "write_bytes": 43152,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "spatial64",
+      "variant": "baseline",
+      "index": 0,
+      "result": {
+        "passed": true,
+        "ticks": 11304,
+        "explicit_ticks": 0,
+        "seconds": 0.761280375,
+        "commits": 1610429,
+        "holds": 9726318,
+        "holds_wrote": 1619629,
+        "reads": 1113,
+        "writes": 5812,
+        "read_bytes": 71232,
+        "write_bytes": 43152,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "spatial64",
+      "variant": "candidate",
+      "index": 1,
+      "result": {
+        "passed": true,
+        "ticks": 11304,
+        "explicit_ticks": 0,
+        "seconds": 0.728353292,
+        "commits": 1610429,
+        "holds": 9726318,
+        "holds_wrote": 1619629,
+        "reads": 1113,
+        "writes": 5812,
+        "read_bytes": 71232,
+        "write_bytes": 43152,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "spatial64",
+      "variant": "candidate",
+      "index": 2,
+      "result": {
+        "passed": true,
+        "ticks": 11304,
+        "explicit_ticks": 0,
+        "seconds": 0.725354125,
+        "commits": 1610429,
+        "holds": 9726318,
+        "holds_wrote": 1619629,
+        "reads": 1113,
+        "writes": 5812,
+        "read_bytes": 71232,
+        "write_bytes": 43152,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "spatial64",
+      "variant": "baseline",
+      "index": 3,
+      "result": {
+        "passed": true,
+        "ticks": 11304,
+        "explicit_ticks": 0,
+        "seconds": 0.765787542,
+        "commits": 1610429,
+        "holds": 9726318,
+        "holds_wrote": 1619629,
+        "reads": 1113,
+        "writes": 5812,
+        "read_bytes": 71232,
+        "write_bytes": 43152,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "spatial64",
+      "variant": "baseline",
+      "index": 4,
+      "result": {
+        "passed": true,
+        "ticks": 11304,
+        "explicit_ticks": 0,
+        "seconds": 0.766046333,
+        "commits": 1610429,
+        "holds": 9726318,
+        "holds_wrote": 1619629,
+        "reads": 1113,
+        "writes": 5812,
+        "read_bytes": 71232,
+        "write_bytes": 43152,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "spatial64",
+      "variant": "candidate",
+      "index": 5,
+      "result": {
+        "passed": true,
+        "ticks": 11304,
+        "explicit_ticks": 0,
+        "seconds": 0.738476167,
+        "commits": 1610429,
+        "holds": 9726318,
+        "holds_wrote": 1619629,
+        "reads": 1113,
+        "writes": 5812,
+        "read_bytes": 71232,
+        "write_bytes": 43152,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "large256",
+      "variant": "baseline",
+      "index": 0,
+      "result": {
+        "passed": true,
+        "ticks": 129786,
+        "explicit_ticks": 0,
+        "seconds": 11.872122083,
+        "commits": 24230299,
+        "holds": 145305253,
+        "holds_wrote": 24368676,
+        "reads": 15716,
+        "writes": 88216,
+        "read_bytes": 1005824,
+        "write_bytes": 663696,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "large256",
+      "variant": "candidate",
+      "index": 1,
+      "result": {
+        "passed": true,
+        "ticks": 129786,
+        "explicit_ticks": 0,
+        "seconds": 11.287640834,
+        "commits": 24230299,
+        "holds": 145305253,
+        "holds_wrote": 24368676,
+        "reads": 15716,
+        "writes": 88216,
+        "read_bytes": 1005824,
+        "write_bytes": 663696,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "large256",
+      "variant": "candidate",
+      "index": 2,
+      "result": {
+        "passed": true,
+        "ticks": 129786,
+        "explicit_ticks": 0,
+        "seconds": 11.399721042,
+        "commits": 24230299,
+        "holds": 145305253,
+        "holds_wrote": 24368676,
+        "reads": 15716,
+        "writes": 88216,
+        "read_bytes": 1005824,
+        "write_bytes": 663696,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "large256",
+      "variant": "baseline",
+      "index": 3,
+      "result": {
+        "passed": true,
+        "ticks": 129786,
+        "explicit_ticks": 0,
+        "seconds": 11.931860166,
+        "commits": 24230299,
+        "holds": 145305253,
+        "holds_wrote": 24368676,
+        "reads": 15716,
+        "writes": 88216,
+        "read_bytes": 1005824,
+        "write_bytes": 663696,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "large256",
+      "variant": "baseline",
+      "index": 4,
+      "result": {
+        "passed": true,
+        "ticks": 129786,
+        "explicit_ticks": 0,
+        "seconds": 11.83473375,
+        "commits": 24230299,
+        "holds": 145305253,
+        "holds_wrote": 24368676,
+        "reads": 15716,
+        "writes": 88216,
+        "read_bytes": 1005824,
+        "write_bytes": 663696,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "large256",
+      "variant": "candidate",
+      "index": 5,
+      "result": {
+        "passed": true,
+        "ticks": 129786,
+        "explicit_ticks": 0,
+        "seconds": 11.272662459,
+        "commits": 24230299,
+        "holds": 145305253,
+        "holds_wrote": 24368676,
+        "reads": 15716,
+        "writes": 88216,
+        "read_bytes": 1005824,
+        "write_bytes": 663696,
+        "faults": 0,
+        "completion": 34395,
+        "shader_config": 67635216
+      },
+      "complete_RAM_and_all_counters_exact": true
+    },
+    {
+      "workload": "mesa64",
+      "variant": "baseline",
+      "index": 0,
+      "result": {
+        "calls": 46936,
+        "ticks": 3619433,
+        "commits": 53609559,
+        "holds": 396954443,
+        "dma_reads": 42352,
+        "dma_writes": 481479,
+        "dma_bytes": 6301000,
+        "seconds": 24.395605625,
+        "truncated_tail": false,
+        "warmup_calls": 0,
+        "sample": 0
+      },
+      "complete_strict_trace_and_all_counters_exact": true
+    },
+    {
+      "workload": "mesa64",
+      "variant": "candidate",
+      "index": 1,
+      "result": {
+        "calls": 46936,
+        "ticks": 3619433,
+        "commits": 53609559,
+        "holds": 396954443,
+        "dma_reads": 42352,
+        "dma_writes": 481479,
+        "dma_bytes": 6301000,
+        "seconds": 23.506664208,
+        "truncated_tail": false,
+        "warmup_calls": 0,
+        "sample": 0
+      },
+      "complete_strict_trace_and_all_counters_exact": true
+    },
+    {
+      "workload": "mesa64",
+      "variant": "candidate",
+      "index": 2,
+      "result": {
+        "calls": 46936,
+        "ticks": 3619433,
+        "commits": 53609559,
+        "holds": 396954443,
+        "dma_reads": 42352,
+        "dma_writes": 481479,
+        "dma_bytes": 6301000,
+        "seconds": 23.763706166,
+        "truncated_tail": false,
+        "warmup_calls": 0,
+        "sample": 0
+      },
+      "complete_strict_trace_and_all_counters_exact": true
+    },
+    {
+      "workload": "mesa64",
+      "variant": "baseline",
+      "index": 3,
+      "result": {
+        "calls": 46936,
+        "ticks": 3619433,
+        "commits": 53609559,
+        "holds": 396954443,
+        "dma_reads": 42352,
+        "dma_writes": 481479,
+        "dma_bytes": 6301000,
+        "seconds": 24.30689475,
+        "truncated_tail": false,
+        "warmup_calls": 0,
+        "sample": 0
+      },
+      "complete_strict_trace_and_all_counters_exact": true
+    },
+    {
+      "workload": "mesa64",
+      "variant": "baseline",
+      "index": 4,
+      "result": {
+        "calls": 46936,
+        "ticks": 3619433,
+        "commits": 53609559,
+        "holds": 396954443,
+        "dma_reads": 42352,
+        "dma_writes": 481479,
+        "dma_bytes": 6301000,
+        "seconds": 24.2089675,
+        "truncated_tail": false,
+        "warmup_calls": 0,
+        "sample": 0
+      },
+      "complete_strict_trace_and_all_counters_exact": true
+    },
+    {
+      "workload": "mesa64",
+      "variant": "candidate",
+      "index": 5,
+      "result": {
+        "calls": 46936,
+        "ticks": 3619433,
+        "commits": 53609559,
+        "holds": 396954443,
+        "dma_reads": 42352,
+        "dma_writes": 481479,
+        "dma_bytes": 6301000,
+        "seconds": 23.547000541,
+        "truncated_tail": false,
+        "warmup_calls": 0,
+        "sample": 0
+      },
+      "complete_strict_trace_and_all_counters_exact": true
+    }
+  ],
+  "idle": {
+    "pid": 82119,
+    "started": 1792205051.228817,
+    "stage": "terminal",
+    "samples": [
+      {
+        "variant": "baseline",
+        "index": 0,
+        "result": {
+          "ticks": 10000000,
+          "seconds": 0.496034625,
+          "commits": 0,
+          "holds": 0,
+          "holds_wrote": 0,
+          "dma": 0,
+          "shader_config": 67635216
+        }
+      },
+      {
+        "variant": "candidate",
+        "index": 1,
+        "result": {
+          "ticks": 10000000,
+          "seconds": 0.494308209,
+          "commits": 0,
+          "holds": 0,
+          "holds_wrote": 0,
+          "dma": 0,
+          "shader_config": 67635216
+        }
+      },
+      {
+        "variant": "candidate",
+        "index": 2,
+        "result": {
+          "ticks": 10000000,
+          "seconds": 0.489432917,
+          "commits": 0,
+          "holds": 0,
+          "holds_wrote": 0,
+          "dma": 0,
+          "shader_config": 67635216
+        }
+      },
+      {
+        "variant": "baseline",
+        "index": 3,
+        "result": {
+          "ticks": 10000000,
+          "seconds": 0.474484834,
+          "commits": 0,
+          "holds": 0,
+          "holds_wrote": 0,
+          "dma": 0,
+          "shader_config": 67635216
+        }
+      },
+      {
+        "variant": "baseline",
+        "index": 4,
+        "result": {
+          "ticks": 10000000,
+          "seconds": 0.484279333,
+          "commits": 0,
+          "holds": 0,
+          "holds_wrote": 0,
+          "dma": 0,
+          "shader_config": 67635216
+        }
+      },
+      {
+        "variant": "candidate",
+        "index": 5,
+        "result": {
+          "ticks": 10000000,
+          "seconds": 0.507984125,
+          "commits": 0,
+          "holds": 0,
+          "holds_wrote": 0,
+          "dma": 0,
+          "shader_config": 67635216
+        }
+      }
+    ],
+    "scope": "Matched selected main versus uniform dispatcher, exactly10million idle ticks per freshprocess, three balanced samples each. Start after all full640 functional jobs end to avoid contention. Require zero DMA, commits and holds.",
+    "passed": true,
+    "finished": 1792205535.774495,
+    "medians": {
+      "baseline": 0.484279333,
+      "candidate": 0.494308209
+    },
+    "MHz": {
+      "baseline": 20.649239640379204,
+      "candidate": 20.230293201543816
+    },
+    "candidate_over_baseline": 1.0207088663847648
+  },
+  "visual_review": {
+    "passed": true,
+    "reviewed_at": 1792205631.897585,
+    "images": {
+      "gtk-smoke-scanout.ppm": "b1f405826231a84399c0cb762fb7fa807bb37fd10cc6c6b34d3973edfd179f5f",
+      "gtk-smoke-verified.ppm": "b1f405826231a84399c0cb762fb7fa807bb37fd10cc6c6b34d3973edfd179f5f"
+    },
+    "observation": "Manually viewed converted PNGs. Initial640x480 Debian desktop shows clean OpenGPU GTK smoke window with green panel; verified redraw shows orange panel. Window frame, labels, taskbar and wallpaper are intact."
+  },
+  "limits": [
+    "Balanced native and fixed actualcurrentMesa64 trace measurements establish gains only for these same-work workloads.",
+    "Full640 strict replay and actualguest run concurrently as functional gates; their elapsed times are not paired backend speed comparisons.",
+    "RTL task clocks, DMA traffic and all logical behavior remain unchanged. This is host-runtime optimization.",
+    "Default/installed QEMU and the canonical README image remain unchanged."
+  ],
+  "artifacts": {
+    "main_baseline_archive_sha256": "69776a3531c9332a83293b6abcf7e478dda333700ee75427e92a2fcfe120418f",
+    "candidate_archive_sha256": "683513ffa7de88c2b6cbabdc3a8122d4deb5fe52f6c656274267a1b12e07a4f0",
+    "candidate_dispatcher_object_sha256": "7d5ec78613ca67a8fc2084c41d83310b85537b9842199ed8dc9ec91febbc6014",
+    "dispatcher_profile_sha256": "716fd4fc4e4ca18b3176ef6e9cb7d5e0881849b544c42fa7d015c5827af6458e",
+    "header_sha256": "822ea28949824cff47057707e46f2ce5c1cd3453892a8ff82266bc8a87f00dd9",
+    "current64_trace_sha256": "00cd8d66437ea33734ef577bbbb00b57d01681ad24f8f49b495d58bdcea1d252",
+    "full640_trace_sha256": "b2de20471eef4ed84ce25b4394a7cbb07bbe370a85c0c7962f51d09b36d3d523",
+    "candidate_qemu": "/Users/duckdonald/workspace/gpu/.artifacts/shared-cu/uniform-pass-dispatch-native/qemu-optimized-trace",
+    "candidate_qemu_sha256": "4fc63e59accb7caf2e4e2c8d552ee50981818cc961f1139e69eb39ff9a7efdcd"
+  }
+}
