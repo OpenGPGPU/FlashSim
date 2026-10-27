@@ -9,7 +9,7 @@ go/no-go; `GpuHostAxi` / `GpuHostSystemAxi` are the QEMU/ARTI control tops.
 | Constraint | Rule |
 |---|---|
 | Gold model | Same Verilog, same stimulus, same per-cycle `dout` as Verilator |
-| Speed (unit) | Low-activity ≥ 2× **1-thread** Verilator; busy ≥ 0.8×. Also report `--threads 4`. |
+| Speed (unit) | Low-activity ≥ 2× **1-thread** Verilator; busy ≥ 0.8×. Also report `--threads 8`. |
 | Speed (ARTI) | Real QEMU/Linux GPU paths (bind, sparse MMIO, DRM jobs) must beat the Verilator-linked QEMU on **wall clock**. Microbench-only wins do not count. |
 | CIRCT | Official release binaries, not a git submodule |
 
@@ -114,6 +114,10 @@ Measured 2026-09-17, quiet machine, `ROUNDS=3`,
 | FlashSim | **6.3 s** | 8 / 6 / 5 s | 4.57 / 3.38 / 3.55 s |
 | Verilator-linked QEMU | **19.0 s** | 19 / 19 / 19 s | 11.22 / 11.61 / 11.02 s |
 | Speedup | **3.0×** | (VL wall / FS wall) | |
+
+The 2026-10-27 unit-suite refresh does not replace this probe. The local
+FlashSim QEMU binary is from 2026-10-15 and the Verilator QEMU binary is from
+2026-10-14, so rerunning them would not measure this tree.
 
 First FlashSim round is often cold (I-cache / codesign); warm rounds land
 around 5–6 s wall / ~3.4–3.6 s guest (~3.2–3.8×). Re-run `ROUNDS=3` before
@@ -591,9 +595,9 @@ python3 -m flashsim arti-model rtl/gpu/host-axi/GpuHostAxi.sv -o build/GpuHostAx
 `third_party/circt-release/`). This generates circuits, compiles FlashSim and
 Verilator, diffs 4096 cycles, then measures 1e6 cycles. The PASS gate is vs
 1-thread Verilator (QEMU in-process eval is single-thread). The summary also
-builds Verilator `--threads 4`, which is how people usually run a standalone
-sim. More threads is not always faster; on GpuSystem `--threads 8` was slower
-than 1 thread.
+builds Verilator `--threads 8`. More threads is not always faster: on the
+2026-10-27 run, `GpuSystem` at 8 threads was slower than one thread
+(0.071 MHz versus 0.115 MHz).
 
 Skip / activity benches:
 
@@ -633,55 +637,47 @@ GPU slices from `rtl/gpu/` (Chisel → SystemVerilog, still compared to Verilato
 must not be slower than 0.8× 1-thread. All must match Verilator at the dumped
 ports.
 
-Measured on this machine 2026-09-17 (CIRCT `firtool-1.158.0`, Verilator 5.050,
-Apple clang `-O3`, 12 stages × 8 mix rounds, 1e6 cycles, ports match for 4096
-cycles). GPU rows include vs 4-thread Verilator:
+Measured 2026-10-27 on an Apple M4 Max (14 cores), CIRCT `firtool-1.158.0`,
+Verilator 5.050, Apple clang 16 `-O3`, 12 stages × 8 mix rounds, 1e6 cycles.
+Ports match for 4096 cycles. Every bench passed the 1-thread gate.
+`python3 -m flashsim experiment --stages 12 --rounds 8` prints the MHz behind
+these ratios. On the small benches Verilator `--threads 8` is slower than one
+thread, so that column is thread overhead there.
 
-| bench | vs vlt 1T | vs vlt 4T | note |
-|---|---|---|---|
-| gated_pipe | **5.1×** | (tiny; MT overhead) | mix only runs when valid |
-| sticky_input | **5.7×** | (tiny; MT overhead) | mix skipped while `din` unchanged |
-| busy_alu | **1.2×** | | every mixer live every cycle |
-| counter | **14×** | | tiny DUT |
-| sync_fifo | **3.0×** | | idle cycles skip the write cone |
-| cmp_acc | **3.7×** | | compares and gated updates |
-| hier_pipe | **14×** | | inlined `add1` instance |
-| mini_rf | **10×** | | sticky reads skip the file |
-| DrawContextFifo | **1.4×** | | GPU slice; gated enq/retire |
-| TriangleRasterizer | **2.4×** | | GPU slice; idle setup vs scan |
-| WarpScheduler | **2.4×** | | SIMT issue idle when no eligible warp |
-| GpuCommandRouter | **1.1×** | | packed queues; skip while engines idle |
-| BankedSharedMemory | **1.3×** | | 4-lane 256 B SRAM + atomics |
-| GpuFrontend | **1.5×** | | launch / fetch / decode; gated payload cones |
-| InstructionCache | **1.0×** | | 16×2 fetch cache; 1-bit valid bits → `if` |
-| FrontendICache | **1.7×** | | frontend fetch wired to 16×2 I$ |
-| ScalarBackend | **3.6×** | | integer execute / RF / scoreboard; wide ports idle |
-| VectorBackend | **38×** | | RVV execute / vector RF / ALUs; memory idle |
-| FpuBackend | **11×** | | scalar FP32 issue / FMA / exact; wide ports idle |
-| FrontendScalar | **11×** | | frontend+I$ closed through scalar ALU/redirect |
-| FrontendScalarFpu | **16×** | | same loop plus scalar FP32 FMA |
-| Gpu | **87×** | | closed CU; idle after warp finish |
-| GpuSystem | **77×** | **364×** | 1 CU + L2 + DMA; FS ~5.5 MHz vs 1T 0.07 / 4T 0.015 MHz |
-| GpuHostAxi | **17×** | **144×** | AXI ID read, then idle; FS ~32 MHz vs 1T 1.8 / 4T 0.22 MHz |
+| bench | vs vlt 1T | vs vlt 8T | flash MHz | vlt 1T MHz |
+|---|---:|---:|---:|---:|
+| gated_pipe | **4.38×** | 374.06× | 57.979 | 13.225 |
+| sticky_input | **5.71×** | 338.38× | 129.262 | 22.645 |
+| busy_alu | **1.21×** | 61.17× | 17.679 | 14.665 |
+| counter | **25.65×** | 38.29× | 790.331 | 30.808 |
+| sync_fifo | **2.89×** | 63.13× | 80.112 | 27.715 |
+| cmp_acc | **3.35×** | 6.42× | 103.623 | 30.895 |
+| hier_pipe | **23.33×** | 43.56× | 711.280 | 30.483 |
+| mini_rf | **7.66×** | 64.33× | 169.111 | 22.073 |
+| DrawContextFifo | **0.91×** | 42.15× | 10.918 | 12.047 |
+| TriangleRasterizer | **2.58×** | 291.13× | 35.518 | 13.750 |
+| WarpScheduler | **2.34×** | 113.51× | 31.214 | 13.349 |
+| GpuCommandRouter | **1.06×** | 55.23× | 6.296 | 5.954 |
+| BankedSharedMemory | **1.12×** | 137.33× | 8.652 | 7.747 |
+| GpuFrontend | **1.60×** | 64.25× | 12.529 | 7.816 |
+| InstructionCache | **1.18×** | 194.10× | 13.781 | 11.712 |
+| FrontendICache | **1.83×** | 83.85× | 6.876 | 3.749 |
+| ScalarBackend | **3.41×** | 84.91× | 9.000 | 2.640 |
+| VectorBackend | **80.26×** | 357.66× | 36.839 | 0.459 |
+| FpuBackend | **29.74×** | 649.27× | 64.278 | 2.161 |
+| FrontendScalar | **23.14×** | 1244.63× | 83.390 | 3.603 |
+| FrontendScalarFpu | **48.96×** | 615.78× | 71.430 | 1.459 |
+| Gpu | **363.89×** | 595.10× | 57.130 | 0.157 |
+| GpuSystem | **89.67×** | 145.24× | 10.312 | 0.115 |
+| GpuHostAxi | **56.61×** | 916.17× | 105.360 | 1.861 |
 
-Absolute MHz depends on CU count, generated configuration and active logic per
-tick. These low-activity system tests benefit from skipping completed or idle
-engines. For desktop workloads, report the current model's active rendering,
-idle and complete-trace rates separately, together with elapsed time and tick
-counts. Measure backend speedups with the same RTL and stimulus on both sides.
-
-Those 2026-09-17 numbers predate the O(dirty) dirty-flag reset. Re-measured
-2026-09-28 on the same benches (6 stages × 4 mix rounds, so absolute MHz is not
-comparable run-to-run — use the A/B ratios in "Recent GPU emit/opt wins"):
-
-| bench | vs vlt 1T | vs vlt 4T |
-|---|---|---|
-| GpuFrontend | **1.28×** | 15.6× |
-| InstructionCache | **1.07×** | 12.7× |
-| VectorBackend | **38.0×** | 61.9× |
-| Gpu | **94.7×** | 62.3× |
-| GpuSystem | **56.2×** | 67.4× |
-| GpuHostAxi | **20.4×** | 230.9× |
+`DrawContextFifo` is the closest bench to the 0.8× gate. `GpuSystem` at 8
+threads ran at 0.071 MHz. Absolute MHz depends on CU count, generated
+configuration and active logic per tick. These low-activity system tests
+benefit from skipping completed or idle engines. For desktop workloads, report
+the current model's active rendering, idle and complete-trace rates separately,
+together with elapsed time and tick counts. Measure backend speedups with the
+same RTL and stimulus on both sides.
 
 ```bash
 python3 -m flashsim compile build/benches/counter.v -o /tmp/counter.h
