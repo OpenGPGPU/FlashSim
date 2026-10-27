@@ -24,6 +24,18 @@ so idle ticks do not memcpy, re-clear, or scan hundreds of skip flags. Do
 not fork CIRCT unless a pass must land in-tree. `--frontend native` is a
 Verilog-subset fallback when CIRCT is not installed.
 
+CIRCT still emits a terminator after it removes every result of a module. The
+frontend accepts a bare `hw.output` when that module has no output ports, and a
+child with no results written as `hw.instance "name" @Callee(...) -> ()`.
+`GpuHostSystemAxi` contains both: `TexturedFragStage` keeps clock, reset, the
+three inverse-W inputs, and ready, and `RenderPipeline` instantiates it with an
+empty result list. A bare `hw.output` on a module that still declares output
+ports is an error. Cover the three cases with:
+
+```bash
+python3 -m pytest flashsim/test_circt_empty_output.py
+```
+
 Large `GpuHostSystemAxi` models are emitted as C++ method shards and compiled
 in parallel. Multi-CU RTL is detected from the generated source and uses a
 32-way split by default; set `FLASHSIM_DUT_SHARDS` to pin the split count for
