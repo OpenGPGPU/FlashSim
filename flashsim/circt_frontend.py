@@ -66,10 +66,11 @@ _AGG = re.compile(
     r"%(\S+)\s*=\s*hw\.aggregate_constant\s+\[.*\]\s*:\s*!hw\.array<(\d+)xi(\d+)>\s*$"
 )
 _INSTANCE = re.compile(
-    r"((?:%\S+\s*,\s*)*%\S+)\s*=\s*hw\.instance\s+\"([^\"]+)\"\s+@"
+    r"(?:((?:%\S+\s*,\s*)*%\S+)\s*=\s*)?hw\.instance\s+\"([^\"]+)\"\s+@"
     r"([A-Za-z_][A-Za-z0-9_]*)\((.*)\)\s*->\s*\((.*)\)"
 )
-_OUTPUT = re.compile(r"hw\.output\s+(.+)$")
+# A module with no results still ends in `hw.output`. Operand-less is legal.
+_OUTPUT = re.compile(r"hw\.output(?:\s+(.+))?$")
 _TO_CLOCK = re.compile(r"%(\S+)\s*=\s*seq\.to_clock\s+%(\S+)")
 _SSA = re.compile(r"%([A-Za-z0-9_.:-]+)")
 _ARRAY_TY = re.compile(r"!hw\.array<(\d+)xi(\d+)>")
@@ -223,6 +224,7 @@ def _lower_module(raw: _ParsedMod) -> Module:
         "clk",
     )
     output_srcs: list[str] = []
+    saw_output = False
 
     for raw_line in raw.body.splitlines():
         line = raw_line.strip().rstrip(",")
@@ -350,7 +352,7 @@ def _lower_module(raw: _ParsedMod) -> Module:
             assigns.append(Assign(ident, ArrayZeros(depth, width)))
             continue
         if m := _INSTANCE.match(line):
-            results = [ssa_name(tok) for tok in _SSA.findall(m.group(1))]
+            results = [ssa_name(tok) for tok in _SSA.findall(m.group(1) or "")]
             inst = m.group(2)
             callee = m.group(3)
             inputs: dict[str, str] = {}
@@ -361,13 +363,15 @@ def _lower_module(raw: _ParsedMod) -> Module:
             instances.append((results, inst, callee, inputs))
             continue
         if m := _OUTPUT.match(line):
-            output_srcs = [ssa_name(tok) for tok in _SSA.findall(m.group(1))]
+            saw_output = True
+            payload = m.group(1)
+            output_srcs = [ssa_name(tok) for tok in _SSA.findall(payload)] if payload else []
             continue
         raise CirctError(f"unsupported CIRCT op: {line}")
 
     body = [NbAssign(reg, Id(nxt)) for reg, nxt, _, _ in regs]
     out_ports = [p for p in ports if signals[p].kind == "output"]
-    if output_srcs:
+    if saw_output:
         if len(output_srcs) != len(out_ports):
             raise CirctError(
                 f"hw.output arity {len(output_srcs)} != output ports {len(out_ports)}"
