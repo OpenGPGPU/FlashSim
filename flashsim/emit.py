@@ -4306,15 +4306,20 @@ def _emit_array_assign(
     if isinstance(expr, ArrayInject):
         _emit_array_assign(dest, expr.arr, cached, sigs, lines, indent, scratch)
         _emit_demand(expr.index, cached, lines, indent)
-        _emit_demand(expr.value, cached, lines, indent)
         depth = _array_depth(expr, sigs)
         idx = emit_expr(expr.index, sigs)
         idx = _bounded_index(idx, depth)
         val_w = _expr_width(expr.value, sigs)
-        val = emit_expr(expr.value, sigs)
         if is_wide(val_w):
+            # emit_expr keeps a value in unsigned __int128. A slot wider than
+            # 128 bits is a limb array, so the source has to be one too.
+            val = _materialize_limbs(
+                expr.value, val_w, cached, sigs, lines, indent, scratch
+            )
             lines.append(f"{sp}memcpy({dest}[{idx}], {val}, sizeof({dest}[{idx}]));")
         else:
+            _emit_demand(expr.value, cached, lines, indent)
+            val = emit_expr(expr.value, sigs)
             lines.append(f"{sp}{dest}[{idx}] = {val};")
         return
     raise TypeError(f"array assign {type(expr)}")
