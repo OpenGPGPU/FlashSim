@@ -42,7 +42,9 @@ modules only until their last reachable instance, reducing intermediate memory
 without merging instance state. Single-use expression inlining tracks its
 dependency graph and expands substitutions iteratively; rewrites reuse
 unchanged immutable branches. Generated signal widths use a shared lookup
-instead of repeatedly copying large tables. Optional AND reassociation leaves
+instead of repeatedly copying large tables. Eager dependency ordering sorts
+contents only when multiple sets have the same size, preserving pass IDs and
+generated C++ while avoiding unused lexicographic keys. Optional AND reassociation leaves
 excessively deep expressions unchanged if hashing or ordering reaches Python's
 recursion limit. Cone selection and sequential branch hoisting reuse nested
 statement cones with bounded caches. Deep priority muxes keep later condition
@@ -55,7 +57,8 @@ python3 -m pytest flashsim/test_circt_array_create.py \
   flashsim/test_circt_output_register.py flashsim/test_circt_hierarchy_reuse.py \
   flashsim/test_ir_structural_sharing.py flashsim/test_opt_deep_literals.py \
   flashsim/test_opt_inline_worklist.py flashsim/test_opt_signal_lookup.py \
-  flashsim/test_emit_cone_memo.py flashsim/test_emit_deep_priority.py \
+  flashsim/test_emit_cone_memo.py flashsim/test_eager_leaf_order.py \
+  flashsim/test_emit_deep_priority.py \
   flashsim/test_emit_temp_cache.py flashsim/test_emit_page_indices.py \
   flashsim/test_emit_commit_helpers.py flashsim/test_commit_blocks.py \
   flashsim/test_compile_options.py flashsim/test_build_scheduling.py \

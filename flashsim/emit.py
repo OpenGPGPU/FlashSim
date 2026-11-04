@@ -1030,6 +1030,20 @@ _EAGER_CHUNK = 1024
 _EAGER_SPLIT = os.environ.get("FLASHSIM_EAGER_SPLIT", "1") != "0"
 
 
+def _ordered_leaf_sets(leaf_sets):
+    """Order by (size, sorted contents) without sorting singleton-size keys."""
+    by_size = defaultdict(list)
+    for leaves in leaf_sets:
+        by_size[len(leaves)].append(leaves)
+    ordered = []
+    for size in sorted(by_size):
+        group = by_size[size]
+        if len(group) > 1:
+            group.sort(key=sorted)
+        ordered.extend(group)
+    return ordered
+
+
 def _eager_regions(
     cached: set[str],
     cdeps: dict[str, list[str]],
@@ -1135,7 +1149,7 @@ def _eager_regions(
                 by_leaves[frozenset(wire_deps[w])].append(w)
             groups = [
                 by_leaves[k]
-                for k in sorted(by_leaves, key=lambda s: (len(s), sorted(s)))
+                for k in _ordered_leaf_sets(by_leaves)
             ]
         for group in groups:
             rid = len(regions)
