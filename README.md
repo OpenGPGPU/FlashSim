@@ -40,16 +40,17 @@ The CIRCT frontend also lowers integer `hw.array_create` values and registered
 outputs whose SSA names match their ports. Flattening retains reusable child
 modules only until their last reachable instance, reducing intermediate memory
 without merging instance state. Single-use expression inlining tracks its
-dependency graph and expands substitutions once; rewrites reuse unchanged
-immutable branches. Optional AND reassociation leaves excessively deep
-expressions unchanged if hashing or ordering reaches Python's recursion limit.
-Exercise these cases with:
+dependency graph and expands substitutions iteratively; rewrites reuse
+unchanged immutable branches. Generated signal widths use a shared lookup
+instead of repeatedly copying large tables. Optional AND reassociation leaves
+excessively deep expressions unchanged if hashing or ordering reaches Python's
+recursion limit. Exercise these cases with:
 
 ```bash
 python3 -m pytest flashsim/test_circt_array_create.py \
   flashsim/test_circt_output_register.py flashsim/test_circt_hierarchy_reuse.py \
   flashsim/test_ir_structural_sharing.py flashsim/test_opt_deep_literals.py \
-  flashsim/test_opt_inline_worklist.py
+  flashsim/test_opt_inline_worklist.py flashsim/test_opt_signal_lookup.py
 ```
 
 The CIRCT source discovery skips `verification/` and
