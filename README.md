@@ -41,7 +41,8 @@ outputs whose SSA names match their ports. Flattening retains reusable child
 modules only until their last reachable instance, reducing intermediate memory
 without merging instance state. Expression rewrites reuse unchanged immutable
 branches; optional AND reassociation leaves excessively deep expressions
-unchanged if they cannot be hashed safely. Exercise these cases with:
+unchanged if hashing or ordering reaches Python's recursion limit. Exercise
+these cases with:
 
 ```bash
 python3 -m pytest flashsim/test_circt_array_create.py \

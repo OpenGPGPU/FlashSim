@@ -1086,7 +1086,12 @@ def _reassoc_and_chains(
         s = chains.get(n)
         if s is None:
             continue
-        lits = sorted(s, key=lambda e: (-freq[e], repr(e)))
+        try:
+            lits = sorted(s, key=lambda e: (-freq[e], repr(e)))
+        except RecursionError:
+            # The deterministic tie-breaker's repr can reach its recursion
+            # limit before hashing does. This chain is safe to leave as-is.
+            continue
         stem = n[: n.rfind("_t")] if re.search(r"_t\d+$", n) else n
         out[n] = BinOp("&", prefix(lits[:-1], stem), lits[-1])
     return out
