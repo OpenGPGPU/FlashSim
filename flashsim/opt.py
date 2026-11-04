@@ -11,7 +11,8 @@ from __future__ import annotations
 import os
 import re
 import sys
-from collections import Counter, deque
+from collections import ChainMap, Counter, deque
+from collections.abc import Mapping
 
 from flashsim.ir import (
     AlwaysFF,
@@ -140,12 +141,7 @@ def optimize(mod: Module) -> Module:
     new_sigs: dict[str, Signal] = {
         n: sigs[n] for n in sorted(keep | referred) if n in sigs
     }
-    for name, expr in assigns.items():
-        if name in new_sigs:
-            continue
-        width = expr_width(expr, {**sigs, **new_sigs})
-        depth = sigs[name].depth if name in sigs else 0
-        new_sigs[name] = Signal(name, width, "wire", depth)
+    _fill_missing_wire_signals(sigs, new_sigs, assigns)
     new_assigns = [Assign(lhs, rhs) for lhs, rhs in assigns.items()]
     for name, expr in assigns.items():
         for dep in expr_ids(expr):
@@ -162,6 +158,20 @@ def optimize(mod: Module) -> Module:
     return Module(
         mod.name, new_sigs, new_assigns, AlwaysFF(mod.always.clock, body), mod.ports, mem_writes
     )
+
+
+def _fill_missing_wire_signals(
+    sigs: Mapping[str, Signal], new_sigs: dict[str, Signal], assigns: dict[str, Expr]
+) -> None:
+    # The result map grows as generated temporaries are discovered. A live
+    # overlay avoids copying both large signal tables once per temporary.
+    width_sigs = ChainMap(new_sigs, sigs)
+    for name, expr in assigns.items():
+        if name in new_sigs:
+            continue
+        width = expr_width(expr, width_sigs)
+        depth = sigs[name].depth if name in sigs else 0
+        new_sigs[name] = Signal(name, width, "wire", depth)
 
 
 def _subst_consts(assigns: dict[str, Expr]) -> dict[str, Expr]:
@@ -390,16 +400,66 @@ def _inline_single_use(
         users.pop(name, None)
         enqueue(user)
 
-    def replace(node: Expr) -> Expr:
-        if not isinstance(node, Id) or node.name not in substitutions:
-            return node
-        replacement = substitutions[node.name]
-        # Long aliases do not need one Python stack frame per wire.
-        while isinstance(replacement, Id) and replacement.name in substitutions:
-            replacement = substitutions[replacement.name]
-        return map_expr(replacement, replace)
+    def expand(expr: Expr) -> Expr:
+        # Explicit traversal avoids Python recursion for long chains of
+        # non-alias operations as well as for chains of plain aliases.
+        stack: list[tuple[Expr, bool]] = [(expr, False)]
+        values: list[Expr] = []
+        while stack:
+            node, ready = stack.pop()
+            if not ready and isinstance(node, Id) and node.name in substitutions:
+                stack.append((substitutions[node.name], False))
+                continue
+            if isinstance(node, (Id, Const, ArrayZeros)):
+                values.append(node)
+                continue
+            if isinstance(node, (UnaryOp, Extract)):
+                children = (node.a,)
+            elif isinstance(node, BinOp):
+                children = (node.a, node.b)
+            elif isinstance(node, Ternary):
+                children = (node.cond, node.a, node.b)
+            elif isinstance(node, Concat):
+                children = node.parts
+            elif isinstance(node, ArrayGet):
+                children = (node.arr, node.index)
+            elif isinstance(node, ArrayInject):
+                children = (node.arr, node.index, node.value)
+            elif isinstance(node, MemRead):
+                children = (node.addr,)
+            else:
+                raise TypeError(type(node))
+            if not children:
+                values.append(node)
+            elif not ready:
+                stack.append((node, True))
+                stack.extend((child, False) for child in reversed(children))
+            else:
+                rewritten = values[-len(children):]
+                del values[-len(children):]
+                if all(a is b for a, b in zip(rewritten, children)):
+                    values.append(node)
+                elif isinstance(node, UnaryOp):
+                    values.append(UnaryOp(node.op, rewritten[0]))
+                elif isinstance(node, Extract):
+                    values.append(Extract(rewritten[0], node.low, node.width))
+                elif isinstance(node, BinOp):
+                    values.append(BinOp(node.op, rewritten[0], rewritten[1]))
+                elif isinstance(node, Ternary):
+                    values.append(Ternary(*rewritten))
+                elif isinstance(node, Concat):
+                    values.append(Concat(tuple(rewritten)))
+                elif isinstance(node, ArrayGet):
+                    values.append(ArrayGet(*rewritten))
+                elif isinstance(node, ArrayInject):
+                    values.append(ArrayInject(*rewritten))
+                else:
+                    assert isinstance(node, MemRead)
+                    values.append(MemRead(node.mem, rewritten[0]))
+        assert len(values) == 1
+        return values[0]
 
-    return {name: map_expr(expr, replace) for name, expr in assigns.items()}, body
+    return {name: expand(expr) for name, expr in assigns.items()}, body
 
 
 def _dce(

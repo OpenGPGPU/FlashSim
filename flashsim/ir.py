@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 
@@ -246,7 +247,7 @@ def replace_id(expr: Expr, name: str, repl: Expr) -> Expr:
 CMP_OPS = {"==", "!=", "<", "<=", ">", ">=", "s<", "s<=", "s>", "s>="}
 
 
-def expr_width(expr: Expr, sigs: dict[str, Signal]) -> int:
+def expr_width(expr: Expr, sigs: Mapping[str, Signal]) -> int:
     if isinstance(expr, Const):
         return expr.width
     if isinstance(expr, Id):

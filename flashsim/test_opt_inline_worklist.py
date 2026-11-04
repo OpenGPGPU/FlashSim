@@ -2,7 +2,7 @@
 
 import random
 
-from flashsim.ir import BinOp, Const, Id, MemWrite, NbAssign, Ternary
+from flashsim.ir import BinOp, Const, Id, MemWrite, NbAssign, Ternary, expr_ids
 from flashsim.opt import _inline_single_use
 
 
@@ -63,3 +63,16 @@ def test_alias_cycle_and_long_chain_do_not_recurse_forever():
     chain = {f"w{i}": Id(f"w{i-1}" if i else "input") for i in reversed(range(2000))}
     result, _ = _inline_single_use(chain, [], {"w1999"})
     assert result == {"w1999": Id("input")}
+
+
+def test_long_operation_chain_expands_without_python_recursion():
+    size = 5000
+    chain = {f"w{i}": BinOp("&", Id(f"w{i-1}" if i else "input"), Const(1, 1))
+             for i in range(size)}
+    result, _ = _inline_single_use(chain, [], {f"w{size-1}"})
+    assert expr_ids(result[f"w{size-1}"]) == {"input"}
+    expr = result[f"w{size-1}"]
+    for _ in range(size):
+        assert isinstance(expr, BinOp) and expr.op == "&"
+        expr = expr.a
+    assert expr == Id("input")
