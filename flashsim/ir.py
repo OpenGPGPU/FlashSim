@@ -121,6 +121,20 @@ class AlwaysFF:
     body: list[Stmt]
 
 
+@dataclass(slots=True)
+class ClockedAssertion:
+    clock: Expr
+    failure: Expr
+    message: str
+    scope: str
+
+
+@dataclass(slots=True)
+class ClockedProcess:
+    clock: Expr
+    scope: str
+
+
 @dataclass
 class Module:
     name: str
@@ -129,6 +143,8 @@ class Module:
     always: AlwaysFF
     ports: list[str]
     mem_writes: list[MemWrite] = field(default_factory=list)
+    assertions: list[ClockedAssertion] = field(default_factory=list)
+    clocked_processes: list[ClockedProcess] = field(default_factory=list)
 
 
 def signal_map(mod: Module) -> dict[str, Signal]:

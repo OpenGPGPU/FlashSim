@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -8,6 +10,7 @@ from flashsim.circt_frontend import (
     circt_verilog_to_mlir,
     parse_hw_mlir,
     verilog_sources,
+    verilog_dependencies,
 )
 from flashsim.emit import emit_cpp, split_dut_methods
 from flashsim.data_regions import group_primitive_storage
@@ -22,23 +25,36 @@ def compile_verilog(
     frontend: str = "auto",
     path: Path | None = None,
     mlir_path: Path | None = None,
+    *,
+    assertions: bool = False,
 ) -> tuple[Module, str]:
     kind = _resolve_frontend(frontend)
     if kind == "circt":
         if path is None:
             raise CirctError("CIRCT frontend needs a Verilog file path")
         if mlir_path is None or not (
-            _mlir_fresh(mlir_path, path) and _mlir_matches(mlir_path, path)
+            _mlir_fresh(mlir_path, path, assertions=assertions)
+            and _mlir_matches(mlir_path, path, assertions=assertions)
         ):
-            mlir = circt_verilog_to_mlir(path)
+            fingerprint = _assertion_sources(path) if assertions else None
+            mlir = (circt_verilog_to_mlir(path, assertions=True) if assertions
+                    else circt_verilog_to_mlir(path))
+            if assertions and fingerprint != _assertion_sources(path):
+                raise CirctError("assertion inputs changed during CIRCT compilation")
             if mlir_path is not None:
                 mlir_path.parent.mkdir(parents=True, exist_ok=True)
                 mlir_path.write_text(mlir)
                 mlir_path.with_suffix(".mlir.top").write_text(path.stem)
+                mlir_path.with_suffix(".mlir.assertions").write_text("1" if assertions else "0")
+                if assertions:
+                    mlir_path.with_suffix(".mlir.assertion-sources.json").write_text(
+                        json.dumps(fingerprint, sort_keys=True))
         else:
             mlir = mlir_path.read_text()
         mod = parse_hw_mlir(mlir, top=path.stem)
     else:
+        if assertions:
+            raise CirctError("bound assertions require the CIRCT frontend")
         mod = parse_verilog(src)
     mod = optimize(mod)
     return mod, emit_cpp(mod)
@@ -50,6 +66,7 @@ def compile_file(
     frontend: str = "auto",
     *,
     split: int = 0,
+    assertions: bool = False,
 ) -> Module:
     """Compile Verilog to `out_h`.
 
@@ -66,7 +83,8 @@ def compile_file(
     out_h.parent.mkdir(parents=True, exist_ok=True)
     mlir_path = out_h.parent / "hw.mlir" if _resolve_frontend(frontend) == "circt" else None
     mod, cpp = compile_verilog(
-        path.read_text(), frontend=frontend, path=path, mlir_path=mlir_path
+        path.read_text(), frontend=frontend, path=path, mlir_path=mlir_path,
+        assertions=assertions
     )
     if split == 0:
         split = _auto_split_count(path, len(cpp))
@@ -124,11 +142,23 @@ def _auto_split_count(path: Path, cpp_bytes: int) -> int:
     return 32 if cpp_bytes > 400_000_000 else 16
 
 
-def _mlir_fresh(mlir_path: Path, verilog: Path) -> bool:
+def _mlir_fresh(mlir_path: Path, verilog: Path, *, assertions: bool = False) -> bool:
     if not mlir_path.is_file():
         return False
+    if assertions:
+        try:
+            recorded = json.loads(mlir_path.with_suffix(".mlir.assertion-sources.json").read_text())
+            return recorded == _assertion_sources(verilog)
+        except (OSError, ValueError):
+            return False
     stamp = mlir_path.stat().st_mtime
-    return all(src.stat().st_mtime <= stamp for src in verilog_sources(verilog))
+    return all(src.stat().st_mtime <= stamp
+               for src in verilog_sources(verilog, assertions=assertions))
+
+
+def _assertion_sources(verilog: Path) -> dict[str, str]:
+    return {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in verilog_dependencies(verilog)}
 
 
 def _resolve_frontend(frontend: str) -> str:
@@ -139,7 +169,7 @@ def _resolve_frontend(frontend: str) -> str:
     return frontend
 
 
-def _mlir_matches(mlir_path: Path, verilog: Path) -> bool:
+def _mlir_matches(mlir_path: Path, verilog: Path, *, assertions: bool = False) -> bool:
     """Whether the cached MLIR was produced from *this* Verilog top.
 
     Freshness by mtime alone is not enough: the cache lives in the output
@@ -152,6 +182,9 @@ def _mlir_matches(mlir_path: Path, verilog: Path) -> bool:
     the next run regenerates it once and every run after that reuses it.
     """
     try:
-        return mlir_path.with_suffix(".mlir.top").read_text().strip() == verilog.stem
+        marker = mlir_path.with_suffix(".mlir.assertions")
+        cached_assertions = marker.is_file() and marker.read_text().strip() == "1"
+        return (cached_assertions == assertions
+                and mlir_path.with_suffix(".mlir.top").read_text().strip() == verilog.stem)
     except OSError:
         return False

@@ -21,6 +21,8 @@ from flashsim.ir import (
     ArrayZeros,
     Assign,
     BinOp,
+    ClockedAssertion,
+    ClockedProcess,
     CMP_OPS,
     Concat,
     Const,
@@ -77,6 +79,16 @@ def optimize(mod: Module) -> Module:
     assigns = _subst_consts(assigns)
     assigns = {k: _rewrite_expr(v, assigns, sigs) for k, v in assigns.items()}
     body = _map_stmts(body, rewrite)
+    assertions = [
+        ClockedAssertion(rewrite(a.clock), rewrite(a.failure), a.message, a.scope)
+        for a in mod.assertions
+    ]
+    clocked_processes = [ClockedProcess(rewrite(p.clock), p.scope)
+                         for p in mod.clocked_processes]
+    assertion_reads = set().union(*(expr_ids(a.clock) | expr_ids(a.failure)
+                                    for a in assertions))
+    assertion_reads |= set().union(*(expr_ids(p.clock) for p in clocked_processes))
+    observed = outputs | assertion_reads
     mem_writes = [
         MemWrite(
             w.mem,
@@ -89,7 +101,7 @@ def optimize(mod: Module) -> Module:
     # Array reads index named storage in the emitter.  Inlining an array-valued
     # SSA definition would turn that storage into an unsupported expression.
     array_wires = {n for n, s in sigs.items() if s.kind == "wire" and s.depth}
-    assigns, body = _inline_single_use(assigns, body, outputs | array_wires, mem_writes)
+    assigns, body = _inline_single_use(assigns, body, observed | array_wires, mem_writes)
     assigns = {k: _fold_expr(v) for k, v in assigns.items()}
     body = _map_stmts(body, _fold_expr)
     mem_writes = [
@@ -117,13 +129,13 @@ def optimize(mod: Module) -> Module:
         body = _self_gate_const_holds(body, sigs)
         body = _map_stmts(body, _fold_expr)
     body = _cse_sibling_or_prefixes(body, assigns)
-    assigns, body = _dce(assigns, body, outputs, mem_writes)
+    assigns, body = _dce(assigns, body, observed, mem_writes)
     if _MERGE_SOP:
         assigns = _merge_sop_terms(assigns, sigs)
-        assigns, body = _dce(assigns, body, outputs, mem_writes)
+        assigns, body = _dce(assigns, body, observed, mem_writes)
     if _REASSOC_AND:
         assigns = _reassoc_and_chains(assigns, sigs)
-        assigns, body = _dce(assigns, body, outputs, mem_writes)
+        assigns, body = _dce(assigns, body, observed, mem_writes)
 
     referred: set[str] = set(assigns)
     for expr in assigns.values():
@@ -133,6 +145,7 @@ def optimize(mod: Module) -> Module:
     for wr in mem_writes:
         referred |= expr_ids(wr.addr) | expr_ids(wr.data) | expr_ids(wr.enable)
         referred.add(wr.mem)
+    referred |= assertion_reads
     # Sorted, not set order: `keep | referred` is a set union, so iterating it
     # directly makes the signal order (and therefore the generated struct
     # layout) depend on PYTHONHASHSEED. Two runs on the same input then emit
@@ -155,8 +168,12 @@ def optimize(mod: Module) -> Module:
         for dep in expr_ids(wr.addr) | expr_ids(wr.data) | expr_ids(wr.enable):
             if dep not in assigns and dep not in keep:
                 raise ValueError(f"dangling wire {dep} used by mem write")
+    for dep in assertion_reads:
+        if dep not in assigns and dep not in keep:
+            raise ValueError(f"dangling wire {dep} used by clocked assertion")
     return Module(
-        mod.name, new_sigs, new_assigns, AlwaysFF(mod.always.clock, body), mod.ports, mem_writes
+        mod.name, new_sigs, new_assigns, AlwaysFF(mod.always.clock, body), mod.ports,
+        mem_writes, assertions, clocked_processes
     )
 
 

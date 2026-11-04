@@ -62,9 +62,37 @@ python3 -m pytest flashsim/test_circt_array_create.py \
   flashsim/test_partition_clocked.py
 ```
 
-The CIRCT source discovery skips `verification/` and
-`_Verification_Assert.sv` files. A FlashSim run therefore does not by itself
-replace an assertion-enabled Verilator qualification.
+By default CIRCT source discovery skips `verification/` and
+`_Verification_Assert.sv` files. To include bound clocked checks, use:
+
+```bash
+python3 -m flashsim compile path/to/Top.sv -o build/dut.h --frontend circt --assertions
+python3 -m pytest flashsim/test_clocked_assertions.py
+```
+
+The library equivalent is `compile_file(..., assertions=True)`. Supported
+checks wait on the model's single rising-edge clock and terminate on a fatal
+condition. Generated bind layers are included even when absent from Chisel's
+file list, sharing their preprocessing guards in one compilation unit.
+Reference bindings and every fatal control-flow path survive
+flattening and optimization. Checks sample settled current state before NBA
+updates; a failure raises a native exception with the instance path, diagnostic
+and tick. Split C++ models retain the same behavior. The generated DUT exposes
+`assertion_count` when checks are present. Assertion mode and the content hashes
+of sources and included headers prevent reuse of an assertion-free or stale
+frontend cache.
+
+Reference-based combinational selectors and zero-initialized clocked capture
+state are retained as well. SSA joins merge conditional updates without
+enumerating combinations of independent register enables; large selectors
+use balanced joins. Large check sets use bounded C++ helpers, and diagnostic
+braces remain string contents during method splitting. Other events,
+nonzero LLHD state initialization, persistent process-local wait state,
+nonfatal procedural prints and unsupported effects are rejected. This is not
+general event-driven or temporal SVA simulation. Native failure probes,
+reset/mask cases and actual host trace/image comparisons remain necessary
+before product qualification;
+an assertion-free FlashSim screen cannot replace that evidence.
 
 Large `GpuHostSystemAxi` models are emitted as C++ method shards and compiled
 in parallel. Multi-CU RTL is detected from the generated source and uses a
@@ -112,8 +140,8 @@ partitioned target, and guard/RHS inputs stay stable throughout each clock
 event; verify those conditions for the source and build profile.
 The source file is never changed. On the current H6 color module, the derived
 128-way output matched the previously screened local split byte-for-byte;
-the bounded trace and 32×32 scene matched Verilator. This does not enable
-the verification assertions omitted by CIRCT source discovery.
+the bounded trace and 32×32 scene matched Verilator. Enable bound verification
+checks separately with `--assertions` and validate the resulting native model.
 
 `FLASHSIM_DATA_REGION_FIELDS=1024` optionally groups the primitive storage
 prefix of large, bulk-initialized DUTs into data-only base classes. This bounds

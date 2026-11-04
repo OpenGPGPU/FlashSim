@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -127,6 +128,8 @@ def cached_wires(mod: Module, assigns: dict[str, Expr]) -> set[str]:
     bulky gated cones into skip-cached evals too.
     """
     names = seq_skip_roots(mod.always.body) | set(collect_outputs(mod))
+    for assertion in mod.assertions:
+        names |= expr_ids(assertion.failure)
     for wr in mod.mem_writes:
         names |= expr_ids(wr.enable)
     cached = {n for n in names if n in assigns}
@@ -2140,9 +2143,26 @@ def emit_cpp(mod: Module) -> str:
     assigns = assign_map(mod)
     regs = collect_regs(mod)
     mems = collect_mems(mod)
-    inputs = [n for n in collect_inputs(mod) if n != mod.always.clock]
+    observed_clocks = ([(a.clock, a.scope) for a in mod.assertions]
+                       + [(p.clock, p.scope) for p in mod.clocked_processes])
+    inputs = [n for n in collect_inputs(mod)
+              if n != mod.always.clock or observed_clocks]
     outputs = collect_outputs(mod)
     sigs = mod.signals
+    if observed_clocks:
+        clock_signal = sigs.get(mod.always.clock)
+        if not clock_signal or clock_signal.kind != "input" or clock_signal.width != 1:
+            raise ValueError("clocked assertions require a one-bit top-level input clock")
+        for clock, scope in observed_clocks:
+            seen = set()
+            while isinstance(clock, Id) and clock.name in assigns:
+                if clock.name in seen:
+                    raise ValueError("cyclic assertion clock alias")
+                seen.add(clock.name)
+                clock = assigns[clock.name]
+            if clock != Id(mod.always.clock):
+                raise ValueError("assertion clock differs from the model posedge clock: "
+                                 + scope)
     stop = set(regs) | set(collect_inputs(mod)) | set(mems)
     writes = always_writes(mod.always.body)
     cached = cached_wires(mod, assigns)
@@ -2272,6 +2292,7 @@ def emit_cpp(mod: Module) -> str:
     lines: list[str] = [
         "#include <cstdint>",
         "#include <cstring>",
+        *(["#include <stdexcept>", "#include <string>"] if mod.assertions else []),
         "",
         "static inline uint32_t shl(uint32_t x, uint32_t n) {",
         "  return n >= 32u ? 0u : (x << n);",
@@ -2509,6 +2530,8 @@ def emit_cpp(mod: Module) -> str:
         [
         "",
         f"struct {mod.name}Dut {{",
+        *([f"  static constexpr uint64_t assertion_count = {len(mod.assertions)};"]
+          if mod.assertions else []),
         ]
     )
     for name in regs:
@@ -2782,6 +2805,35 @@ def emit_cpp(mod: Module) -> str:
         lines.extend(mem_calls)
         lines.append("  }")
         lines.append("")
+    if mod.assertions:
+        # Bound the compiler's per-function control-flow graph for product
+        # models with thousands of checks. Preserve their evaluation order.
+        groups = [mod.assertions[i:i+64] for i in range(0,len(mod.assertions),64)]
+        for group_index, group in enumerate(groups):
+            _EAGER_DONE = set()
+            method = ("_check_assertions" if len(groups)==1
+                      else "_check_assertions_"+str(group_index))
+            lines.append(f"  __attribute__((noinline)) void {method}() {{")
+            roots = set().union(*(expr_ids(a.failure) for a in group)) & cached
+            # Use each wire/pass's own guard, not the shared NBA demand marker.
+            lines.extend(dict.fromkeys(_eval_invoke(name, 4) for name in sorted(roots)))
+            for local_index, assertion in enumerate(group):
+                condition = "_flashsim_check_"+str(group_index*64+local_index)
+                while condition in sigs:
+                    condition += "_"
+                label = json.dumps("FlashSim assertion " + assertion.scope + ": "
+                                   + assertion.message + " (tick ")
+                lines.append("    {")
+                lines.append(f"      uint8_t {condition};")
+                _emit_assign(condition,assertion.failure,cached,sigs,lines,6,"0x1u",[0])
+                lines.append(f"      if ({condition}) throw std::runtime_error(std::string({label})"
+                             ' + std::to_string(_nt) + ")");')
+                lines.append("    }")
+            lines.extend(["  }", ""])
+        if len(groups)>1:
+            lines.append("  __attribute__((noinline)) void _check_assertions() {")
+            lines.extend(f"    _check_assertions_{i}();" for i in range(len(groups)))
+            lines.extend(["  }", ""])
     lines.append("  void tick() {")
     lines.append("    _chg = 0;")
     lines.append("    poke_inputs();")
@@ -2790,8 +2842,14 @@ def emit_cpp(mod: Module) -> str:
     lines.append("")
     # Posedge body without re-scanning inputs (hosts may poke first).
     lines.append("  void tick_nba() {")
+    if observed_clocks:
+        # tick_nba represents a rising edge even for hosts that use an
+        # implicit clock. Refresh clock-dependent combinational observers.
+        lines.append(f"    if (!{mod.always.clock}) {{ {mod.always.clock} = 1; poke_inputs(); }}")
     lines.append("    _chg = 0;")
     lines.append("    _nt++;")
+    if mod.assertions:
+        lines.append("    _check_assertions();")
     # Region-mediated hold wakes fire inside the pass, so a woken pass must
     # run before the dispatch loop even if nothing else demands it. Pass bits
     # are in topological order and a pass only wakes later ones, so one
@@ -3164,6 +3222,14 @@ _METHOD_START_RE = re.compile(
 )
 
 
+def _method_brace_delta(line: str) -> int:
+    # Diagnostics may contain unmatched braces and escaped quotes. They are
+    # string contents, not method boundaries in the generated C++.
+    code = re.sub(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*' ''', "", line,
+                  flags=re.VERBOSE).split("//", 1)[0]
+    return code.count("{") - code.count("}")
+
+
 def _shard_index(name: str, n_shards: int) -> int:
     """Stable, well-mixed shard id (avoid little-endian prefix bias on eval_*)."""
     if name in _SPLIT_CORE:
@@ -3470,12 +3536,12 @@ def split_dut_methods(
             i += 1
             continue
         # Multi-line body: brace-match from this line's `{`
-        depth = line.count("{") - line.count("}")
+        depth = _method_brace_delta(line)
         body_lines = [line]
         i += 1
         while i < len(lines) and depth > 0:
             body_lines.append(lines[i])
-            depth += lines[i].count("{") - lines[i].count("}")
+            depth += _method_brace_delta(lines[i])
             i += 1
         trailing_blank = ""
         if i < len(lines) and lines[i].strip() == "":

@@ -20,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     p_compile.add_argument("verilog", type=Path)
     p_compile.add_argument("-o", "--output", type=Path, required=True)
     p_compile.add_argument("--frontend", choices=("auto", "circt", "native"), default="auto")
+    p_compile.add_argument("--assertions", action="store_true",
+                           help="include bound posedge fatal checks (requires CIRCT)")
     p_exp = sub.add_parser("experiment", help="compare FlashSim against Verilator")
     p_exp.add_argument("--stages", type=int, default=12)
     p_exp.add_argument("--rounds", type=int, default=8)
@@ -48,7 +50,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{name}: {find_bin(name)}")
         return 0
     if args.cmd == "compile":
-        compile_file(args.verilog, args.output, frontend=args.frontend)
+        compile_file(args.verilog, args.output, frontend=args.frontend,
+                     assertions=args.assertions)
         print(f"wrote {args.output}")
         return 0
     if args.cmd == "experiment":
