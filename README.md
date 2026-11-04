@@ -58,7 +58,8 @@ python3 -m pytest flashsim/test_circt_array_create.py \
   flashsim/test_emit_cone_memo.py flashsim/test_emit_deep_priority.py \
   flashsim/test_emit_temp_cache.py flashsim/test_emit_page_indices.py \
   flashsim/test_emit_commit_helpers.py flashsim/test_commit_blocks.py \
-  flashsim/test_compile_options.py flashsim/test_build_scheduling.py
+  flashsim/test_compile_options.py flashsim/test_build_scheduling.py \
+  flashsim/test_partition_clocked.py
 ```
 
 The CIRCT source discovery skips `verification/` and
@@ -84,6 +85,28 @@ divide a large chunked commit shard into up to 16 independently compiled
 pieces; use `FLASHSIM_COMPILE_JOBS` to fit the available memory. These options
 are opt-in; measure simulator runtime for the workload before selecting them
 for performance runs. Shard cache keys include the compiler choices.
+
+For a generated module with one exceptionally large posedge process, the
+optional preparation command below writes a derived file with separate
+processes, keeping all assignments to each target in their original order:
+
+```bash
+python -m flashsim.partition_clocked StreamingTypedTileColorLanes.sv \
+  /path/to/scratch/StreamingTypedTileColorLanes.sv --groups 128 \
+  --assume-default-initialization --assume-no-instance-drivers \
+  --assume-stable-edge-inputs
+```
+
+This narrow parser accepts plain nonblocking assignments and pure `if`/`else`
+expressions, and rejects unsupported statements and detectable outside writes.
+The assumptions mean that random and custom initializer macros are off,
+reset is set before the first clock, no instance output or inout drives a
+partitioned target, and guard/RHS inputs stay stable throughout each clock
+event; verify those conditions for the source and build profile.
+The source file is never changed. On the current H6 color module, the derived
+128-way output matched the previously screened local split byte-for-byte;
+the bounded trace and 32×32 scene matched Verilator. This does not enable
+the verification assertions omitted by CIRCT source discovery.
 
 `FLASHSIM_DATA_REGION_FIELDS=1024` optionally groups the primitive storage
 prefix of large, bulk-initialized DUTs into data-only base classes. This bounds
