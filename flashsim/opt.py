@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import re
 import sys
-from collections import Counter
+from collections import Counter, deque
 
 from flashsim.ir import (
     AlwaysFF,
@@ -39,7 +39,6 @@ from flashsim.ir import (
     expr_ids,
     expr_width,
     map_expr,
-    replace_id,
     stmt_reads,
     stmt_writes,
 )
@@ -339,39 +338,68 @@ def _inline_single_use(
     outputs: set[str],
     mem_writes: list[MemWrite] | None = None,
 ) -> tuple[dict[str, Expr], list[Stmt]]:
-    writes = mem_writes or []
-    while True:
-        uses = _count_uses(assigns, body, writes)
-        users: dict[str, list[str]] = {}
-        for lhs, rhs in assigns.items():
-            for name in expr_ids(rhs):
-                if name in assigns:
-                    users.setdefault(name, []).append(lhs)
-        changed = False
-        # Use current RHS when substituting: inlining A into B then B into C in
-        # the same pass must copy B's updated body, not the snapshot that still
-        # names A after A was deleted.
-        for name in list(assigns):
-            if name not in assigns or name in outputs:
-                continue
-            n = uses.get(name, 0)
-            if n == 0:
-                del assigns[name]
-                changed = True
-                continue
-            if n != 1:
-                continue
-            loc = users.get(name, [])
-            if len(loc) != 1:
-                continue
-            user = loc[0]
-            if user not in assigns or user == name:
-                continue
-            assigns[user] = replace_id(assigns[user], name, assigns[name])
+    # Track the graph as names are removed, then expand substitutions once.
+    # Rebuilding an ever-growing expression after each inlining step is very
+    # expensive for the deep, single-use chains in large CIRCT models.
+    uses = _count_uses(assigns, body, mem_writes or [])
+    refs = {name: expr_id_counts(expr) for name, expr in assigns.items()}
+    users: dict[str, set[str]] = {}
+    for user, dependencies in refs.items():
+        for dep in dependencies:
+            if dep in assigns:
+                users.setdefault(dep, set()).add(user)
+    pending = deque(assigns)
+    queued = set(assigns)
+    substitutions: dict[str, Expr] = {}
+
+    def enqueue(name: str) -> None:
+        if name in assigns and name not in queued:
+            pending.append(name)
+            queued.add(name)
+
+    while pending:
+        name = pending.popleft()
+        queued.remove(name)
+        if name not in assigns or name in outputs:
+            continue
+        n = uses.get(name, 0)
+        if n == 0:
             del assigns[name]
-            changed = True
-        if not changed:
-            return assigns, body
+            for dep, count in refs.pop(name).items():
+                if dep in assigns:
+                    uses[dep] -= count
+                    users.get(dep, set()).discard(name)
+                    enqueue(dep)
+            continue
+        if n != 1 or len(users.get(name, ())) != 1:
+            continue
+        user = next(iter(users[name]))
+        if user not in assigns or user == name:
+            continue
+        dependencies = refs.pop(name)
+        destination = refs[user]
+        assert destination.pop(name) == 1
+        for dep, count in dependencies.items():
+            destination[dep] = destination.get(dep, 0) + count
+            if dep in assigns:
+                users.setdefault(dep, set()).discard(name)
+                users[dep].add(user)
+                enqueue(dep)
+        substitutions[name] = assigns.pop(name)
+        uses[name] -= 1
+        users.pop(name, None)
+        enqueue(user)
+
+    def replace(node: Expr) -> Expr:
+        if not isinstance(node, Id) or node.name not in substitutions:
+            return node
+        replacement = substitutions[node.name]
+        # Long aliases do not need one Python stack frame per wire.
+        while isinstance(replacement, Id) and replacement.name in substitutions:
+            replacement = substitutions[replacement.name]
+        return map_expr(replacement, replace)
+
+    return {name: map_expr(expr, replace) for name, expr in assigns.items()}, body
 
 
 def _dce(
