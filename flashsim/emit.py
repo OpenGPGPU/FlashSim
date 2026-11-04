@@ -253,9 +253,22 @@ def _promote_bulky_gated_cones(
     regions that would otherwise inline ≥ `_BULKY_GATED_CONE` SSA locals.
     """
     regions: list[tuple[int, list[str]]] = []
+    needed_cache: dict[int, tuple[Expr, set[str]]] = {}
+    cached_names = 0
 
     def add_needed(expr: Expr) -> set[str]:
-        return set(_uncached_needed(expr, assigns, cached, stop))
+        nonlocal cached_names
+        key = id(expr)
+        if key in needed_cache:
+            return needed_cache[key][1]
+        needed = set(_uncached_needed(expr, assigns, cached, stop))
+        # The walk repeatedly visits expressions through nested arms. `cached`
+        # is unchanged until the walk finishes, so these cones are reusable.
+        # Bound the memo by both entry and name counts for large DUTs.
+        if len(needed_cache) < 32768 and cached_names + len(needed) <= 250000:
+            needed_cache[key] = (expr, needed)
+            cached_names += len(needed)
+        return needed
 
     def region_temps(stmts: list[Stmt], min_nodes: int) -> list[str]:
         needed: set[str] = set()

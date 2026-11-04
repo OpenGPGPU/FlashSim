@@ -44,13 +44,15 @@ dependency graph and expands substitutions iteratively; rewrites reuse
 unchanged immutable branches. Generated signal widths use a shared lookup
 instead of repeatedly copying large tables. Optional AND reassociation leaves
 excessively deep expressions unchanged if hashing or ordering reaches Python's
-recursion limit. Exercise these cases with:
+recursion limit. Cone selection reuses repeated gated-expression results
+with a bounded cache. Exercise these cases with:
 
 ```bash
 python3 -m pytest flashsim/test_circt_array_create.py \
   flashsim/test_circt_output_register.py flashsim/test_circt_hierarchy_reuse.py \
   flashsim/test_ir_structural_sharing.py flashsim/test_opt_deep_literals.py \
-  flashsim/test_opt_inline_worklist.py flashsim/test_opt_signal_lookup.py
+  flashsim/test_opt_inline_worklist.py flashsim/test_opt_signal_lookup.py \
+  flashsim/test_emit_cone_memo.py
 ```
 
 The CIRCT source discovery skips `verification/` and
