@@ -86,6 +86,13 @@ pieces; use `FLASHSIM_COMPILE_JOBS` to fit the available memory. These options
 are opt-in; measure simulator runtime for the workload before selecting them
 for performance runs. Shard cache keys include the compiler choices.
 
+For compilers that support it, `FLASHSIM_STRICT_FLEX_ARRAYS=1` passes
+`-fstrict-flex-arrays=1`. This can reduce Clang's compile time on generated
+models with very large classes and many fixed-size arrays. It treats trailing
+arrays of two or more elements as fixed-size, so enable it only when generated
+code does not access those arrays beyond their declared bounds. It is opt-in;
+compare simulation results for the target model before relying on it.
+
 For a generated module with one exceptionally large posedge process, the
 optional preparation command below writes a derived file with separate
 processes, keeping all assignments to each target in their original order:

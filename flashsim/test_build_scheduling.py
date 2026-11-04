@@ -11,7 +11,7 @@ import pytest
 from flashsim.arti_model import BUILD_EMBEDDED
 
 
-def build_fixture(tmp_path, fail="", *, conservative=False, chunk_opt=None):
+def build_fixture(tmp_path, fail="", *, conservative=False, chunk_opt=None, strict_flex=None):
     if not shutil.which("ar") or not shutil.which("xargs"):
         pytest.skip("archive/build tools unavailable")
     model=tmp_path/"model with spaces"
@@ -63,12 +63,15 @@ sys.exit(subprocess.run([REAL_XARGS,*sys.argv[1:]],input=raw).returncode)
     env.pop("FLASHSIM_PGO_GENERATE",None)
     env.pop("FLASHSIM_CONSERVATIVE_ALIAS",None)
     env.pop("FLASHSIM_COMMIT_CHUNKS_OPT",None)
+    env.pop("FLASHSIM_STRICT_FLEX_ARRAYS",None)
     if conservative:
         env["FLASHSIM_CONSERVATIVE_ALIAS"]="1"
     if chunk_opt is not None:
         env["FLASHSIM_COMMIT_CHUNKS_OPT"]=chunk_opt
+    if strict_flex is not None:
+        env["FLASHSIM_STRICT_FLEX_ARRAYS"]=strict_flex
     result=subprocess.run(["bash",str(script)],env=env,capture_output=True,text=True)
-    rows=[json.loads(line) for line in events.read_text().splitlines()]
+    rows=[json.loads(line) for line in events.read_text().splitlines()] if events.exists() else []
     return model,stage,result,rows,profile
 
 
@@ -92,6 +95,7 @@ def test_build_queue_reuses_a_slot_before_the_oldest_job_finishes(tmp_path):
     for row in rows:
         if row["event"]!="start":continue
         assert "-fprofile-instr-use="+str(profile) in row["args"]
+        assert "-fstrict-flex-arrays=1" not in row["args"]
         expected="-O0" if row["source"]=="dut_commit.cpp" else "-O1" if row["source"]=="arti_rtl_model.cpp" else "-O2"
         assert expected in row["args"]
     assert (model/"libarti_rtl_model.a").exists()
@@ -106,12 +110,20 @@ def test_failed_compilation_cannot_publish_an_archive(tmp_path):
 
 
 def test_opt_in_alias_and_chunk_flags_reach_each_compiler(tmp_path):
-    _,_,result,rows,_=build_fixture(tmp_path,conservative=True,chunk_opt="-O0")
+    _,_,result,rows,_=build_fixture(tmp_path,conservative=True,chunk_opt="-O0",strict_flex="1")
     assert result.returncode==0,result.stdout+result.stderr
     starts=[row for row in rows if row["event"]=="start"]
     assert all("-fno-strict-aliasing" in row["args"] for row in starts)
+    assert all("-fstrict-flex-arrays=1" in row["args"] for row in starts)
     chunks=next(row for row in starts if row["source"]=="dut_commit_chunks.cpp")
     assert "-O0" in chunks["args"]
     part=next(row for row in starts if row["source"]=="dut_commit_part000.cpp")
     assert "-O0" in part["args"]
     assert "-O2" in next(row for row in starts if row["source"]=="dut_0.cpp")["args"]
+
+
+def test_invalid_flex_option_fails_before_compiling(tmp_path):
+    _,_,result,rows,_=build_fixture(tmp_path,strict_flex="invalid")
+    assert result.returncode!=0
+    assert "FLASHSIM_STRICT_FLEX_ARRAYS must be 0 or 1" in result.stderr
+    assert not rows

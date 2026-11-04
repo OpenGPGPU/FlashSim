@@ -383,6 +383,7 @@ NPROC="${FLASHSIM_COMPILE_JOBS:-$(sysctl -n hw.logicalcpu 2>/dev/null || nproc 2
 SHARD_OPT="${FLASHSIM_SHARD_OPT:--O2}"
 COMMIT_CHUNKS_OPT="${FLASHSIM_COMMIT_CHUNKS_OPT:-$SHARD_OPT}"
 CONSERVATIVE_ALIAS="${FLASHSIM_CONSERVATIVE_ALIAS:-0}"
+STRICT_FLEX_ARRAYS="${FLASHSIM_STRICT_FLEX_ARRAYS:-0}"
 CALLBACK_WRITE_BYTES="${FLASHSIM_WRITE_CALLBACK_BYTES:-8}"
 case "$CALLBACK_WRITE_BYTES" in
   1|2|4|8|16|32|64) ;;
@@ -400,6 +401,10 @@ case "$CONSERVATIVE_ALIAS" in
   0|1) ;;
   *) echo "FLASHSIM_CONSERVATIVE_ALIAS must be 0 or 1" >&2; exit 1 ;;
 esac
+case "$STRICT_FLEX_ARRAYS" in
+  0|1) ;;
+  *) echo "FLASHSIM_STRICT_FLEX_ARRAYS must be 0 or 1" >&2; exit 1 ;;
+esac
 # Keep this opt-in: a profile from a tiny smoke test can over-specialize the
 # model and make a full-system workload slower.
 OBJS=()
@@ -409,6 +414,9 @@ compile_one() {
   local CXXFLAGS_BASE=(-std=gnu++17 -fPIC -fPIE -w -Wno-parentheses-equality -fbracket-depth=4096 -I.)
   if [[ "$CONSERVATIVE_ALIAS" == 1 ]]; then
     CXXFLAGS_BASE+=(-fno-strict-aliasing)
+  fi
+  if [[ "$STRICT_FLEX_ARRAYS" == 1 ]]; then
+    CXXFLAGS_BASE+=(-fstrict-flex-arrays=1)
   fi
   if [[ "$src" == arti_rtl_model.cpp ]]; then
     CXXFLAGS_BASE+=("-DARTI_MODEL_WRITE_CALLBACK_BYTES=$CALLBACK_WRITE_BYTES")
@@ -442,7 +450,7 @@ if ((${#SHARDS[@]} > 0)); then
     echo "FLASHSIM_COMPILE_JOBS must be a positive integer" >&2; exit 1;
   }
   export -f compile_one
-  export PGO_PROFILE PGO_GENERATE CONSERVATIVE_ALIAS
+  export PGO_PROFILE PGO_GENERATE CONSERVATIVE_ALIAS STRICT_FLEX_ARRAYS
   tasks=()
   for src in "${SHARDS[@]}"; do
     obj="${src%.cpp}.o"

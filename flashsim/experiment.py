@@ -126,6 +126,11 @@ def _compile_flash(
         raise ValueError("FLASHSIM_CONSERVATIVE_ALIAS must be 0 or 1")
     if conservative_alias == "1":
         common.append("-fno-strict-aliasing")
+    strict_flex_arrays = os.environ.get("FLASHSIM_STRICT_FLEX_ARRAYS") or "0"
+    if strict_flex_arrays not in {"0", "1"}:
+        raise ValueError("FLASHSIM_STRICT_FLEX_ARRAYS must be 0 or 1")
+    if strict_flex_arrays == "1":
+        common.append("-fstrict-flex-arrays=1")
     shards = sorted(work.glob("dut_*.cpp"))
     if shards:
         jobs = int(os.environ.get("FLASHSIM_COMPILE_JOBS", "4"))
