@@ -1043,7 +1043,14 @@ def _reassoc_and_chains(
             or not (isinstance(e, BinOp) and e.op == "&")
         ):
             continue
-        flat[name] = literals(e)
+        try:
+            flat[name] = literals(e)
+        except RecursionError:
+            # Deep opaque expressions need not be hashed or reassociated.
+            # Retaining the original chain is safe and keeps large DUTs
+            # buildable when Python's recursive dataclass hash reaches its
+            # recursion limit.
+            flat[name] = None
 
     chains = {n: s for n, s in flat.items() if s is not None and len(s) >= 3}
     if not chains:
