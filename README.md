@@ -46,8 +46,9 @@ instead of repeatedly copying large tables. Optional AND reassociation leaves
 excessively deep expressions unchanged if hashing or ordering reaches Python's
 recursion limit. Cone selection and sequential branch hoisting reuse nested
 statement cones with bounded caches. Deep priority muxes keep later condition
-demands lazy without recursively nesting the generated code. Exercise these
-cases with:
+demands lazy without recursively nesting the generated code. Invalidation-page
+and hold-wake tables widen their indices when the design exceeds 65,536
+entries. Exercise these cases with:
 
 ```bash
 python3 -m pytest flashsim/test_circt_array_create.py \
@@ -55,7 +56,7 @@ python3 -m pytest flashsim/test_circt_array_create.py \
   flashsim/test_ir_structural_sharing.py flashsim/test_opt_deep_literals.py \
   flashsim/test_opt_inline_worklist.py flashsim/test_opt_signal_lookup.py \
   flashsim/test_emit_cone_memo.py flashsim/test_emit_deep_priority.py \
-  flashsim/test_emit_temp_cache.py
+  flashsim/test_emit_temp_cache.py flashsim/test_emit_page_indices.py
 ```
 
 The CIRCT source discovery skips `verification/` and
