@@ -253,38 +253,9 @@ def _promote_bulky_gated_cones(
     regions that would otherwise inline ≥ `_BULKY_GATED_CONE` SSA locals.
     """
     regions: list[tuple[int, list[str]]] = []
-    needed_cache: dict[int, tuple[Expr, set[str]]] = {}
-    cached_names = 0
+    collector = _UncachedTempCollector(cached, assigns, stop)
 
-    def add_needed(expr: Expr) -> set[str]:
-        nonlocal cached_names
-        key = id(expr)
-        if key in needed_cache:
-            return needed_cache[key][1]
-        needed = set(_uncached_needed(expr, assigns, cached, stop))
-        # The walk repeatedly visits expressions through nested arms. `cached`
-        # is unchanged until the walk finishes, so these cones are reusable.
-        # Bound the memo by both entry and name counts for large DUTs.
-        if len(needed_cache) < 32768 and cached_names + len(needed) <= 250000:
-            needed_cache[key] = (expr, needed)
-            cached_names += len(needed)
-        return needed
-
-    def region_temps(stmts: list[Stmt], min_nodes: int) -> list[str]:
-        needed: set[str] = set()
-
-        def gather(ss: list[Stmt]) -> None:
-            for stmt in ss:
-                if isinstance(stmt, NbAssign):
-                    needed.update(add_needed(stmt.rhs))
-                elif isinstance(stmt, If):
-                    needed.update(add_needed(stmt.cond))
-                    gather(stmt.then_body)
-                    gather(stmt.else_body)
-                else:
-                    raise TypeError(stmt)
-
-        gather(stmts)
+    def region_temps(needed: set[str], min_nodes: int) -> list[str]:
         out: list[str] = []
         # Sorted: `needed` is a set, and these names are ranked against a
         # promotion cap below, so set order would make the cap pick a
@@ -301,18 +272,7 @@ def _promote_bulky_gated_cones(
         for stmt in stmts:
             if isinstance(stmt, If):
                 def note_arm(arm: list[Stmt]) -> None:
-                    raw: set[str] = set()
-
-                    def gather(ss: list[Stmt]) -> None:
-                        for s in ss:
-                            if isinstance(s, NbAssign):
-                                raw.update(add_needed(s.rhs))
-                            elif isinstance(s, If):
-                                raw.update(add_needed(s.cond))
-                                gather(s.then_body)
-                                gather(s.else_body)
-
-                    gather(arm)
+                    raw = collector.collect(arm)
                     raw_ssa = [
                         n
                         for n in raw
@@ -324,7 +284,7 @@ def _promote_bulky_gated_cones(
                             if len(raw_ssa) >= _MEGA_GATED_CONE
                             else _BULKY_TMP_NODES
                         )
-                        regions.append((len(raw_ssa), region_temps(arm, min_nodes)))
+                        regions.append((len(raw_ssa), region_temps(raw, min_nodes)))
 
                 # Both arms can host mega cones (merged same-cond holds keep
                 # else). Promote either arm when it would inline a bulky SSA set.
@@ -338,7 +298,7 @@ def _promote_bulky_gated_cones(
                 if gated:
                     raw = [
                         n
-                        for n in add_needed(stmt.rhs)
+                        for n in collector.expr(stmt.rhs)
                         if _is_ssa_temp(n) and _is_gpu_hot_ssa(n) and n not in cached
                     ]
                     if len(raw) >= _BULKY_GATED_CONE:
@@ -347,7 +307,7 @@ def _promote_bulky_gated_cones(
                             if len(raw) >= _MEGA_GATED_CONE
                             else _BULKY_TMP_NODES
                         )
-                        regions.append((len(raw), region_temps([stmt], min_nodes)))
+                        regions.append((len(raw), region_temps(set(raw), min_nodes)))
             else:
                 raise TypeError(stmt)
 

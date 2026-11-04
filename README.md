@@ -44,10 +44,10 @@ dependency graph and expands substitutions iteratively; rewrites reuse
 unchanged immutable branches. Generated signal widths use a shared lookup
 instead of repeatedly copying large tables. Optional AND reassociation leaves
 excessively deep expressions unchanged if hashing or ordering reaches Python's
-recursion limit. Cone selection reuses repeated gated-expression results,
-and sequential branch hoisting reuses nested statement cones; both caches are
-bounded. Deep priority muxes keep later condition demands lazy without
-recursively nesting the generated code. Exercise these cases with:
+recursion limit. Cone selection and sequential branch hoisting reuse nested
+statement cones with bounded caches. Deep priority muxes keep later condition
+demands lazy without recursively nesting the generated code. Exercise these
+cases with:
 
 ```bash
 python3 -m pytest flashsim/test_circt_array_create.py \
