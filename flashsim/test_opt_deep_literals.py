@@ -25,3 +25,23 @@ def test_deep_literal_is_left_unchanged_when_its_hash_exceeds_recursion_limit():
     finally:
         sys.setrecursionlimit(old_limit)
     assert result["result"] is root
+
+
+def test_deep_literal_is_left_unchanged_when_repr_exceeds_recursion_limit():
+    nested = Id("source")
+    for _ in range(250):
+        nested = UnaryOp("~", nested)
+    opaque = Extract(nested, 0, 1)
+    root = BinOp("&", BinOp("&", Id("a"), Id("b")), opaque)
+    signals = {name: Signal(name, 1, "input") for name in ("a", "b", "source")}
+    signals["result"] = Signal("result", 1, "output")
+    old_limit = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(500)
+        hash(opaque)
+        with pytest.raises(RecursionError):
+            repr(opaque)
+        result = _reassoc_and_chains({"result": root}, signals)
+    finally:
+        sys.setrecursionlimit(old_limit)
+    assert result["result"] is root
