@@ -36,6 +36,20 @@ ports is an error. Cover the three cases with:
 python3 -m pytest flashsim/test_circt_empty_output.py
 ```
 
+The CIRCT frontend also lowers integer `hw.array_create` values and registered
+outputs whose SSA names match their ports. Flattening retains reusable child
+modules only until their last reachable instance, reducing intermediate memory
+without merging instance state. Exercise these cases with:
+
+```bash
+python3 -m pytest flashsim/test_circt_array_create.py \
+  flashsim/test_circt_output_register.py flashsim/test_circt_hierarchy_reuse.py
+```
+
+The CIRCT source discovery skips `verification/` and
+`_Verification_Assert.sv` files. A FlashSim run therefore does not by itself
+replace an assertion-enabled Verilator qualification.
+
 Large `GpuHostSystemAxi` models are emitted as C++ method shards and compiled
 in parallel. Multi-CU RTL is detected from the generated source and uses a
 32-way split by default; set `FLASHSIM_DUT_SHARDS` to pin the split count for

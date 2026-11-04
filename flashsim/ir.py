@@ -3,86 +3,86 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Expr:
     pass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Id(Expr):
     name: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Const(Expr):
     value: int
     width: int = 32
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class UnaryOp(Expr):
     op: str
     a: Expr
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BinOp(Expr):
     op: str
     a: Expr
     b: Expr
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Ternary(Expr):
     cond: Expr
     a: Expr
     b: Expr
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Extract(Expr):
     a: Expr
     low: int
     width: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Concat(Expr):
     parts: tuple[Expr, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ArrayGet(Expr):
     arr: Expr
     index: Expr
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ArrayInject(Expr):
     arr: Expr
     index: Expr
     value: Expr
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ArrayZeros(Expr):
     depth: int
     width: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MemRead(Expr):
     mem: str
     addr: Expr
 
 
-@dataclass
+@dataclass(slots=True)
 class NbAssign:
     lhs: str
     rhs: Expr
 
 
-@dataclass
+@dataclass(slots=True)
 class If:
     cond: Expr
     then_body: list[Stmt]
@@ -92,7 +92,7 @@ class If:
 Stmt = NbAssign | If
 
 
-@dataclass
+@dataclass(slots=True)
 class Signal:
     name: str
     width: int
@@ -100,13 +100,13 @@ class Signal:
     depth: int = 0  # 0 = scalar; otherwise unpacked array length
 
 
-@dataclass
+@dataclass(slots=True)
 class Assign:
     lhs: str
     rhs: Expr
 
 
-@dataclass
+@dataclass(slots=True)
 class MemWrite:
     mem: str
     addr: Expr
@@ -114,7 +114,7 @@ class MemWrite:
     enable: Expr
 
 
-@dataclass
+@dataclass(slots=True)
 class AlwaysFF:
     clock: str
     body: list[Stmt]

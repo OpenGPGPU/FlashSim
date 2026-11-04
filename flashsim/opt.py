@@ -86,7 +86,10 @@ def optimize(mod: Module) -> Module:
         )
         for w in mod.mem_writes
     ]
-    assigns, body = _inline_single_use(assigns, body, outputs, mem_writes)
+    # Array reads index named storage in the emitter.  Inlining an array-valued
+    # SSA definition would turn that storage into an unsupported expression.
+    array_wires = {n for n, s in sigs.items() if s.kind == "wire" and s.depth}
+    assigns, body = _inline_single_use(assigns, body, outputs | array_wires, mem_writes)
     assigns = {k: _fold_expr(v) for k, v in assigns.items()}
     body = _map_stmts(body, _fold_expr)
     mem_writes = [

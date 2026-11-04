@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from collections import Counter
 from pathlib import Path
 
 from flashsim.ir import (
@@ -58,6 +59,9 @@ _WRITE = re.compile(
 )
 _ARRAY_GET = re.compile(
     r"%(\S+)\s*=\s*hw\.array_get\s+%(\S+)\[%(\S+)\]\s*:\s*!hw\.array<(\d+)xi(\d+)>"
+)
+_ARRAY_CREATE = re.compile(
+    r"%(\S+)\s*=\s*hw\.array_create\s+(.+?)\s*:\s*i(\d+)\s*$"
 )
 _ARRAY_INJECT = re.compile(
     r"%(\S+)\s*=\s*hw\.array_inject\s+%(\S+)\[%(\S+)\],\s*%(\S+)\s*:\s*!hw\.array<(\d+)xi(\d+)>"
@@ -200,7 +204,12 @@ def parse_hw_mlir(src: str, top: str | None = None) -> Module:
     else:
         public = [m for m in parsed if not m.private]
         chosen = by_name[(public[-1] if public else parsed[-1]).name]
-    return _flatten(chosen, by_name)
+    remaining, reachable = _reachable_instances(chosen, by_name)
+    # Unreachable modules cannot contribute to this top. Releasing their IR and
+    # completed children reduces the peak cost of flattening large hierarchies.
+    lib = {name: by_name[name] for name in reachable}
+    del by_name
+    return _flatten(chosen, lib, remaining)
 
 
 def _lower_module(raw: _ParsedMod) -> Module:
@@ -210,6 +219,26 @@ def _lower_module(raw: _ParsedMod) -> Module:
         kind = "input" if direction == "in" else "output"
         signals[port] = Signal(port, int(width), kind)
         ports.append(port)
+
+    # A result's SSA name can equal the name of an output port (for example a
+    # registered SRAM read). Keep the output port and internal value distinct.
+    body_text = raw.body
+    definitions = set(re.findall(r"(?m)^\s*%([A-Za-z0-9_.:-]+)\s*=", body_text))
+    used = set(signals) | {ssa_name(n) for n in _SSA.findall(body_text)}
+    rename: dict[str, str] = {}
+    for name in sorted(definitions):
+        ident = ssa_name(name)
+        if ident not in signals or signals[ident].kind != "output":
+            continue
+        candidate = ident + "__flashsim_value"
+        while candidate in used:
+            candidate += "_"
+        used.add(candidate)
+        rename[name] = candidate
+    if rename:
+        body_text = _SSA.sub(
+            lambda match: "%" + rename.get(match.group(1), match.group(1)), body_text
+        )
 
     assigns: list[Assign] = []
     regs: list[tuple[str, str, int, int]] = []
@@ -226,7 +255,7 @@ def _lower_module(raw: _ParsedMod) -> Module:
     output_srcs: list[str] = []
     saw_output = False
 
-    for raw_line in raw.body.splitlines():
+    for raw_line in body_text.splitlines():
         line = raw_line.strip().rstrip(",")
         if not line or line.startswith("//") or line in {"}", "{"}:
             continue
@@ -326,6 +355,20 @@ def _lower_module(raw: _ParsedMod) -> Module:
             enable = _ref(m.group(5)) if m.group(5) else Const(1, 1)
             mem_writes.append(MemWrite(mem, addr, data, enable))
             continue
+        if m := _ARRAY_CREATE.match(line):
+            ident = ssa_name(m.group(1))
+            values = [_ref(tok) for tok in _SSA.findall(m.group(2))]
+            if not values:
+                raise CirctError(f"array_create requires an operand: {line}")
+            width, depth = int(m.group(3)), len(values)
+            signals[ident] = Signal(ident, width, "wire", depth)
+            # CIRCT places its last operand at index zero.
+            expr: Expr = ArrayZeros(depth, width)
+            index_width = max(1, (depth - 1).bit_length())
+            for index, value in enumerate(reversed(values)):
+                expr = ArrayInject(expr, Const(index, index_width), value)
+            assigns.append(Assign(ident, expr))
+            continue
         if m := _ARRAY_GET.match(line):
             ident = ssa_name(m.group(1))
             width = int(m.group(5))
@@ -384,7 +427,26 @@ def _lower_module(raw: _ParsedMod) -> Module:
     return mod
 
 
-def _flatten(mod: Module, lib: dict[str, Module]) -> Module:
+def _reachable_instances(
+    mod: Module, lib: dict[str, Module]
+) -> tuple[Counter[str], set[str]]:
+    remaining: Counter[str] = Counter()
+    reachable: set[str] = set()
+    pending = [mod.name]
+    while pending:
+        name = pending.pop()
+        if name in reachable:
+            continue
+        if name not in lib:
+            raise CirctError(f"missing callee @{name}")
+        reachable.add(name)
+        for _, _, callee_name, _ in getattr(lib[name], "instances", []):
+            remaining[callee_name] += 1
+            pending.append(callee_name)
+    return remaining, reachable
+
+
+def _flatten(mod: Module, lib: dict[str, Module], remaining: Counter[str]) -> Module:
     instances = getattr(mod, "instances", [])
     if not instances:
         return mod
@@ -395,7 +457,7 @@ def _flatten(mod: Module, lib: dict[str, Module]) -> Module:
     for results, inst, callee_name, inputs in instances:
         if callee_name not in lib:
             raise CirctError(f"missing callee @{callee_name}")
-        callee = _flatten(lib[callee_name], lib)
+        callee = _flatten(lib[callee_name], lib, remaining)
         lib[callee_name] = callee
         prefix = re.sub(r"[^0-9A-Za-z_]", "_", inst) + "_"
         out_ports = [p for p in callee.ports if callee.signals[p].kind == "output"]
@@ -432,6 +494,9 @@ def _flatten(mod: Module, lib: dict[str, Module]) -> Module:
                     _rename_expr(wr.enable, rename),
                 )
             )
+        remaining[callee_name] -= 1
+        if remaining[callee_name] == 0:
+            del lib[callee_name]
     return Module(
         mod.name, signals, assigns, AlwaysFF(mod.always.clock, body), mod.ports, mem_writes
     )
