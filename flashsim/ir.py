@@ -201,31 +201,36 @@ def map_expr(expr: Expr, fn) -> Expr:
     if isinstance(expr, Id) or isinstance(expr, Const):
         return fn(expr)
     if isinstance(expr, UnaryOp):
-        return fn(UnaryOp(expr.op, map_expr(expr.a, fn)))
+        a = map_expr(expr.a, fn)
+        return fn(expr if a is expr.a else UnaryOp(expr.op, a))
     if isinstance(expr, BinOp):
-        return fn(BinOp(expr.op, map_expr(expr.a, fn), map_expr(expr.b, fn)))
+        a, b = map_expr(expr.a, fn), map_expr(expr.b, fn)
+        return fn(expr if a is expr.a and b is expr.b else BinOp(expr.op, a, b))
     if isinstance(expr, Ternary):
-        return fn(
-            Ternary(map_expr(expr.cond, fn), map_expr(expr.a, fn), map_expr(expr.b, fn))
-        )
+        cond = map_expr(expr.cond, fn)
+        a, b = map_expr(expr.a, fn), map_expr(expr.b, fn)
+        unchanged = cond is expr.cond and a is expr.a and b is expr.b
+        return fn(expr if unchanged else Ternary(cond, a, b))
     if isinstance(expr, Extract):
-        return fn(Extract(map_expr(expr.a, fn), expr.low, expr.width))
+        a = map_expr(expr.a, fn)
+        return fn(expr if a is expr.a else Extract(a, expr.low, expr.width))
     if isinstance(expr, Concat):
-        return fn(Concat(tuple(map_expr(p, fn) for p in expr.parts)))
+        parts = tuple(map_expr(p, fn) for p in expr.parts)
+        unchanged = all(a is b for a, b in zip(parts, expr.parts))
+        return fn(expr if unchanged else Concat(parts))
     if isinstance(expr, ArrayGet):
-        return fn(ArrayGet(map_expr(expr.arr, fn), map_expr(expr.index, fn)))
+        arr, index = map_expr(expr.arr, fn), map_expr(expr.index, fn)
+        return fn(expr if arr is expr.arr and index is expr.index else ArrayGet(arr, index))
     if isinstance(expr, ArrayInject):
-        return fn(
-            ArrayInject(
-                map_expr(expr.arr, fn),
-                map_expr(expr.index, fn),
-                map_expr(expr.value, fn),
-            )
-        )
+        arr, index = map_expr(expr.arr, fn), map_expr(expr.index, fn)
+        value = map_expr(expr.value, fn)
+        unchanged = arr is expr.arr and index is expr.index and value is expr.value
+        return fn(expr if unchanged else ArrayInject(arr, index, value))
     if isinstance(expr, ArrayZeros):
         return fn(expr)
     if isinstance(expr, MemRead):
-        return fn(MemRead(expr.mem, map_expr(expr.addr, fn)))
+        addr = map_expr(expr.addr, fn)
+        return fn(expr if addr is expr.addr else MemRead(expr.mem, addr))
     raise TypeError(type(expr))
 
 
