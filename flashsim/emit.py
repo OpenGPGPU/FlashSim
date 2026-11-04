@@ -4,7 +4,7 @@ import os
 import re
 import sys
 import zlib
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 
 from flashsim.ir import (
     ArrayGet,
@@ -670,32 +670,65 @@ def _emit_ternary_priority(
     lines.append(f"{sp}}}")
 
 
-def _collect_uncached_temps(
-    stmts: list[Stmt],
-    cached: set[str],
-    assigns: dict[str, Expr],
-    stop: set[str],
-) -> set[str]:
-    """SSA temps that would be bound as locals anywhere in an NBA stmt tree."""
-    temps: set[str] = set()
+class _UncachedTempCollector:
+    """Collect NBA subtree cones with a bounded, per-walk identity cache.
 
-    def note_expr(expr: Expr) -> None:
-        temps.update(_uncached_needed(expr, assigns, cached, stop))
+    Callers keep the assignment map, cached wires and stop set unchanged for
+    the collector's lifetime. Shared and nested arms can then reuse the same
+    results without repeatedly walking all of their descendants.
+    """
 
-    def walk(ss: list[Stmt]) -> None:
-        for stmt in ss:
-            if isinstance(stmt, NbAssign):
-                note_expr(stmt.rhs)
-            elif isinstance(stmt, If):
-                note_expr(stmt.cond)
-                walk(stmt.then_body)
-                if stmt.else_body:
-                    walk(stmt.else_body)
-            else:
-                raise TypeError(stmt)
+    def __init__(self, cached: set[str], assigns: dict[str, Expr], stop: set[str]):
+        self.cached = cached
+        self.assigns = assigns
+        self.stop = stop
+        self._expressions: dict[int, tuple[Expr, frozenset[str]]] = {}
+        self._statements: OrderedDict[int, tuple[Stmt, frozenset[str]]] = OrderedDict()
+        self._expression_names = 0
+        self._statement_names = 0
 
-    walk(stmts)
-    return temps
+    def expr(self, expr: Expr) -> frozenset[str]:
+        entry = self._expressions.get(id(expr))
+        if entry is not None:
+            return entry[1]
+        names = frozenset(_uncached_needed(expr, self.assigns, self.cached, self.stop))
+        if len(self._expressions) < 32768 and self._expression_names + len(names) <= 250000:
+            self._expressions[id(expr)] = (expr, names)
+            self._expression_names += len(names)
+        return names
+
+    def statement(self, stmt: Stmt) -> frozenset[str]:
+        key = id(stmt)
+        entry = self._statements.get(key)
+        if entry is not None:
+            self._statements.move_to_end(key)
+            return entry[1]
+        if isinstance(stmt, NbAssign):
+            names = self.expr(stmt.rhs)
+        elif isinstance(stmt, If):
+            found = set(self.expr(stmt.cond))
+            for child in stmt.then_body:
+                found.update(self.statement(child))
+            for child in stmt.else_body:
+                found.update(self.statement(child))
+            names = frozenset(found)
+        else:
+            raise TypeError(stmt)
+        if isinstance(stmt, If) and len(names) <= 250000:
+            while self._statements and (
+                len(self._statements) >= 32768 or self._statement_names + len(names) > 250000
+            ):
+                _, (_, evicted) = self._statements.popitem(last=False)
+                self._statement_names -= len(evicted)
+            self._statements[key] = (stmt, names)
+            self._statement_names += len(names)
+        return names
+
+    def collect(self, stmts: list[Stmt]) -> set[str]:
+        names: set[str] = set()
+        for stmt in stmts:
+            names.update(self.statement(stmt))
+        return names
 
 
 def _order_ssa_temps(
@@ -4518,11 +4551,14 @@ def _emit_nba_tree(
     scratch: list[int] | None = None,
     demanded: set[str] | None = None,
     branch_assigned: set[str] | None = None,
+    temp_collector: _UncachedTempCollector | None = None,
 ) -> None:
     if scratch is None:
         scratch = [0]
     if demanded is None:
         demanded = set()
+    if temp_collector is None:
+        temp_collector = _UncachedTempCollector(cached, assigns, stop)
     sp = " " * indent
     for stmt in stmts:
         if isinstance(stmt, NbAssign):
@@ -4578,8 +4614,8 @@ def _emit_nba_tree(
             )
             if_branch_assigned: set[str] = set()
             if stmt.else_body:
-                then_t = _collect_uncached_temps(stmt.then_body, cached, assigns, stop)
-                else_t = _collect_uncached_temps(stmt.else_body, cached, assigns, stop)
+                then_t = temp_collector.collect(stmt.then_body)
+                else_t = temp_collector.collect(stmt.else_body)
                 _emit_branch_hoist(
                     then_t & else_t,
                     cached,
@@ -4610,6 +4646,7 @@ def _emit_nba_tree(
                 scratch,
                 set(demanded),
                 if_branch_assigned,
+                temp_collector,
             )
             if stmt.else_body:
                 lines.append(f"{sp}}} else {{")
@@ -4625,6 +4662,7 @@ def _emit_nba_tree(
                     scratch,
                     set(demanded),
                     if_branch_assigned,
+                    temp_collector,
                 )
                 lines.append(f"{sp}}}")
             else:
