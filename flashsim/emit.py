@@ -2116,10 +2116,17 @@ def _array_depth(expr: Expr, sigs: dict[str, Signal]) -> int:
     return 0
 
 
+def _index_type_for_count(count: int) -> str:
+    """Storage for indices from zero through count - 1, at least 16 bits."""
+    if count < 0 or count >= 1 << 32:
+        raise ValueError("index count must fit the unsigned C++ loop counters")
+    return c_type(max(16, (count - 1).bit_length()))
+
+
 def _dirty_tracking_declarations(count: int) -> list[str]:
     # A full GPU can have more than 2**16 independently committed signals.
     # The list and its insertion argument must both represent every index.
-    index_type = c_type(max(16, (count - 1).bit_length()))
+    index_type = _index_type_for_count(count)
     return [
         f"  uint8_t _w[{count}] = {{}};",
         f"  {index_type} _wl[{count}] = {{}};",
@@ -2257,6 +2264,8 @@ def emit_cpp(mod: Module) -> str:
     _HOLD_WAKE_PACKED = (
         _hold_wake_packed(wake_sets, _WAKE_PACK_WORDS) if _wake_pack_enabled() else {}
     )
+    page_index_type = _index_type_for_count(nparts)
+    hold_index_type = _index_type_for_count(len(hold_buckets))
     _ARRAY_INDEX = {n: i for i, n in enumerate(array_writes)} if large else {}
     _LARGE = large
 
@@ -2449,11 +2458,11 @@ def emit_cpp(mod: Module) -> str:
         "    memcpy(d, rem, n * sizeof(uint64_t));",
         "  }",
         "}",
-        "static inline void fs_bump(uint32_t *pg, const uint16_t *ids, unsigned n) {",
+        f"static inline void fs_bump(uint32_t *pg, const {page_index_type} *ids, unsigned n) {{",
         "  for (unsigned i = 0; i < n; i++) pg[ids[i]]++;",
         "}",
         "static inline void fs_wake(uint64_t *need, uint64_t *any, unsigned *words,",
-        "                            const uint16_t *ids, unsigned n) {",
+        f"                            const {hold_index_type} *ids, unsigned n) {{",
         "  for (unsigned i = 0; i < n; i++) {",
         "    unsigned k = ids[i];",
         "    need[k >> 6] |= 1ull << (k & 63);",
@@ -2482,10 +2491,10 @@ def emit_cpp(mod: Module) -> str:
     ]
     for key, idx in sorted(inv_tables.items(), key=lambda kv: kv[1]):
         inner = ", ".join(str(p) for p in key)
-        lines.append(f"static const uint16_t _inv{idx}[] = {{{inner}}};")
+        lines.append(f"static const {page_index_type} _inv{idx}[] = {{{inner}}};")
     for key, idx in sorted(_HOLD_WAKE_TABLES.items(), key=lambda kv: kv[1]):
         inner = ", ".join(str(p) for p in key)
-        lines.append(f"static const uint16_t _hw{idx}[] = {{{inner}}};")
+        lines.append(f"static const {hold_index_type} _hw{idx}[] = {{{inner}}};")
     for key, (idx, _count) in sorted(_HOLD_WAKE_SPARSE.items(), key=lambda kv: kv[1][0]):
         entries = ", ".join(f"{{{word}u, {mask:#x}ull}}" for word, mask in _sparse_hold_masks(key))
         lines.append(f"static const uint64_t _hws{idx}[][2] = {{{entries}}};")
@@ -3315,7 +3324,7 @@ def _outline_static_commit_blocks(header: str, cls: str,
     if '"' in code or "'" in code:
         return body, None
     declarations = list(re.finditer(
-        r"^static const uint16_t (_inv\d+)\[\] = \{([0-9, ]+)\};$", header, re.M))
+        r"^static const uint(?:16|32|64)_t (_inv\d+)\[\] = \{([0-9, ]+)\};$", header, re.M))
     definitions = Counter(m[1] for m in declarations)
     tables = {m[1]: list(map(int, re.findall(r"\d+", m[2])))
               for m in declarations if definitions[m[1]] == 1
@@ -3480,13 +3489,18 @@ def split_dut_methods(
             # page IDs and uint32_t wraparound). Other shards still inline
             # the original helper at their normal optimization level.
             helper = f"{cls}_commit_bump"
+            signature = re.search(
+                r"\bfs_bump\s*\(\s*uint32_t\s*\*\s*\w+\s*,\s*"
+                r"const\s+(uint(?:16|32|64)_t)\s*\*", header
+            )
+            index_type = signature.group(1) if signature else "uint16_t"
             body = body.replace("fs_bump(", f"{helper}(")
             body = body.replace('#include "dut.h"\n',
                 '#include "dut.h"\n'
-                f"extern void {helper}(uint32_t *, const uint16_t *, unsigned);\n", 1)
+                f"extern void {helper}(uint32_t *, const {index_type} *, unsigned);\n", 1)
             parts.append(("dut_commit_helpers.cpp",
                 "#include <cstdint>\n\n"
-                f"void {helper}(uint32_t *pg, const uint16_t *ids, unsigned n) {{\n"
+                f"void {helper}(uint32_t *pg, const {index_type} *ids, unsigned n) {{\n"
                 "  for (; n >= 4u; n -= 4u, ids += 4u) {\n"
                 "    pg[ids[0]]++;\n"
                 "    pg[ids[1]]++;\n"
