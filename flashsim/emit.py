@@ -629,7 +629,7 @@ def _emit_ternary_priority(
     scratch: list[int],
     emit_arm,
 ) -> None:
-    """Emit right-nested ternaries as flat else-if when safe."""
+    """Emit priority chains without deep recursion or eager later arms."""
     arms, default = _right_ternary_arms(expr)
     sp = " " * indent
     if len(arms) >= _FLAT_TERNARY_ARMS and _ternary_chain_flat_ok(arms, cached, sigs):
@@ -644,6 +644,21 @@ def _emit_ternary_priority(
         lines.append(f"{sp}else {{")
         emit_arm(dest, default, indent + 2)
         lines.append(f"{sp}}}")
+        return
+    if len(arms) >= _FLAT_TERNARY_ARMS:
+        # Some conditions need demand calls or wide temporaries before they
+        # can be tested, so they cannot be emitted in an else-if. A one-shot
+        # loop keeps those operations lazy without nested Python or C++ blocks.
+        lines.append(f"{sp}do {{")
+        for cond, then_e in arms:
+            _emit_demand(cond, cached, lines, indent + 2)
+            code = _cond_code(cond, cached, sigs, lines, indent + 2, scratch)
+            lines.append(f"{sp}  if ({code}) {{")
+            emit_arm(dest, then_e, indent + 4)
+            lines.append(f"{sp}    break;")
+            lines.append(f"{sp}  }}")
+        emit_arm(dest, default, indent + 2)
+        lines.append(f"{sp}}} while (false);")
         return
     _emit_demand(expr.cond, cached, lines, indent)
     lines.append(
