@@ -75,6 +75,11 @@ generated DUT to reuse the emitted C++ and skip the Python lowering pass. Set
 `FLASHSIM_SHARD_OPT=-O0`/`-O1` for a quick multi-CU smoke build; the default is
 `-O2`; the generated `dut_commit.cpp` shard is kept at O0 because it is a
 large dirty-list switch with little effect on the normal runtime path.
+For particularly large models, `FLASHSIM_CONSERVATIVE_ALIAS=1` passes
+`-fno-strict-aliasing`, and `FLASHSIM_COMMIT_CHUNKS_OPT=-O0` can shorten a
+smoke build of a large split commit shard. Both are opt-in; measure simulator
+runtime for the workload before selecting them for performance runs. Shard
+cache keys include these choices.
 
 `FLASHSIM_DATA_REGION_FIELDS=1024` optionally groups the primitive storage
 prefix of large, bulk-initialized DUTs into data-only base classes. This bounds
