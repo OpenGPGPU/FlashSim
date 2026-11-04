@@ -56,7 +56,9 @@ python3 -m pytest flashsim/test_circt_array_create.py \
   flashsim/test_ir_structural_sharing.py flashsim/test_opt_deep_literals.py \
   flashsim/test_opt_inline_worklist.py flashsim/test_opt_signal_lookup.py \
   flashsim/test_emit_cone_memo.py flashsim/test_emit_deep_priority.py \
-  flashsim/test_emit_temp_cache.py flashsim/test_emit_page_indices.py
+  flashsim/test_emit_temp_cache.py flashsim/test_emit_page_indices.py \
+  flashsim/test_emit_commit_helpers.py flashsim/test_commit_blocks.py \
+  flashsim/test_compile_options.py flashsim/test_build_scheduling.py
 ```
 
 The CIRCT source discovery skips `verification/` and
@@ -77,9 +79,11 @@ generated DUT to reuse the emitted C++ and skip the Python lowering pass. Set
 large dirty-list switch with little effect on the normal runtime path.
 For particularly large models, `FLASHSIM_CONSERVATIVE_ALIAS=1` passes
 `-fno-strict-aliasing`, and `FLASHSIM_COMMIT_CHUNKS_OPT=-O0` can shorten a
-smoke build of a large split commit shard. Both are opt-in; measure simulator
-runtime for the workload before selecting them for performance runs. Shard
-cache keys include these choices.
+smoke build of a large split commit shard. `FLASHSIM_COMMIT_PARTS=16` can also
+divide a large chunked commit shard into up to 16 independently compiled
+pieces; use `FLASHSIM_COMPILE_JOBS` to fit the available memory. These options
+are opt-in; measure simulator runtime for the workload before selecting them
+for performance runs. Shard cache keys include the compiler choices.
 
 `FLASHSIM_DATA_REGION_FIELDS=1024` optionally groups the primitive storage
 prefix of large, bulk-initialized DUTs into data-only base classes. This bounds

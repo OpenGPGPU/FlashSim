@@ -18,7 +18,7 @@ def build_fixture(tmp_path, fail="", *, conservative=False, chunk_opt=None):
     model.mkdir()
     for name in ("dut.h","arti_rtl_model.h","arti_rtl_model.cpp",
                  "dut_0.cpp","dut_1.cpp","dut_2.cpp","dut_commit.cpp","dut_commit_chunks.cpp",
-                 "dut_commit_helpers.cpp"):
+                 "dut_commit_part000.cpp","dut_commit_helpers.cpp"):
         (model/name).write_text("// fixture\n")
     (model/"dut_commit_helpers.cpp").write_text("// largest source\n"*100)
     script=model/"build_embedded.sh"
@@ -112,4 +112,6 @@ def test_opt_in_alias_and_chunk_flags_reach_each_compiler(tmp_path):
     assert all("-fno-strict-aliasing" in row["args"] for row in starts)
     chunks=next(row for row in starts if row["source"]=="dut_commit_chunks.cpp")
     assert "-O0" in chunks["args"]
+    part=next(row for row in starts if row["source"]=="dut_commit_part000.cpp")
+    assert "-O0" in part["args"]
     assert "-O2" in next(row for row in starts if row["source"]=="dut_0.cpp")["args"]
