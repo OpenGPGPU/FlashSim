@@ -3267,6 +3267,55 @@ def _chunk_commit_switch(cls: str, body: str) -> str | None:
     return "".join(out)
 
 
+def _partition_commit_chunks(cls: str, body: str, count: int) -> list[tuple[str, str]]:
+    """Put generated commit helpers in separate translation units on request.
+
+    The dispatch table and the bodies stay in their original order. Helpers
+    acquire external linkage so the unchanged dispatcher can call them. Only
+    the emitter's own expected structure is accepted; fail rather than emit a
+    partially transformed commit if that structure changes.
+    """
+    if count == 1:
+        return [("dut_commit_chunks.cpp", body)]
+    tag = f"{cls}_commit_part"
+    pattern = re.compile(
+        rf"^static void {re.escape(tag)}(\d+)\({re.escape(cls)} \*d, unsigned k\) \{{\n",
+        re.M,
+    )
+    matches = list(pattern.finditer(body))
+    if not matches or [int(match[1]) for match in matches] != list(range(len(matches))):
+        raise ValueError("unexpected generated commit helper sequence")
+    marker = f"void {cls}::_commit() {{\n"
+    tail_start = body.find(marker, matches[-1].end())
+    if tail_start < 0:
+        raise ValueError("missing generated commit dispatcher")
+    prefix, tail = body[:matches[0].start()], body[tail_start:]
+    references = [int(value) for value in re.findall(rf"\b{re.escape(tag)}(\d+)\b", tail)]
+    if references != list(range(len(matches))):
+        raise ValueError("unexpected generated commit dispatch table")
+    spans = [(match.start(), matches[i + 1].start() if i + 1 < len(matches) else tail_start)
+             for i, match in enumerate(matches)]
+    target = max(1, (sum(end - start for start, end in spans) + count - 1) // count)
+    groups: list[list[tuple[int, int]]] = []
+    current: list[tuple[int, int]] = []
+    size = 0
+    for start, end in spans:
+        if current and size >= target and len(groups) < count - 1:
+            groups.append(current)
+            current, size = [], 0
+        current.append((start, end))
+        size += end - start
+    if current:
+        groups.append(current)
+    declarations = "".join(f"void {tag}{i}({cls} *, unsigned);\n"
+                           for i in range(len(matches)))
+    parts = [("dut_commit_chunks.cpp", prefix + declarations + "\n" + tail)]
+    for i, group in enumerate(groups):
+        helpers = "".join(body[start + len("static "):end] for start, end in group)
+        parts.append((f"dut_commit_part{i:03d}.cpp", prefix + helpers))
+    return parts
+
+
 def _invalidation_blocks(ids: list[int]) -> tuple[list[int], int] | None:
     """Pack dense page increments into fixed 8/4-cell blocks and scalar tails.
 
@@ -3521,7 +3570,13 @@ def split_dut_methods(
                     body = transformed
         if compact:
             # Bounded switches use normal -O2 without optimizing one giant CFG.
-            parts.append(("dut_commit_chunks.cpp", compact))
+            try:
+                commit_parts = int(os.environ.get("FLASHSIM_COMMIT_PARTS", "1"))
+            except ValueError as exc:
+                raise ValueError("FLASHSIM_COMMIT_PARTS must be an integer from 1 to 64") from exc
+            if not 1 <= commit_parts <= 64:
+                raise ValueError("FLASHSIM_COMMIT_PARTS must be an integer from 1 to 64")
+            parts.extend(_partition_commit_chunks(cls, compact, commit_parts))
         else:
             parts.append((f"dut_{name.lstrip('_')}.cpp", body))
     return header, parts

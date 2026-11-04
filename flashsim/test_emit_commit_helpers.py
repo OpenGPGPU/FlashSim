@@ -74,23 +74,26 @@ def test_commit_without_invalidation_needs_no_helper():
     assert "dut_commit_helpers.cpp" not in dict(parts)
 
 
-def test_chunked_commit_preserves_typed_cases_epochs_and_wakes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("commit_parts", [1, 3])
+def test_chunked_commit_preserves_typed_cases_epochs_and_wakes(tmp_path, monkeypatch, commit_parts):
     from flashsim import emit
     compiler = shutil.which("c++")
     if not compiler:
         pytest.skip("C++ compiler unavailable")
     monkeypatch.setattr(emit, "_COMMIT_CHUNK_MIN_CASES", 4)
     monkeypatch.setattr(emit, "_COMMIT_CHUNK_CASES", 4)
+    monkeypatch.setenv("FLASHSIM_COMMIT_PARTS", str(commit_parts))
+    monkeypatch.setenv("FLASHSIM_COMMIT_BLOCKS", "1")
     fields = [("a", "uint8_t"), ("b", "uint16_t"), ("c", "uint32_t"),
               ("d", "uint64_t"), ("e", "unsigned __int128")]
     cpp = """#include <cstdint>
 #include <cstring>
-static const uint16_t ids[] = {0,1,0,2,2};
+static const uint16_t _inv0[] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,0,0,2};
 static inline void fs_bump(uint32_t *pg,const uint16_t *ids,unsigned n) {
   for(unsigned i=0;i<n;i++)pg[ids[i]]++;
 }
 struct ChunkDut {
-  uint32_t _pg[3] = {UINT32_MAX,7,9};
+  uint32_t _pg[32] = {UINT32_MAX,7,9};
   uint64_t _bep=0,_bst[1]={0},_cc=0;
   unsigned _nw=8,_chg=0,_h_words=0;
   uint64_t _h_need[1]={0},_h_any[1]={0};
@@ -107,7 +110,7 @@ struct ChunkDut {
         assignment = (f"{name} = {name}__n;" if name != "f" else
                       "memcpy(f, f__n, sizeof(f));")
         cpp += f"      case {i}u: {{\n        if ({condition}) {{\n"
-        cpp += "          if (_bst[0] != _bep) { _bst[0]=_bep; fs_bump(_pg,ids,5u); }\n"
+        cpp += "          if (_bst[0] != _bep) { _bst[0]=_bep; fs_bump(_pg, _inv0, 35u); }\n"
         cpp += f"          _h_need[0] |= 1ull << {i};\n"
         cpp += "          if (!_h_any[0]) ++_h_words; _h_any[0] |= 1ull;\n"
         cpp += f"          _chg++;\n          {assignment}\n        }}\n      }} break;\n"
@@ -115,8 +118,15 @@ struct ChunkDut {
     header, parts = split_dut_methods(cpp, n_shards=2)
     names = dict(parts)
     assert "dut_commit_chunks.cpp" in names
+    assert "dut_commit_blocks.cpp" in names
     assert "dut_commit.cpp" not in names
     assert "ChunkDut_commit_part1" in names["dut_commit_chunks.cpp"]
+    if commit_parts > 1:
+        assert "dut_commit_part000.cpp" in names
+        assert "dut_commit_part001.cpp" in names
+        assert "static void ChunkDut_commit_part" not in names["dut_commit_chunks.cpp"]
+    else:
+        assert "dut_commit_part000.cpp" not in names
     (tmp_path/"dut.h").write_text(header)
     objects = []
     for name, source in parts:
@@ -135,16 +145,24 @@ int main() {
   d._commit();
   if(d.a!=1 || d.b!=2 || d.c!=3 || d.d!=4 || d.e!=d.e__n || d.f[2]!=33)return 1;
   if(d._cc!=8 || d._chg!=6 || d._bep!=1 || d._h_need[0]!=63 || d._h_words!=1)return 2;
-  if(d._pg[0]!=1 || d._pg[1]!=8 || d._pg[2]!=11)return 3;
+  if(d._pg[0]!=2 || d._pg[1]!=8 || d._pg[2]!=11)return 3;
   d._chg=0;d._commit();
-  if(d._chg || d._cc!=16 || d._bep!=2 || d._pg[0]!=1)return 4;
+  if(d._chg || d._cc!=16 || d._bep!=2 || d._pg[0]!=2)return 4;
   d.a__n=2;d.f__n[2]=44;d._h_need[0]=d._h_any[0]=0;d._h_words=0;
   d._commit();
   if(d.a!=2 || d.f[2]!=44 || d._chg!=2 || d._cc!=24 || d._bep!=3)return 5;
-  if(d._pg[0]!=3 || d._pg[1]!=9 || d._pg[2]!=13)return 6;
+  if(d._pg[0]!=5 || d._pg[1]!=9 || d._pg[2]!=13)return 6;
   if(d._h_need[0]!=33 || d._h_words!=1)return 7;
 }
 ''')
     binary=tmp_path/"check"
     subprocess.run([compiler,"-std=c++17",str(main),*objects,"-o",str(binary)],check=True)
     subprocess.run([str(binary)],check=True)
+
+
+def test_commit_partition_rejects_unexpected_dispatch():
+    from flashsim.emit import _partition_commit_chunks
+    body = ("static void BadDut_commit_part0(BadDut *d, unsigned k) {\n}\n"
+            "void BadDut::_commit() {\n BadDut_commit_part1(this, 0); }\n")
+    with pytest.raises(ValueError, match="dispatch table"):
+        _partition_commit_chunks("BadDut", body, 2)

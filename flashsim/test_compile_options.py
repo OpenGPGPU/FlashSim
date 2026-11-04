@@ -8,7 +8,8 @@ from flashsim import experiment
 
 
 def test_alias_and_commit_options_invalidate_the_shard_cache(tmp_path, monkeypatch):
-    for name in ('dut.h','dut_0.cpp','dut_commit.cpp','dut_commit_chunks.cpp'):
+    for name in ('dut.h','dut_0.cpp','dut_commit.cpp','dut_commit_chunks.cpp',
+                 'dut_commit_part000.cpp'):
         (tmp_path/name).write_text('// fixture\n')
     calls=[]
     monkeypatch.setattr(experiment, '_need', lambda _name: '/fake/c++')
@@ -28,16 +29,17 @@ def test_alias_and_commit_options_invalidate_the_shard_cache(tmp_path, monkeypat
         experiment._compile_flash(tmp_path,'Fixture','check',4)
         return [c for c in calls[before:] if '-c' in c]
     first=compile_once()
-    assert len(first)==3 and all('-fno-strict-aliasing' not in c for c in first)
+    assert len(first)==4 and all('-fno-strict-aliasing' not in c for c in first)
     assert not compile_once()
     monkeypatch.setenv('FLASHSIM_CONSERVATIVE_ALIAS','1')
     changed=compile_once()
-    assert len(changed)==3 and all('-fno-strict-aliasing' in c for c in changed)
+    assert len(changed)==4 and all('-fno-strict-aliasing' in c for c in changed)
     assert not compile_once()
     monkeypatch.setenv('FLASHSIM_COMMIT_CHUNKS_OPT','-O0')
     changed=compile_once()
     chunks=next(c for c in changed if any(str(a).endswith('dut_commit_chunks.cpp') for a in c))
-    assert len(changed)==3 and '-O0' in chunks
+    part=next(c for c in changed if any(str(a).endswith('dut_commit_part000.cpp') for a in c))
+    assert len(changed)==4 and '-O0' in chunks and '-O0' in part
     monkeypatch.setenv('FLASHSIM_CONSERVATIVE_ALIAS','invalid')
     with pytest.raises(ValueError,match='FLASHSIM_CONSERVATIVE_ALIAS'):
         compile_once()

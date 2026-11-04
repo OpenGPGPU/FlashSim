@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import filecmp
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -142,10 +143,14 @@ def _compile_flash(
         # effect because the list is short on the normal GPU path.  Keep it
         # at O0, matching build_embedded.sh, while the eval shards use the
         # requested optimization level.
+        def is_commit_chunk(shard: Path) -> bool:
+            return (shard.name == "dut_commit_chunks.cpp" or
+                    bool(re.fullmatch(r"dut_commit_part\d+\.cpp", shard.name)))
+
         def shard_opt_for(shard: Path) -> str:
             if shard.name == "dut_commit.cpp":
                 return "-O0"
-            return commit_chunks_opt if shard.name == "dut_commit_chunks.cpp" else shard_opt
+            return commit_chunks_opt if is_commit_chunk(shard) else shard_opt
 
         # CYCLES only appears in the tiny wrapper, so exclude it from the
         # shard cache key.  This lets check and perf modes share the expensive
@@ -154,9 +159,9 @@ def _compile_flash(
             [flag for flag in shard_flags if not flag.startswith("-DCYCLES=")]
             + ["shard_opt:" + shard_opt]
             + ["dut_commit.cpp:" + shard_opt_for(Path("dut_commit.cpp"))]
-            + (["dut_commit_chunks.cpp:" + commit_chunks_opt]
+            + (["commit_chunks:" + commit_chunks_opt]
                if commit_chunks_opt != shard_opt
-               and any(shard.name == "dut_commit_chunks.cpp" for shard in shards) else [])
+               and any(is_commit_chunk(shard) for shard in shards) else [])
         )
         reuse = False
         try:

@@ -450,6 +450,7 @@ if ((${#SHARDS[@]} > 0)); then
     opt="$SHARD_OPT"
     [[ "$src" != "dut_commit.cpp" ]] || opt=-O0
     [[ "$src" != "dut_commit_chunks.cpp" ]] || opt="$COMMIT_CHUNKS_OPT"
+    [[ ! "$src" =~ ^dut_commit_part[0-9]+\.cpp$ ]] || opt="$COMMIT_CHUNKS_OPT"
     tasks+=("$src" "$obj" "$opt")
   done
   # Compile the largest sources first to reduce the final serial tail.
