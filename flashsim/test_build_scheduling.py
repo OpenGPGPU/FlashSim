@@ -11,13 +11,13 @@ import pytest
 from flashsim.arti_model import BUILD_EMBEDDED
 
 
-def build_fixture(tmp_path, fail=""):
+def build_fixture(tmp_path, fail="", *, conservative=False, chunk_opt=None):
     if not shutil.which("ar") or not shutil.which("xargs"):
         pytest.skip("archive/build tools unavailable")
     model=tmp_path/"model with spaces"
     model.mkdir()
     for name in ("dut.h","arti_rtl_model.h","arti_rtl_model.cpp",
-                 "dut_0.cpp","dut_1.cpp","dut_2.cpp","dut_commit.cpp",
+                 "dut_0.cpp","dut_1.cpp","dut_2.cpp","dut_commit.cpp","dut_commit_chunks.cpp",
                  "dut_commit_helpers.cpp"):
         (model/name).write_text("// fixture\n")
     (model/"dut_commit_helpers.cpp").write_text("// largest source\n"*100)
@@ -61,6 +61,12 @@ sys.exit(subprocess.run([REAL_XARGS,*sys.argv[1:]],input=raw).returncode)
     profile.touch()
     env["FLASHSIM_PGO_PROFILE"]=str(profile)
     env.pop("FLASHSIM_PGO_GENERATE",None)
+    env.pop("FLASHSIM_CONSERVATIVE_ALIAS",None)
+    env.pop("FLASHSIM_COMMIT_CHUNKS_OPT",None)
+    if conservative:
+        env["FLASHSIM_CONSERVATIVE_ALIAS"]="1"
+    if chunk_opt is not None:
+        env["FLASHSIM_COMMIT_CHUNKS_OPT"]=chunk_opt
     result=subprocess.run(["bash",str(script)],env=env,capture_output=True,text=True)
     rows=[json.loads(line) for line in events.read_text().splitlines()]
     return model,stage,result,rows,profile
@@ -97,3 +103,13 @@ def test_failed_compilation_cannot_publish_an_archive(tmp_path):
     assert not (model/"libarti_rtl_model.a").exists()
     assert not (stage/"hw/misc/libarti_rtl_model.a").exists()
     assert not any(row["source"]=="arti_rtl_model.cpp" for row in rows)
+
+
+def test_opt_in_alias_and_chunk_flags_reach_each_compiler(tmp_path):
+    _,_,result,rows,_=build_fixture(tmp_path,conservative=True,chunk_opt="-O0")
+    assert result.returncode==0,result.stdout+result.stderr
+    starts=[row for row in rows if row["event"]=="start"]
+    assert all("-fno-strict-aliasing" in row["args"] for row in starts)
+    chunks=next(row for row in starts if row["source"]=="dut_commit_chunks.cpp")
+    assert "-O0" in chunks["args"]
+    assert "-O2" in next(row for row in starts if row["source"]=="dut_0.cpp")["args"]

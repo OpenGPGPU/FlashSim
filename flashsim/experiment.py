@@ -120,6 +120,11 @@ def _compile_flash(
         "-I",
         str(work),
     ]
+    conservative_alias = os.environ.get("FLASHSIM_CONSERVATIVE_ALIAS") or "0"
+    if conservative_alias not in {"0", "1"}:
+        raise ValueError("FLASHSIM_CONSERVATIVE_ALIAS must be 0 or 1")
+    if conservative_alias == "1":
+        common.append("-fno-strict-aliasing")
     shards = sorted(work.glob("dut_*.cpp"))
     if shards:
         jobs = int(os.environ.get("FLASHSIM_COMPILE_JOBS", "4"))
@@ -129,13 +134,18 @@ def _compile_flash(
         shard_opt = os.environ.get("FLASHSIM_SHARD_OPT", "-O2")
         if shard_opt not in {"-O0", "-O1", "-O2", "-O3"}:
             raise ValueError("FLASHSIM_SHARD_OPT must be -O0, -O1, -O2 or -O3")
+        commit_chunks_opt = os.environ.get("FLASHSIM_COMMIT_CHUNKS_OPT") or shard_opt
+        if commit_chunks_opt not in {"-O0", "-O1", "-O2", "-O3"}:
+            raise ValueError("FLASHSIM_COMMIT_CHUNKS_OPT must be -O0, -O1, -O2 or -O3")
         # The commit shard is a large dirty-list switch.  Optimizing it adds
         # a disproportionate amount of compile time and has little runtime
         # effect because the list is short on the normal GPU path.  Keep it
         # at O0, matching build_embedded.sh, while the eval shards use the
         # requested optimization level.
         def shard_opt_for(shard: Path) -> str:
-            return "-O0" if shard.name == "dut_commit.cpp" else shard_opt
+            if shard.name == "dut_commit.cpp":
+                return "-O0"
+            return commit_chunks_opt if shard.name == "dut_commit_chunks.cpp" else shard_opt
 
         # CYCLES only appears in the tiny wrapper, so exclude it from the
         # shard cache key.  This lets check and perf modes share the expensive
@@ -144,6 +154,9 @@ def _compile_flash(
             [flag for flag in shard_flags if not flag.startswith("-DCYCLES=")]
             + ["shard_opt:" + shard_opt]
             + ["dut_commit.cpp:" + shard_opt_for(Path("dut_commit.cpp"))]
+            + (["dut_commit_chunks.cpp:" + commit_chunks_opt]
+               if commit_chunks_opt != shard_opt
+               and any(shard.name == "dut_commit_chunks.cpp" for shard in shards) else [])
         )
         reuse = False
         try:
