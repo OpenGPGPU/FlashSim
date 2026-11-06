@@ -4,6 +4,10 @@ CIRCT lowers `x << n` to extract/concat and gives every op an SSA name.
 Emitting each name as a struct field + `eval_*` kills both skip and the busy
 path. Fold constants, restore shifts, and inline single-use ops into users.
 Keep values that feed `always_ff` named so `__ok` can still skip a sticky cone.
+
+Bit extracts are forwarded through concatenations so a consumer's leaf set
+drops the half it does not read. Shared reset-to-constant arms are lifted
+into one epilogue check instead of a predicate on every register.
 """
 
 from __future__ import annotations
@@ -108,7 +112,19 @@ def optimize(mod: Module) -> Module:
         MemWrite(w.mem, _fold_expr(w.addr), _fold_expr(w.data), _fold_expr(w.enable))
         for w in mem_writes
     ]
+    if _BIT_SLICE:
+        assigns, body, mem_writes = _narrow_bit_slices(assigns, body, mem_writes, sigs)
+        assigns = {k: _fold_expr(v) for k, v in assigns.items()}
+        body = _map_stmts(body, _fold_expr)
+        mem_writes = [
+            MemWrite(w.mem, _fold_expr(w.addr), _fold_expr(w.data), _fold_expr(w.enable))
+            for w in mem_writes
+        ]
     body = _lower_seq_mux(body, assigns, sigs)
+    if _RESET_HOIST:
+        body, reset_epilogue = _hoist_shared_resets(body, sigs)
+    else:
+        reset_epilogue = []
     body = _flatten_nested_holds(body)
     body = _merge_hold_ifs(body)
     body = _self_gate_const_holds(body, sigs)
@@ -117,7 +133,7 @@ def optimize(mod: Module) -> Module:
     body = _map_stmts(body, _fold_expr)
     n_writes = 0
     seen_w: set[str] = set()
-    for stmt in body:
+    for stmt in body + reset_epilogue:
         for name in stmt_writes(stmt):
             if name not in seen_w:
                 seen_w.add(name)
@@ -129,6 +145,8 @@ def optimize(mod: Module) -> Module:
         body = _self_gate_const_holds(body, sigs)
         body = _map_stmts(body, _fold_expr)
     body = _cse_sibling_or_prefixes(body, assigns)
+    reset_epilogue = _self_gate_const_holds(reset_epilogue, sigs)
+    reset_epilogue = _map_stmts(reset_epilogue, _fold_expr)
     assigns, body = _dce(assigns, body, observed, mem_writes)
     if _MERGE_SOP:
         assigns = _merge_sop_terms(assigns, sigs)
@@ -141,6 +159,8 @@ def optimize(mod: Module) -> Module:
     for expr in assigns.values():
         referred |= expr_ids(expr)
     for stmt in body:
+        referred |= stmt_reads(stmt) | stmt_writes(stmt)
+    for stmt in reset_epilogue:
         referred |= stmt_reads(stmt) | stmt_writes(stmt)
     for wr in mem_writes:
         referred |= expr_ids(wr.addr) | expr_ids(wr.data) | expr_ids(wr.enable)
@@ -164,6 +184,10 @@ def optimize(mod: Module) -> Module:
         for dep in stmt_reads(stmt):
             if dep not in assigns and dep not in keep:
                 raise ValueError(f"dangling wire {dep} used in sequential body")
+    for stmt in reset_epilogue:
+        for dep in stmt_reads(stmt):
+            if dep not in assigns and dep not in keep:
+                raise ValueError(f"dangling wire {dep} used in reset epilogue")
     for wr in mem_writes:
         for dep in expr_ids(wr.addr) | expr_ids(wr.data) | expr_ids(wr.enable):
             if dep not in assigns and dep not in keep:
@@ -173,7 +197,7 @@ def optimize(mod: Module) -> Module:
             raise ValueError(f"dangling wire {dep} used by clocked assertion")
     return Module(
         mod.name, new_sigs, new_assigns, AlwaysFF(mod.always.clock, body), mod.ports,
-        mem_writes, assertions, clocked_processes
+        mem_writes, assertions, clocked_processes, reset_epilogue
     )
 
 
@@ -504,6 +528,314 @@ def _dce(
                 pending.append(dep)
     assigns = {n: e for n, e in assigns.items() if n in live}
     return assigns, body
+
+
+_BIT_SLICE = os.environ.get("FLASHSIM_BIT_SLICE", "1") != "0"
+_RESET_HOIST = os.environ.get("FLASHSIM_RESET_HOIST", "1") != "0"
+_RESET_HOIST_MIN = int(os.environ.get("FLASHSIM_RESET_HOIST_MIN", "2"))
+_RESET_NAME = re.compile(r"(^|_)reset($|_)", re.IGNORECASE)
+_SLICE_INLINE_NODES = 16
+
+
+def _slice_src(
+    src: Expr,
+    low: int,
+    width: int,
+    assigns: dict[str, Expr],
+    sigs: dict[str, Signal],
+    uses: dict[str, int],
+    fresh: dict[str, Expr],
+    cache: dict[tuple[str, int, int], Expr],
+    seen: set[str],
+    fuel: int = 64,
+) -> Expr | None:
+    """Narrow `src[low +: width]` onto the operands that actually feed it.
+
+    Concatenations are the common case GSIM splits: a consumer of one half
+    must not keep the other half in its leaf set. Returns None when the
+    slice cannot be made smaller without copying a large shared tree.
+    """
+    if fuel <= 0 or width <= 0 or low < 0:
+        return None
+    try:
+        src_w = expr_width(src, sigs)
+    except (KeyError, TypeError):
+        return None
+    if low + width > src_w:
+        return None
+    if low == 0 and width == src_w:
+        return src
+    if isinstance(src, Const):
+        mask = (1 << width) - 1
+        return Const((src.value >> low) & mask, width)
+    if isinstance(src, Extract):
+        if low + width > src.width:
+            return None
+        inner = _slice_src(
+            src.a, src.low + low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+        )
+        return inner if inner is not None else Extract(src.a, src.low + low, width)
+    if isinstance(src, Concat) and src.parts:
+        widths = []
+        for part in src.parts:
+            try:
+                widths.append(expr_width(part, sigs))
+            except (KeyError, TypeError):
+                return None
+        if any(part_w <= 0 for part_w in widths):
+            return None
+        bases = [0] * len(src.parts)
+        cursor = 0
+        for index in range(len(src.parts) - 1, -1, -1):
+            bases[index] = cursor
+            cursor += widths[index]
+        if cursor != src_w:
+            return None
+        hi = low + width
+        pieces: list[Expr] = []
+        for index, part in enumerate(src.parts):
+            part_lo = bases[index]
+            part_hi = part_lo + widths[index]
+            if part_hi <= low or part_lo >= hi:
+                continue
+            take_lo = max(low, part_lo) - part_lo
+            take_w = min(hi, part_hi) - max(low, part_lo)
+            if take_lo == 0 and take_w == widths[index]:
+                pieces.append(part)
+                continue
+            inner = _slice_src(
+                part, take_lo, take_w, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+            )
+            pieces.append(inner if inner is not None else Extract(part, take_lo, take_w))
+        if not pieces:
+            return None
+        if len(pieces) == 1:
+            return pieces[0]
+        return Concat(tuple(pieces))
+    if (
+        width == 1
+        and src_w <= 128
+        and isinstance(src, BinOp)
+        and src.op == "<<"
+    ):
+        base = src.a
+        if isinstance(base, Id) and isinstance(assigns.get(base.name), Const):
+            base = assigns[base.name]
+        if isinstance(base, Const) and base.value == 1 and low < src_w:
+            try:
+                amt_w = expr_width(src.b, sigs)
+            except (KeyError, TypeError):
+                return None
+            if low.bit_length() > amt_w:
+                return Const(0, 1)
+            return BinOp("==", src.b, Const(low, amt_w))
+    if isinstance(src, UnaryOp) and src.op == "~":
+        inner = _slice_src(
+            src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+        )
+        if inner is not None and _expr_nodes(inner) <= _SLICE_INLINE_NODES:
+            return UnaryOp("~", inner)
+        return None
+    if isinstance(src, BinOp) and src.op in {"&", "|", "^"}:
+        left = _slice_src(
+            src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+        )
+        right = _slice_src(
+            src.b, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+        )
+        if (
+            left is not None
+            and right is not None
+            and _expr_nodes(left) + _expr_nodes(right) <= _SLICE_INLINE_NODES
+        ):
+            return BinOp(src.op, left, right)
+        return None
+    if isinstance(src, Ternary):
+        left = _slice_src(
+            src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+        )
+        right = _slice_src(
+            src.b, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+        )
+        if (
+            left is not None
+            and right is not None
+            and _expr_nodes(left) + _expr_nodes(right) <= _SLICE_INLINE_NODES
+        ):
+            return Ternary(src.cond, left, right)
+        return None
+    if isinstance(src, Id) and src.name in assigns and src.name not in seen:
+        seen.add(src.name)
+        sliced = _slice_src(
+            assigns[src.name], low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+        )
+        seen.remove(src.name)
+        if sliced is None:
+            return None
+        if (
+            isinstance(sliced, Extract)
+            and isinstance(sliced.a, Id)
+            and sliced.a.name == src.name
+            and sliced.low == low
+            and sliced.width == width
+        ):
+            return None
+        original = assigns[src.name]
+        # A compare or a constant is cheaper than the wide value it came from
+        # even when the leaf set is unchanged (one-hot `bits(1 << i, k)`).
+        cheaper = isinstance(sliced, (Const, Id)) or (
+            isinstance(sliced, BinOp) and sliced.op in CMP_OPS
+        )
+        if (
+            not cheaper
+            and expr_ids(sliced) == expr_ids(original)
+            and _expr_nodes(sliced) >= _expr_nodes(original)
+        ):
+            return None
+        if _expr_nodes(sliced) <= _SLICE_INLINE_NODES or uses.get(src.name, 0) <= 1:
+            return sliced
+        key = (src.name, low, width)
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        name = f"{src.name}__b{low}_{width}"
+        suffix = 0
+        while name in assigns or name in fresh or name in sigs:
+            suffix += 1
+            name = f"{src.name}__b{low}_{width}_{suffix}"
+        fresh[name] = sliced
+        ref = Id(name)
+        cache[key] = ref
+        return ref
+    return None
+
+
+def _narrow_expr(
+    expr: Expr,
+    assigns: dict[str, Expr],
+    sigs: dict[str, Signal],
+    uses: dict[str, int],
+    fresh: dict[str, Expr],
+    cache: dict[tuple[str, int, int], Expr],
+) -> Expr:
+    def fn(node: Expr) -> Expr:
+        if not isinstance(node, Extract):
+            return node
+        sliced = _slice_src(
+            node.a, node.low, node.width, assigns, sigs, uses, fresh, cache, set()
+        )
+        return sliced if sliced is not None else node
+
+    return map_expr(expr, fn)
+
+
+def _narrow_bit_slices(
+    assigns: dict[str, Expr],
+    body: list[Stmt],
+    mem_writes: list[MemWrite],
+    sigs: dict[str, Signal],
+) -> tuple[dict[str, Expr], list[Stmt], list[MemWrite]]:
+    uses = _count_uses(assigns, body, mem_writes)
+    fresh: dict[str, Expr] = {}
+    cache: dict[tuple[str, int, int], Expr] = {}
+
+    def narrow(expr: Expr) -> Expr:
+        return _narrow_expr(expr, assigns, sigs, uses, fresh, cache)
+
+    narrowed = {name: narrow(expr) for name, expr in assigns.items()}
+    narrowed.update(fresh)
+    body = _map_stmts(body, narrow)
+    mem_writes = [
+        MemWrite(w.mem, narrow(w.addr), narrow(w.data), narrow(w.enable))
+        for w in mem_writes
+    ]
+    return narrowed, body, mem_writes
+
+
+def _is_reset_pred(cond: Expr) -> bool:
+    if isinstance(cond, Id):
+        return _RESET_NAME.search(cond.name) is not None
+    return (
+        isinstance(cond, UnaryOp)
+        and cond.op == "!"
+        and isinstance(cond.a, Id)
+        and _RESET_NAME.search(cond.a.name) is not None
+    )
+
+
+def _const_arm(stmts: list[Stmt], sigs: dict[str, Signal]) -> list[NbAssign] | None:
+    if not stmts:
+        return None
+    arm: list[NbAssign] = []
+    for stmt in stmts:
+        if not isinstance(stmt, NbAssign) or not isinstance(stmt.rhs, Const):
+            return None
+        sig = sigs.get(stmt.lhs)
+        if sig is None or sig.depth or sig.kind == "mem":
+            return None
+        arm.append(stmt)
+    if len({stmt.lhs for stmt in arm}) != len(arm):
+        return None
+    return arm
+
+
+def _hoist_shared_resets(
+    body: list[Stmt], sigs: dict[str, Signal]
+) -> tuple[list[Stmt], list[Stmt]]:
+    """Lift shared reset-to-constant arms into one epilogue check.
+
+    GSIM assumes reset is false on the fast path and repairs the few reset
+    nets afterwards. Only a predicate whose name is `reset` (or `*_reset` /
+    `reset_*`) qualifies, and the data arm must not write a register the
+    constant arm does not override.
+    """
+    if _RESET_HOIST_MIN < 2:
+        return body, []
+    classified: list[tuple[Expr, list[Stmt], list[NbAssign]] | None] = []
+    for stmt in body:
+        if not isinstance(stmt, If) or not _is_reset_pred(stmt.cond):
+            classified.append(None)
+            continue
+        then_c = _const_arm(stmt.then_body, sigs)
+        else_c = _const_arm(stmt.else_body, sigs) if stmt.else_body else None
+        if then_c is not None and else_c is None:
+            data: list[Stmt] = list(stmt.else_body)
+            consts = then_c
+            taken = stmt.cond
+        elif else_c is not None and then_c is None:
+            data = list(stmt.then_body)
+            consts = else_c
+            taken = _not_expr(stmt.cond)
+        else:
+            classified.append(None)
+            continue
+        covered = {assign.lhs for assign in consts}
+        written: set[str] = set()
+        for item in data:
+            written |= stmt_writes(item)
+        if not written <= covered:
+            classified.append(None)
+            continue
+        classified.append((taken, data, consts))
+    counts: dict[Expr, int] = {}
+    for info in classified:
+        if info is not None:
+            counts[info[0]] = counts.get(info[0], 0) + 1
+    out: list[Stmt] = []
+    buckets: dict[Expr, list[NbAssign]] = {}
+    order: list[Expr] = []
+    for stmt, info in zip(body, classified):
+        if info is None or counts[info[0]] < _RESET_HOIST_MIN:
+            out.append(stmt)
+            continue
+        taken, data, consts = info
+        out.extend(data)
+        if taken not in buckets:
+            order.append(taken)
+            buckets[taken] = []
+        buckets[taken].extend(consts)
+    epilogue = [If(taken, list(buckets[taken]), []) for taken in order]
+    return out, epilogue
 
 
 def _lower_seq_mux(body: list[Stmt], assigns: dict[str, Expr], sigs: dict[str, Signal]) -> list[Stmt]:

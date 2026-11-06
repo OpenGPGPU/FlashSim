@@ -145,6 +145,10 @@ class Module:
     mem_writes: list[MemWrite] = field(default_factory=list)
     assertions: list[ClockedAssertion] = field(default_factory=list)
     clocked_processes: list[ClockedProcess] = field(default_factory=list)
+    # Constant reset arms lifted off the per-register fast path. Emitted after
+    # hold dispatch so a later write still wins when buckets are not in
+    # source order.
+    reset_epilogue: list[Stmt] = field(default_factory=list)
 
 
 def signal_map(mod: Module) -> dict[str, Signal]:

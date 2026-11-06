@@ -7,7 +7,7 @@ import sys
 import pytest
 
 import flashsim.emit as emitter
-from flashsim.ir import BinOp, Const, Id, Signal, Ternary
+from flashsim.ir import BinOp, Const, Id, If, NbAssign, Signal, Ternary
 
 
 def _compile_and_run(tmp_path, source):
@@ -71,6 +71,104 @@ int main() {
 }
 '''
     _compile_and_run(tmp_path, source)
+
+
+def test_index_equality_mux_is_a_switch_and_evaluates_one_arm(tmp_path, monkeypatch):
+    _reset_emitter_globals(monkeypatch)
+    expr = Const(99, 32)
+    for i in reversed(range(8)):
+        expr = Ternary(BinOp("==", Id("idx"), Const(i, 4)), Id(f"r{i}"), expr)
+    sigs = {"idx": Signal("idx", 4, "input")}
+    sigs.update({f"r{i}": Signal(f"r{i}", 32, "reg") for i in range(8)})
+    cached = set(sigs)
+    lines: list[str] = []
+    emitter._emit_assign("result", expr, cached, sigs, lines, 2, None, [0])
+    body = "\n".join(lines)
+    assert "switch (idx)" in body
+    assert "case 3u" in body
+    source = '''#include <cstdint>
+int main() {
+  uint8_t idx = 0;
+  uint32_t result = 0, idx_calls = 0, arm_calls = 0;
+  uint32_t r0=10, r1=11, r2=12, r3=13, r4=14, r5=15, r6=16, r7=17;
+  auto eval_idx = [&] { ++idx_calls; };
+''' + "\n".join(
+        f"  auto eval_r{i} = [&] {{ ++arm_calls; }};" for i in range(8)
+    ) + '''
+  auto run = [&] {
+''' + body + '''
+  };
+  idx = 3; run();
+  if (result != 13 || idx_calls != 1 || arm_calls != 1) return 1;
+  idx = 9; idx_calls = arm_calls = 0; run();
+  if (result != 99 || idx_calls != 1 || arm_calls != 0) return 2;
+  return 0;
+}
+'''
+    _compile_and_run(tmp_path, source)
+
+
+def test_sequential_index_mux_is_a_switch_and_evaluates_one_arm(tmp_path, monkeypatch):
+    _reset_emitter_globals(monkeypatch)
+    stmt = If(
+        BinOp("==", Id("idx"), Const(7, 3)),
+        [NbAssign("r", Id("v7"))],
+        [NbAssign("r", Const(99, 8))],
+    )
+    for i in reversed(range(7)):
+        stmt = If(
+            BinOp("==", Id("idx"), Const(i, 3)),
+            [NbAssign("r", Id(f"v{i}"))],
+            [stmt],
+        )
+    sigs = {"idx": Signal("idx", 3, "input"), "r": Signal("r", 8, "reg")}
+    sigs.update({f"v{i}": Signal(f"v{i}", 8, "reg") for i in range(8)})
+    lines: list[str] = []
+    emitter._emit_nba_tree([stmt], set(sigs), {}, set(), sigs, lines, 2, set(), [0])
+    body = "\n".join(lines)
+    assert "switch (idx)" in body
+    assert "case 7u" in body
+    source = '''#include <cstdint>
+int main() {
+  uint8_t idx = 0, r__n = 0, r__w = 0;
+  uint32_t idx_calls = 0, arm_calls = 0;
+  uint8_t v0=10, v1=11, v2=12, v3=13, v4=14, v5=15, v6=16, v7=17;
+  auto eval_idx = [&] { ++idx_calls; };
+  auto eval_r = [&] {};
+''' + "\n".join(
+        f"  auto eval_v{i} = [&] {{ ++arm_calls; }};" for i in range(8)
+    ) + '''
+  auto run = [&] {
+''' + body + '''
+  };
+  idx = 3; run();
+  if (r__n != 13 || idx_calls != 1 || arm_calls != 1) return 1;
+  idx = 9; idx_calls = arm_calls = 0; run();
+  if (r__n != 99 || idx_calls != 1 || arm_calls != 0) return 2;
+  return 0;
+}
+'''
+    _compile_and_run(tmp_path, source)
+
+
+def test_equality_mux_is_not_split_into_compare_chunks(monkeypatch):
+    _reset_emitter_globals(monkeypatch)
+    expr = Const(99, 8)
+    for i in reversed(range(40)):
+        expr = Ternary(BinOp("==", Id("idx"), Const(i, 6)), Id(f"r{i}"), expr)
+    name = "l2_slices_0_casez"
+    assigns = {name: expr}
+    sigs = {"idx": Signal("idx", 6, "input"), name: Signal(name, 8, "wire")}
+    sigs.update({f"r{i}": Signal(f"r{i}", 8, "reg") for i in range(40)})
+    cached = {name, "idx", *(f"r{i}" for i in range(40))}
+    chunks, _body = emitter._extract_deep_mux_chunks(assigns, sigs, cached, None)
+    assert chunks == 0
+    lines: list[str] = []
+    emitter._emit_assign(name, assigns[name], cached, sigs, lines, 2, None, [0])
+    body = "\n".join(lines)
+    assert body.count("switch (idx)") == 1
+    assert "_dmux" not in body
+    assert "case 39u" in body
 
 
 def test_wide_conditions_and_cached_demands_remain_lazy(tmp_path, monkeypatch):

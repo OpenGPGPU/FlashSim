@@ -171,6 +171,10 @@ _MEGA_REGION_PROMOTE_CAP = 512
 _DEEP_MUX_SPLIT = 32
 _DEEP_MUX_CHUNK = 16
 _DEEP_MUX_CAP = 4096
+# One jump table for `idx == k` chains. Longer unique chains are cut into
+# switch-sized chunks instead of 16-arm compare walks.
+_INDEX_SWITCH_MAX = 4096
+_INDEX_SWITCH_CHUNK = 256
 # Flatten right-nested ternaries to else-if when at least this many arms and
 # conditions are pure expressions (no demand stmts between else / if).
 _FLAT_TERNARY_ARMS = 3
@@ -179,6 +183,13 @@ _FLAT_TERNARY_ARMS = 3
 # cone, and the sites all go stale together because they share its leaves.
 _SHARED_INLINE_MIN = 16
 _SHARED_INLINE_ROUNDS = 4
+# GSIM extracts a shared expression when `cost * (sites - 1)` exceeds the
+# cost of one more node (a generation check and a call). Counted in IR
+# operators. Tiny trees still need `_SHARED_INLINE_MIN` sites; fatter ones
+# qualify earlier. The extra cap is only those earlier promotions.
+_EXTRACT_NODE_COST = int(os.environ.get("FLASHSIM_EXTRACT_NODE_COST", "15"))
+_EXTRACT_MIN_COST = int(os.environ.get("FLASHSIM_EXTRACT_MIN_COST", "8"))
+_EXTRACT_EXTRA_CAP = int(os.environ.get("FLASHSIM_EXTRACT_EXTRA_CAP", "2048"))
 
 
 def _expr_node_count(expr: Expr) -> int:
@@ -333,6 +344,23 @@ def _promote_bulky_gated_cones(
             added += 1
 
 
+def _worth_extracting(cost: int, sites: int) -> bool:
+    """Whether a wire should be its own eval instead of being inlined.
+
+    GSIM's test is `cost(f) * uses > cost(f) + cost_node`, i.e. the other
+    sites recompute more than one node costs. Wires already shared at
+    `_SHARED_INLINE_MIN` sites stay on that rule so one-bit compares do not
+    move. A fatter tree qualifies with fewer sites.
+    """
+    if sites < 2:
+        return False
+    if sites >= _SHARED_INLINE_MIN:
+        return True
+    if cost < _EXTRACT_MIN_COST:
+        return False
+    return cost * (sites - 1) > _EXTRACT_NODE_COST
+
+
 def _promote_shared_inlines(
     body: list[Stmt],
     assigns: dict[str, Expr],
@@ -378,9 +406,23 @@ def _promote_shared_inlines(
                 seen.update(_uncached_needed(expr, assigns, cached, stop))
             for tmp in seen:
                 sites[tmp] += 1
-        promote = {n for n, k in sites.items() if k >= _SHARED_INLINE_MIN}
-        if not promote:
+        forced: list[str] = []
+        extra: list[tuple[int, int, str]] = []
+        for name, count in sites.items():
+            if name not in assigns:
+                continue
+            if count >= _SHARED_INLINE_MIN:
+                forced.append(name)
+                continue
+            cost = _expr_node_count(assigns[name])
+            if _worth_extracting(cost, count):
+                extra.append((cost * (count - 1), cost, name))
+        if not forced and not extra:
             return
+        extra.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        promote = set(forced)
+        for _surplus, _cost, name in extra[:_EXTRACT_EXTRA_CAP]:
+            promote.add(name)
         cached |= promote
 
 
@@ -458,12 +500,18 @@ def _rewrite_deep_mux_expr(
         arms = [(rec(c), rec(a)) for c, a in arms]
         default = rec(default)
         n = len(arms)
-        n_chunks = (n + _DEEP_MUX_CHUNK - 1) // _DEEP_MUX_CHUNK
+        # A unique equality select is one jump table. Chunking it would turn
+        # the default arm into a chain of eval calls, one per 16 entries.
+        wide_plan = _index_switch_plan(arms, sigs, limit=10**9)
+        if wide_plan is not None and len(arms) <= _INDEX_SWITCH_MAX:
+            return _make_ternary_chain(arms, default)
+        chunk = _INDEX_SWITCH_CHUNK if wide_plan is not None else _DEEP_MUX_CHUNK
+        n_chunks = (n + chunk - 1) // chunk
         if n < _DEEP_MUX_SPLIT or n_chunks < 2 or budget[0] < n_chunks:
             return _make_ternary_chain(arms, default)
         next_def = default
-        for start in reversed(range(0, n, _DEEP_MUX_CHUNK)):
-            chunk_arms = arms[start : start + _DEEP_MUX_CHUNK]
+        for start in reversed(range(0, n, chunk)):
+            chunk_arms = arms[start : start + chunk]
             body = _make_ternary_chain(chunk_arms, next_def)
             tmp = f"{prefix}_dmux{counter[0]}"
             counter[0] += 1
@@ -582,6 +630,149 @@ def _ternary_chain_flat_ok(
     return True
 
 
+def _same_expr(a: Expr, b: Expr) -> bool:
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, Id):
+        return a.name == b.name
+    if isinstance(a, Const):
+        return a.value == b.value and a.width == b.width
+    if isinstance(a, Extract):
+        return a.low == b.low and a.width == b.width and _same_expr(a.a, b.a)
+    if isinstance(a, UnaryOp):
+        return a.op == b.op and _same_expr(a.a, b.a)
+    if isinstance(a, BinOp):
+        return a.op == b.op and _same_expr(a.a, b.a) and _same_expr(a.b, b.b)
+    return False
+
+
+def _eq_index(cond: Expr) -> tuple[Expr, int] | None:
+    """`idx == k` / `k == idx` with a non-negative constant index."""
+    if not isinstance(cond, BinOp) or cond.op != "==":
+        return None
+    if isinstance(cond.b, Const) and cond.b.value >= 0:
+        return cond.a, cond.b.value
+    if isinstance(cond.a, Const) and cond.a.value >= 0:
+        return cond.b, cond.a.value
+    return None
+
+
+def _index_switch_plan(
+    arms: list[tuple[Expr, Expr]],
+    sigs: dict[str, Signal],
+    *,
+    limit: int = _INDEX_SWITCH_MAX,
+) -> tuple[Expr, list[tuple[int, Expr]]] | None:
+    """Unique `idx == k` arms on one index, or None when if-else must stay.
+
+    Duplicate indices stay on if-else: an earlier arm wins, and a jump table
+    cannot represent that priority.
+    """
+    if len(arms) < 4 or len(arms) > limit:
+        return None
+    parsed: list[tuple[int, Expr]] = []
+    idx: Expr | None = None
+    seen: set[int] = set()
+    for cond, value in arms:
+        matched = _eq_index(cond)
+        if matched is None:
+            return None
+        key, k = matched
+        if k in seen or k > 1_000_000:
+            return None
+        try:
+            if _expr_width(key, sigs) > 32:
+                return None
+        except (KeyError, TypeError):
+            return None
+        if idx is None:
+            idx = key
+        elif not _same_expr(idx, key):
+            return None
+        seen.add(k)
+        parsed.append((k, value))
+    assert idx is not None
+    return idx, parsed
+
+
+def _if_index_switch(
+    stmt: If, sigs: dict[str, Signal]
+) -> tuple[Expr, list[tuple[int, list[Stmt]]], list[Stmt]] | None:
+    """Right-nested `if (idx==k) body else ...` with unique k, else the tail."""
+    arms: list[tuple[int, list[Stmt]]] = []
+    seen: set[int] = set()
+    idx: Expr | None = None
+    cur: Stmt = stmt
+    default: list[Stmt] = []
+    while isinstance(cur, If):
+        matched = _eq_index(cur.cond)
+        if matched is None:
+            if not arms:
+                return None
+            default = [cur]
+            break
+        key, k = matched
+        if k in seen or k > 1_000_000:
+            return None
+        try:
+            if _expr_width(key, sigs) > 32:
+                return None
+        except (KeyError, TypeError):
+            return None
+        if idx is None:
+            idx = key
+        elif not _same_expr(idx, key):
+            default = [cur]
+            break
+        seen.add(k)
+        arms.append((k, cur.then_body))
+        if len(cur.else_body) == 1 and isinstance(cur.else_body[0], If):
+            cur = cur.else_body[0]
+            continue
+        default = list(cur.else_body)
+        break
+    if idx is None or len(arms) < 4 or len(arms) > _INDEX_SWITCH_MAX:
+        return None
+    return idx, arms, default
+
+
+def _emit_index_switch(
+    dest: str,
+    expr: Ternary,
+    cached: set[str],
+    sigs: dict[str, Signal],
+    lines: list[str],
+    indent: int,
+    scratch: list[int],
+    emit_arm,
+) -> bool:
+    """Emit `idx == k ? arm_k` as a switch so only the taken arm is evaluated.
+
+    A right-nested equality chain is a jump table: the conditions are mutually
+    exclusive, and the final else is the default. Duplicate indices keep the
+    if-else so an earlier arm still wins.
+    """
+    arms, default = _right_ternary_arms(expr)
+    plan = _index_switch_plan(arms, sigs)
+    if plan is None:
+        return False
+    idx, parsed = plan
+    _emit_demand(idx, cached, lines, indent)
+    sp = " " * indent
+    lines.append(f"{sp}switch ({emit_expr(idx, sigs)}) {{")
+    for k, value in parsed:
+        lines.append(f"{sp}case {k}u: {{")
+        emit_arm(dest, value, indent + 2)
+        lines.append(f"{sp}  break;")
+        lines.append(f"{sp}}}")
+    lines.append(f"{sp}default: {{")
+    emit_arm(dest, default, indent + 2)
+    lines.append(f"{sp}  break;")
+    lines.append(f"{sp}}}")
+    lines.append(f"{sp}}}")
+    return True
+
+
 def _emit_ternary_priority(
     dest: str,
     expr: Ternary,
@@ -593,6 +784,8 @@ def _emit_ternary_priority(
     emit_arm,
 ) -> None:
     """Emit priority chains without deep recursion or eager later arms."""
+    if _emit_index_switch(dest, expr, cached, sigs, lines, indent, scratch, emit_arm):
+        return
     arms, default = _right_ternary_arms(expr)
     sp = " " * indent
     if len(arms) >= _FLAT_TERNARY_ARMS and _ternary_chain_flat_ok(arms, cached, sigs):
@@ -2179,6 +2372,13 @@ def emit_cpp(mod: Module) -> str:
                                  + scope)
     stop = set(regs) | set(collect_inputs(mod)) | set(mems)
     writes = always_writes(mod.always.body)
+    if mod.reset_epilogue:
+        # Reset-only registers leave the always body, but they still need
+        # next-state storage and a commit slot.
+        write_names = set(writes)
+        for stmt in mod.reset_epilogue:
+            write_names |= stmt_writes(stmt)
+        writes = sorted(write_names)
     cached = cached_wires(mod, assigns)
     _, always_body = _extract_deep_mux_chunks(
         assigns, sigs, cached, body=mod.always.body
@@ -2959,6 +3159,9 @@ def emit_cpp(mod: Module) -> str:
             lines.append("    }")
         if live_stmts:
             lines.append("    _nba_live();")
+        # After every hold, so a reset constant overrides next-state even when
+        # the data update lives in another bucket.
+        _emit_reset_epilogue(mod, cached, assigns, stop, sigs, lines)
     else:
         for name in writes:
             sig = sigs[name]
@@ -2983,6 +3186,7 @@ def emit_cpp(mod: Module) -> str:
             declared=set(),
             scratch=tick_scratch,
         )
+        _emit_reset_epilogue(mod, cached, assigns, stop, sigs, lines)
     tick_scratch = [0]
     # Mem-write path is two-phase: evaluate enable cones every tick (cheap —
     # usually a handful of skip-cached wires), then only if any enable fires
@@ -4648,6 +4852,34 @@ def _emit_compute(
         )
 
 
+def _emit_reset_epilogue(
+    mod: Module,
+    cached: set[str],
+    assigns: dict[str, Expr],
+    stop: set[str],
+    sigs: dict[str, Signal],
+    lines: list[str],
+) -> None:
+    """One shared reset check after next-state, GSIM's slow-path reset.
+
+    Hold buckets are not source-ordered, so the constant arm cannot stay in
+    the always body on a large design: a later data hold would clobber it.
+    """
+    if not mod.reset_epilogue:
+        return
+    _emit_nba_tree(
+        mod.reset_epilogue,
+        cached,
+        assigns,
+        stop,
+        sigs,
+        lines,
+        indent=4,
+        declared=set(),
+        scratch=[0],
+    )
+
+
 def _emit_nba_tree(
     stmts: list[Stmt],
     cached: set[str],
@@ -4708,6 +4940,61 @@ def _emit_nba_tree(
                     lines.append(f"{sp}{tmp} = {rhs_c};")
                 _mark_write(stmt.lhs, lines, indent)
         elif isinstance(stmt, If):
+            switched = _if_index_switch(stmt, sigs)
+            if switched is not None:
+                idx, idx_arms, idx_default = switched
+                _emit_compute(
+                    idx,
+                    cached,
+                    assigns,
+                    stop,
+                    sigs,
+                    lines,
+                    indent,
+                    declared,
+                    scratch,
+                    demanded,
+                    branch_assigned,
+                )
+                lines.append(f"{sp}switch ({emit_expr(idx, sigs)}) {{")
+                for k, arm_body in idx_arms:
+                    lines.append(f"{sp}case {k}u: {{")
+                    _emit_nba_tree(
+                        arm_body,
+                        cached,
+                        assigns,
+                        stop,
+                        sigs,
+                        lines,
+                        indent + 2,
+                        set(declared),
+                        scratch,
+                        set(demanded),
+                        set(),
+                        temp_collector,
+                    )
+                    lines.append(f"{sp}  break;")
+                    lines.append(f"{sp}}}")
+                lines.append(f"{sp}default: {{")
+                if idx_default:
+                    _emit_nba_tree(
+                        idx_default,
+                        cached,
+                        assigns,
+                        stop,
+                        sigs,
+                        lines,
+                        indent + 2,
+                        set(declared),
+                        scratch,
+                        set(demanded),
+                        set(),
+                        temp_collector,
+                    )
+                lines.append(f"{sp}  break;")
+                lines.append(f"{sp}}}")
+                lines.append(f"{sp}}}")
+                continue
             _emit_compute(
                 stmt.cond,
                 cached,
