@@ -2802,6 +2802,10 @@ def emit_cpp(mod: Module) -> str:
                 lines.append(f"  {_storage_decl(name + '__n', sig.width)}")
         if write_flags:
             lines.extend(_dirty_tracking_declarations(len(write_flags)))
+            if os.environ.get("FLASHSIM_COMMIT_PROFILE", "0") == "1":
+                lines.append(f"  uint64_t _commit_counts[{len(write_flags)}] = {{}};")
+                names_esc = ", ".join(f'"{n}"' for n in _WRITE_INDEX)
+                lines.append(f"  static constexpr const char* _commit_names[{len(write_flags)}] = {{{names_esc}}};")
         if _ARRAY_INDEX:
             lines.append(f"  uint8_t _ac[{len(_ARRAY_INDEX)}] = {{}};")
             lines.append("  uint8_t _ac_any = 0;")
@@ -2953,15 +2957,55 @@ def emit_cpp(mod: Module) -> str:
             lines.append("")
         _EAGER_DONE = set()
         if write_flags:
+            hot_idx: set[int] = set()
+            hot_spec = os.environ.get("FLASHSIM_COMMIT_HOT", "")
+            if hot_spec:
+                for name in hot_spec.split(","):
+                    name = name.strip()
+                    if name and name in _WRITE_INDEX:
+                        hot_idx.add(_WRITE_INDEX[name])
+                if len(hot_idx) > 8:
+                    hot_idx = set()
+
+            def _emit_case_body(name: str, idx: int, indent: int) -> None:
+                sig = sigs[name]
+                sp = " " * indent
+                if is_wide(sig.width):
+                    lines.append(f"{sp}if (memcmp({name}__n, {name}, sizeof({name}))) {{")
+                    _bump_parts(name, leaf_parts, inv_tables, lines, indent + 2, True)
+                    lines.append(f"{sp}  _chg++;")
+                    lines.append(f"{sp}  memcpy({name}, {name}__n, sizeof({name}));")
+                    lines.append(f"{sp}}}")
+                else:
+                    lines.append(f"{sp}if ({name}__n != {name}) {{")
+                    _bump_parts(name, leaf_parts, inv_tables, lines, indent + 2, True)
+                    lines.append(f"{sp}  _chg++;")
+                    lines.append(f"{sp}  {name} = {name}__n;")
+                    lines.append(f"{sp}}}")
+
             lines.append("  void _commit() {")
             lines.append("    _cc += _nw;")
             if inv_tables:
                 lines.append("    _bep++;")
             lines.append("    for (unsigned i = 0; i < _nw; i++) {")
-            lines.append("      switch (_wl[i]) {")
+            if hot_idx:
+                hot_items = [(name, idx) for name, idx in sorted(_WRITE_INDEX.items(), key=lambda kv: kv[1]) if idx in hot_idx]
+                lines.append("      unsigned _id = _wl[i];")
+                lines.append("      bool _hot = false;")
+                for name, idx in hot_items:
+                    lines.append(f"      if (!_hot && _id == {idx}u) {{ _hot = true;")
+                    _emit_case_body(name, idx, 8)
+                    lines.append("      }")
+                lines.append("      if (!_hot) switch (_id) {")
+            else:
+                lines.append("      switch (_wl[i]) {")
             for name, idx in _WRITE_INDEX.items():
+                if idx in hot_idx:
+                    continue
                 sig = sigs[name]
                 lines.append(f"      case {idx}u: {{")
+                if os.environ.get("FLASHSIM_COMMIT_PROFILE", "0") == "1":
+                    lines.append(f"        _commit_counts[{idx}u]++;")
                 if is_wide(sig.width):
                     lines.append(
                         f"        if (memcmp({name}__n, {name}, sizeof({name}))) {{"

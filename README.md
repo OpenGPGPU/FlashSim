@@ -208,6 +208,19 @@ every `dout` identical to 1-thread Verilator and lift the geomean, with
 on top of dedup; see the unit table below rather than the ARTI wall
 clock, which was not re-measured in this tree.
 
+Trace-guided tuning uses the same runs: `FLASHSIM_COMMIT_PROFILE=1`
+emits `_commit_counts/names` (per-ID `_wl` hits) to find hot writes
+(`GpuSystem` `cycleCount/activeCuCycleCount` 99.99% of 2M commits).
+`FLASHSIM_COMMIT_HOT=cycleCount,activeCuCycleCount` hoists those IDs
+ahead of the cold switch (opt-in per model; warm median +1.1% on
+`GpuSystem`, correctness kept, default off until tuned per RTL/workload).
+For `ARTI` wall clock, `scripts/pgo_arti.sh MODEL_DIR -- <training>`
+automates the two-phase `PGO` build around `build_embedded.sh`
+(instrument, train with `LLVM_PROFILE_FILE`, merge, rebuild); train on
+a representative `pipe_desktop` window covering scanout+raster+shader,
+not `arti_smoke`, and keep the profile outside the tree with its trace
+manifest.
+
 ARTI A/B (needs a probe initramfs under `$WORK/initramfs.cpio.gz`; build via
 `arti-work` probe setup or copy from a prior run):
 
