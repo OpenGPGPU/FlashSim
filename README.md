@@ -189,6 +189,19 @@ memory-write root. On the full four-CU desktop model, the optimized IR is
 byte-identical to the previous optimizer's captured output. This improves model
 generation; generated simulation behavior and runtime code remain unchanged.
 
+GSIM/arcilator-style used-bits and dedup shrink the busy path. `usedBits`
+propagates low-bit demand backwards from outputs/registers/memory writes
+(ADD/SUB/MUL/AND/OR/XOR narrow to the demand, compares/division keep full
+width, shifts and concat distribute), shrinks internal scalar wires to the
+demanded width, and truncates their RHS so wide limb ops do less work
+(e.g. FMA 107→48 bits). `commonExpr`/`dedup` merges structurally identical
+scalar wires to the lexicographically smallest canonical name. Both are
+on by default and opt out with `FLASHSIM_USED_BITS=0` / `FLASHSIM_DEDUP=0`.
+Unit GPU benches (Apple M4 Max, alternating baseline/candidate runs) keep
+every `dout` identical to 1-thread Verilator and lift the geomean, with
+`VectorBackend` +28% and `GpuHostAxi` +10%; see the unit table below
+rather than the ARTI wall clock, which was not re-measured in this tree.
+
 ARTI A/B (needs a probe initramfs under `$WORK/initramfs.cpio.gz`; build via
 `arti-work` probe setup or copy from a prior run):
 

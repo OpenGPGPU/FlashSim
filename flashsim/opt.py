@@ -154,6 +154,24 @@ def optimize(mod: Module) -> Module:
     if _REASSOC_AND:
         assigns = _reassoc_and_chains(assigns, sigs)
         assigns, body = _dce(assigns, body, observed, mem_writes)
+    if _DEDUP:
+        assigns, body, reset_epilogue, mem_writes, assertions, clocked_processes = _dedup_assigns(
+            assigns, body, reset_epilogue, mem_writes, assertions, clocked_processes, sigs
+        )
+        assigns = {k: _fold_expr(v) for k, v in assigns.items()}
+        body = _map_stmts(body, _fold_expr)
+        reset_epilogue = _map_stmts(reset_epilogue, _fold_expr)
+        assigns, body = _dce(assigns, body, observed, mem_writes)
+    if _USED_BITS:
+        assigns, sigs = _apply_used_bits(assigns, body, reset_epilogue, mem_writes, sigs)
+        assigns = {k: _fold_expr(v) for k, v in assigns.items()}
+        body = _map_stmts(body, _fold_expr)
+        reset_epilogue = _map_stmts(reset_epilogue, _fold_expr)
+        mem_writes = [
+            MemWrite(w.mem, _fold_expr(w.addr), _fold_expr(w.data), _fold_expr(w.enable))
+            for w in mem_writes
+        ]
+        assigns, body = _dce(assigns, body, observed, mem_writes)
 
     referred: set[str] = set(assigns)
     for expr in assigns.values():
@@ -531,6 +549,9 @@ def _dce(
 
 
 _BIT_SLICE = os.environ.get("FLASHSIM_BIT_SLICE", "1") != "0"
+_USED_BITS = os.environ.get("FLASHSIM_USED_BITS", "1") != "0"
+_DEDUP = os.environ.get("FLASHSIM_DEDUP", "1") != "0"
+_DEDUP_MIN_NODES = int(os.environ.get("FLASHSIM_DEDUP_MIN_NODES", "2"))
 _RESET_HOIST = os.environ.get("FLASHSIM_RESET_HOIST", "1") != "0"
 _RESET_HOIST_MIN = int(os.environ.get("FLASHSIM_RESET_HOIST_MIN", "2"))
 _RESET_NAME = re.compile(r"(^|_)reset($|_)", re.IGNORECASE)
@@ -1732,3 +1753,346 @@ def _map_stmts(stmts: list[Stmt], fn) -> list[Stmt]:
         else:
             raise TypeError(stmt)
     return out
+
+
+def _alias_expr(expr: Expr, alias: dict[str, str]) -> Expr:
+    if not alias:
+        return expr
+
+    def fn(node: Expr) -> Expr:
+        if isinstance(node, Id) and node.name in alias:
+            return Id(alias[node.name])
+        return node
+
+    return map_expr(expr, fn)
+
+
+def _dedup_assigns(
+    assigns: dict[str, Expr],
+    body: list[Stmt],
+    reset_epilogue: list[Stmt],
+    mem_writes: list[MemWrite],
+    assertions: list[ClockedAssertion],
+    clocked_processes: list[ClockedProcess],
+    sigs: dict[str, Signal],
+) -> tuple[dict[str, Expr], list[Stmt], list[Stmt], list[MemWrite], list[ClockedAssertion], list[ClockedProcess]]:
+    """Merge structurally identical wires (GSIM commonExpr / arcilator dedup).
+    Only scalar wires are merged; array, reg, input, output and mem values stay.
+    The smallest name is canonical so the result is PYTHONHASHSEED-independent.
+    """
+    if _DEDUP_MIN_NODES < 1:
+        return assigns, body, reset_epilogue, mem_writes, assertions, clocked_processes
+    groups: dict[Expr, list[str]] = {}
+    for lhs, rhs in assigns.items():
+        sig = sigs.get(lhs)
+        if sig is None or sig.kind != "wire" or sig.depth:
+            continue
+        if isinstance(rhs, (Id, Const, ArrayZeros)):
+            continue
+        if _expr_nodes(rhs) < _DEDUP_MIN_NODES:
+            continue
+        groups.setdefault(rhs, []).append(lhs)
+    alias: dict[str, str] = {}
+    for rhs, names in groups.items():
+        if len(names) < 2:
+            continue
+        names = sorted(names)
+        canonical = names[0]
+        for dup in names[1:]:
+            alias[dup] = canonical
+    if not alias:
+        return assigns, body, reset_epilogue, mem_writes, assertions, clocked_processes
+    new_assigns = {n: _alias_expr(e, alias) for n, e in assigns.items() if n not in alias}
+    new_body = _map_stmts(body, lambda e: _alias_expr(e, alias))
+    new_reset = _map_stmts(reset_epilogue, lambda e: _alias_expr(e, alias))
+    new_mem = [
+        MemWrite(w.mem, _alias_expr(w.addr, alias), _alias_expr(w.data, alias), _alias_expr(w.enable, alias))
+        for w in mem_writes
+    ]
+    new_assert = [
+        ClockedAssertion(_alias_expr(a.clock, alias), _alias_expr(a.failure, alias), a.message, a.scope)
+        for a in assertions
+    ]
+    new_procs = [ClockedProcess(_alias_expr(p.clock, alias), p.scope) for p in clocked_processes]
+    return new_assigns, new_body, new_reset, new_mem, new_assert, new_procs
+
+
+def _expr_demands(expr: Expr, demand: int, sigs: dict[str, Signal]) -> dict[str, int]:
+    """Leaf demands for the low `demand` bits of `expr` (GSIM usedBits backwards)."""
+    out: dict[str, int] = {}
+    stack: list[tuple[Expr, int]] = [(expr, demand)]
+    while stack:
+        node, need = stack.pop()
+        if need <= 0:
+            continue
+        if isinstance(node, Id):
+            prev = out.get(node.name, 0)
+            if need > prev:
+                out[node.name] = need
+            continue
+        if isinstance(node, Const) or isinstance(node, ArrayZeros):
+            continue
+        if isinstance(node, UnaryOp):
+            stack.append((node.a, need))
+            continue
+        if isinstance(node, Extract):
+            stack.append((node.a, node.low + need))
+            continue
+        if isinstance(node, Concat):
+            widths: list[int] = []
+            ok = True
+            for part in node.parts:
+                try:
+                    widths.append(expr_width(part, sigs))
+                except (KeyError, TypeError, ValueError):
+                    ok = False
+                    break
+            if not ok:
+                for part in node.parts:
+                    for name in expr_ids(part):
+                        out[name] = max(out.get(name, 0), sigs[name].width if name in sigs else 32)
+                continue
+            remain = need
+            for idx in range(len(node.parts) - 1, -1, -1):
+                if remain <= 0:
+                    break
+                take = min(widths[idx], remain)
+                stack.append((node.parts[idx], take))
+                remain -= take
+            continue
+        if isinstance(node, BinOp):
+            if node.op in CMP_OPS:
+                try:
+                    stack.append((node.a, expr_width(node.a, sigs)))
+                except (KeyError, TypeError, ValueError):
+                    stack.append((node.a, 32))
+                try:
+                    stack.append((node.b, expr_width(node.b, sigs)))
+                except (KeyError, TypeError, ValueError):
+                    stack.append((node.b, 32))
+                continue
+            if node.op in {"+", "-", "&", "|", "^", "*"}:
+                stack.append((node.a, need))
+                stack.append((node.b, need))
+                continue
+            if node.op == "<<":
+                if isinstance(node.b, Const):
+                    stack.append((node.a, max(0, need - node.b.value)))
+                else:
+                    try:
+                        stack.append((node.a, expr_width(node.a, sigs)))
+                    except (KeyError, TypeError, ValueError):
+                        stack.append((node.a, 32))
+                try:
+                    stack.append((node.b, expr_width(node.b, sigs)))
+                except (KeyError, TypeError, ValueError):
+                    stack.append((node.b, 32))
+                continue
+            try:
+                stack.append((node.a, expr_width(node.a, sigs)))
+            except (KeyError, TypeError, ValueError):
+                stack.append((node.a, 32))
+            try:
+                stack.append((node.b, expr_width(node.b, sigs)))
+            except (KeyError, TypeError, ValueError):
+                stack.append((node.b, 32))
+            continue
+        if isinstance(node, Ternary):
+            stack.append((node.cond, 1))
+            stack.append((node.a, need))
+            stack.append((node.b, need))
+            continue
+        if isinstance(node, MemRead):
+            try:
+                stack.append((node.addr, expr_width(node.addr, sigs)))
+            except (KeyError, TypeError, ValueError):
+                stack.append((node.addr, 32))
+            continue
+        if isinstance(node, ArrayGet):
+            if isinstance(node.arr, Id) and node.arr.name in sigs:
+                out[node.arr.name] = max(out.get(node.arr.name, 0), sigs[node.arr.name].width)
+            else:
+                try:
+                    stack.append((node.arr, expr_width(node.arr, sigs)))
+                except (KeyError, TypeError, ValueError):
+                    stack.append((node.arr, 32))
+            try:
+                stack.append((node.index, expr_width(node.index, sigs)))
+            except (KeyError, TypeError, ValueError):
+                stack.append((node.index, 32))
+            continue
+        if isinstance(node, ArrayInject):
+            if isinstance(node.arr, Id) and node.arr.name in sigs:
+                out[node.arr.name] = max(out.get(node.arr.name, 0), sigs[node.arr.name].width)
+            else:
+                try:
+                    stack.append((node.arr, expr_width(node.arr, sigs)))
+                except (KeyError, TypeError, ValueError):
+                    stack.append((node.arr, 32))
+            try:
+                stack.append((node.index, expr_width(node.index, sigs)))
+            except (KeyError, TypeError, ValueError):
+                stack.append((node.index, 32))
+            stack.append((node.value, need))
+            continue
+        raise TypeError(type(node))
+    return out
+
+
+def _truncate_to_used(expr: Expr, need: int, sigs: dict[str, Signal]) -> Expr:
+    """Expression computing only the low `need` bits of `expr` (GSIM usedBits)."""
+    if need <= 0:
+        return Const(0, 1)
+    try:
+        width = expr_width(expr, sigs)
+    except (KeyError, TypeError, ValueError):
+        return expr
+    if need >= width:
+        return expr
+    if isinstance(expr, Const):
+        return Const(expr.value & ((1 << need) - 1), need)
+    if isinstance(expr, Id):
+        sig = sigs.get(expr.name)
+        if sig is not None and sig.depth:
+            return expr
+        return Extract(expr, 0, need)
+    if isinstance(expr, UnaryOp):
+        if expr.op in {"~", "!"}:
+            return UnaryOp(expr.op, _truncate_to_used(expr.a, need, sigs))
+        return Extract(expr, 0, need)
+    if isinstance(expr, Extract):
+        eff_need = min(need, expr.width)
+        if isinstance(expr.a, Extract):
+            inner = expr.a
+            eff_low = inner.low + expr.low
+            return Extract(_truncate_to_used(inner.a, eff_low + eff_need, sigs), eff_low, eff_need)
+        return Extract(_truncate_to_used(expr.a, expr.low + eff_need, sigs), expr.low, eff_need)
+    if isinstance(expr, Concat):
+        widths: list[int] = []
+        for part in expr.parts:
+            try:
+                widths.append(expr_width(part, sigs))
+            except (KeyError, TypeError, ValueError):
+                return expr
+        parts: list[Expr] = []
+        remain = need
+        for idx in range(len(expr.parts) - 1, -1, -1):
+            if remain <= 0:
+                break
+            take = min(widths[idx], remain)
+            part = expr.parts[idx]
+            parts.append(part if take == widths[idx] else _truncate_to_used(part, take, sigs))
+            remain -= take
+        if not parts:
+            return Const(0, need)
+        parts.reverse()
+        if len(parts) == 1:
+            return parts[0]
+        return Concat(tuple(parts))
+    if isinstance(expr, BinOp):
+        if expr.op in CMP_OPS:
+            return expr
+        if expr.op in {"+", "-", "&", "|", "^", "*"}:
+            return BinOp(expr.op, _truncate_to_used(expr.a, need, sigs), _truncate_to_used(expr.b, need, sigs))
+        if expr.op == "<<":
+            if isinstance(expr.b, Const):
+                shift = expr.b.value
+                if need <= shift:
+                    return Const(0, need)
+                return BinOp("<<", _truncate_to_used(expr.a, need - shift, sigs), expr.b)
+            return Extract(expr, 0, need)
+        if expr.op == ">>":
+            if isinstance(expr.b, Const):
+                shift = expr.b.value
+                if shift + need <= expr_width(expr.a, sigs):
+                    return Extract(_truncate_to_used(expr.a, shift + need, sigs), shift, need)
+            return Extract(expr, 0, need)
+        return Extract(expr, 0, need)
+    if isinstance(expr, Ternary):
+        return Ternary(expr.cond, _truncate_to_used(expr.a, need, sigs), _truncate_to_used(expr.b, need, sigs))
+    if isinstance(expr, (MemRead, ArrayGet)):
+        return Extract(expr, 0, need)
+    return expr
+
+
+def _apply_used_bits(
+    assigns: dict[str, Expr],
+    body: list[Stmt],
+    reset_epilogue: list[Stmt],
+    mem_writes: list[MemWrite],
+    sigs: dict[str, Signal],
+) -> tuple[dict[str, Expr], dict[str, Signal]]:
+    """Shrink internal wires to their consumed bits (GSIM usedBits)."""
+    used: dict[str, int] = {name: 0 for name in sigs}
+    for name, sig in sigs.items():
+        if sig.kind in {"output", "reg", "mem"}:
+            used[name] = sig.width
+    body_pairs: list[tuple[Expr, int]] = []
+
+    def walk(stmts: list[Stmt]) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, NbAssign):
+                target = sigs.get(stmt.lhs)
+                body_pairs.append((stmt.rhs, target.width if target is not None else 32))
+            elif isinstance(stmt, If):
+                body_pairs.append((stmt.cond, 1))
+                walk(stmt.then_body)
+                walk(stmt.else_body)
+
+    walk(body)
+    walk(reset_epilogue)
+    for wr in mem_writes:
+        try:
+            body_pairs.append((wr.addr, expr_width(wr.addr, sigs)))
+        except (KeyError, TypeError, ValueError):
+            body_pairs.append((wr.addr, 32))
+        mem = sigs.get(wr.mem)
+        body_pairs.append((wr.data, mem.width if mem is not None else 32))
+        body_pairs.append((wr.enable, 1))
+    queue: deque[str] = deque()
+    queued: set[str] = set()
+
+    def enqueue(name: str) -> None:
+        if name in assigns and name not in queued:
+            queue.append(name)
+            queued.add(name)
+
+    def bump(name: str, need: int) -> None:
+        if name not in used:
+            return
+        sig = sigs.get(name)
+        if sig is not None:
+            need = min(need, sig.width)
+        if need > used[name]:
+            used[name] = need
+            enqueue(name)
+
+    for expr, need in body_pairs:
+        for name, leaf_need in _expr_demands(expr, need, sigs).items():
+            bump(name, leaf_need)
+    for name, need in used.items():
+        if need > 0:
+            enqueue(name)
+    while queue:
+        name = queue.popleft()
+        queued.discard(name)
+        rhs = assigns.get(name)
+        if rhs is None:
+            continue
+        for leaf, leaf_need in _expr_demands(rhs, used[name], sigs).items():
+            bump(leaf, leaf_need)
+    new_sigs: dict[str, Signal] = {}
+    for name, sig in sigs.items():
+        need = used.get(name, 0)
+        if sig.kind == "wire" and not sig.depth and need > 0 and need < sig.width:
+            new_sigs[name] = Signal(name, need, "wire", sig.depth)
+        else:
+            new_sigs[name] = sig
+    new_assigns: dict[str, Expr] = {}
+    for name, rhs in assigns.items():
+        need = used.get(name, 0)
+        if name in new_sigs and new_sigs[name].kind == "wire" and not new_sigs[name].depth and need > 0 and need < sigs[name].width:
+            new_assigns[name] = _truncate_to_used(rhs, need, sigs)
+        else:
+            new_assigns[name] = rhs
+    return new_assigns, new_sigs
