@@ -172,6 +172,8 @@ def optimize(mod: Module) -> Module:
             for w in mem_writes
         ]
         assigns, body = _dce(assigns, body, observed, mem_writes)
+    if _LUT:
+        assigns = _apply_lut(assigns, sigs)
 
     referred: set[str] = set(assigns)
     for expr in assigns.values():
@@ -550,6 +552,9 @@ def _dce(
 
 _BIT_SLICE = os.environ.get("FLASHSIM_BIT_SLICE", "1") != "0"
 _USED_BITS = os.environ.get("FLASHSIM_USED_BITS", "1") != "0"
+_LUT = os.environ.get("FLASHSIM_LUT", "1") != "0"
+_LUT_MAX_BITS = int(os.environ.get("FLASHSIM_LUT_MAX_BITS", "6"))
+_LUT_MIN_NODES = int(os.environ.get("FLASHSIM_LUT_MIN_NODES", "20"))
 _DEDUP = os.environ.get("FLASHSIM_DEDUP", "1") != "0"
 _DEDUP_MIN_NODES = int(os.environ.get("FLASHSIM_DEDUP_MIN_NODES", "2"))
 _RESET_HOIST = os.environ.get("FLASHSIM_RESET_HOIST", "1") != "0"
@@ -2096,3 +2101,130 @@ def _apply_used_bits(
         else:
             new_assigns[name] = rhs
     return new_assigns, new_sigs
+
+
+def _eval_lut_expr(expr: Expr, leaf_vals: dict[str, int], sigs: dict[str, Signal]) -> int:
+    if isinstance(expr, Id):
+        return leaf_vals[expr.name]
+    if isinstance(expr, Const):
+        return expr.value
+    if isinstance(expr, UnaryOp):
+        a = _eval_lut_expr(expr.a, leaf_vals, sigs)
+        if expr.op in {"~", "!"}:
+            width = expr_width(expr.a, sigs)
+            return (~a) & ((1 << width) - 1) if width else 0
+        raise TypeError(expr.op)
+    if isinstance(expr, BinOp):
+        a = _eval_lut_expr(expr.a, leaf_vals, sigs)
+        b = _eval_lut_expr(expr.b, leaf_vals, sigs)
+        if expr.op == "&":
+            return a & b
+        if expr.op == "|":
+            return a | b
+        if expr.op == "^":
+            return a ^ b
+        if expr.op in CMP_OPS:
+            if expr.op in {"s<", "s<=", "s>", "s>="}:
+                width = expr_width(expr.a, sigs)
+                sa, sb = _as_signed(a, width), _as_signed(b, width)
+                return int({"s<": sa < sb, "s<=": sa <= sb, "s>": sa > sb, "s>=": sa >= sb}[expr.op])
+            return int({"==": a == b, "!=": a != b, "<": a < b, "<=": a <= b, ">": a > b, ">=": a >= b}[expr.op])
+        if expr.op in {"+", "-", "*"}:
+            width = expr_width(expr, sigs)
+            result = {"+": a + b, "-": a - b, "*": a * b}[expr.op]
+            return result & ((1 << width) - 1)
+        if expr.op in {"<<", ">>"}:
+            width = expr_width(expr, sigs)
+            shifted = (a << b) if expr.op == "<<" else (a >> b)
+            return shifted & ((1 << width) - 1)
+        raise TypeError(expr.op)
+    if isinstance(expr, Extract):
+        return (_eval_lut_expr(expr.a, leaf_vals, sigs) >> expr.low) & ((1 << expr.width) - 1)
+    if isinstance(expr, Concat):
+        acc = 0
+        for part in expr.parts:
+            width = expr_width(part, sigs)
+            acc = (acc << width) | (_eval_lut_expr(part, leaf_vals, sigs) & ((1 << width) - 1))
+        return acc
+    if isinstance(expr, Ternary):
+        return _eval_lut_expr(expr.a if _eval_lut_expr(expr.cond, leaf_vals, sigs) else expr.b, leaf_vals, sigs)
+    raise TypeError(type(expr))
+
+
+def _lut_eligible(expr: Expr, sigs: dict[str, Signal]) -> list[str] | None:
+    leaves = sorted(expr_ids(expr))
+    total = 0
+    for name in leaves:
+        sig = sigs.get(name)
+        if sig is None or sig.depth:
+            return None
+        total += sig.width
+        if total > _LUT_MAX_BITS:
+            return None
+    if total < 3:
+        return None
+    if _expr_nodes(expr) < _LUT_MIN_NODES:
+        return None
+    stack: list[Expr] = [expr]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (MemRead, ArrayGet, ArrayInject, ArrayZeros)):
+            return None
+        if isinstance(node, BinOp) and node.op in {"/", "%", "s/", "s%"}:
+            return None
+        if isinstance(node, Extract):
+            if isinstance(node.a, Id):
+                sig = sigs.get(node.a.name)
+                if sig is not None and not (node.low == 0 and node.width == sig.width):
+                    return None
+            stack.append(node.a)
+        elif isinstance(node, (UnaryOp,)):
+            stack.append(node.a)
+        elif isinstance(node, BinOp):
+            stack.append(node.a)
+            stack.append(node.b)
+        elif isinstance(node, Ternary):
+            stack.append(node.cond)
+            stack.append(node.a)
+            stack.append(node.b)
+        elif isinstance(node, Concat):
+            stack.extend(node.parts)
+    return leaves
+
+
+def _apply_lut(assigns: dict[str, Expr], sigs: dict[str, Signal]) -> dict[str, Expr]:
+    out: dict[str, Expr] = {}
+    for lhs, rhs in assigns.items():
+        sig = sigs.get(lhs)
+        replaced = rhs
+        if sig is not None and sig.kind == "wire" and not sig.depth:
+            try:
+                width = expr_width(rhs, sigs)
+            except (KeyError, TypeError, ValueError):
+                width = 0
+            if width == 1:
+                leaves = _lut_eligible(rhs, sigs)
+                if leaves is not None:
+                    total = sum(sigs[name].width for name in leaves)
+                    table = 0
+                    for idx in range(1 << total):
+                        leaf_vals: dict[str, int] = {}
+                        remain = total
+                        for name in leaves:
+                            w = sigs[name].width
+                            remain -= w
+                            leaf_vals[name] = (idx >> remain) & ((1 << w) - 1)
+                        if _eval_lut_expr(rhs, leaf_vals, sigs) & 1:
+                            table |= 1 << idx
+                    entries = 1 << total
+                    if table == 0:
+                        replaced = Const(0, 1)
+                    elif table == (1 << entries) - 1:
+                        replaced = Const(1, 1)
+                    else:
+                        bits_width = 1 << total
+                        table_const = Const(table, bits_width)
+                        idx_expr: Expr = Id(leaves[0]) if len(leaves) == 1 else Concat(tuple(Id(name) for name in leaves))
+                        replaced = Extract(BinOp(">>", table_const, idx_expr), 0, 1)
+        out[lhs] = replaced
+    return out

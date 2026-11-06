@@ -195,12 +195,18 @@ propagates low-bit demand backwards from outputs/registers/memory writes
 width, shifts and concat distribute), shrinks internal scalar wires to the
 demanded width, and truncates their RHS so wide limb ops do less work
 (e.g. FMA 107→48 bits). `commonExpr`/`dedup` merges structurally identical
-scalar wires to the lexicographically smallest canonical name. Both are
-on by default and opt out with `FLASHSIM_USED_BITS=0` / `FLASHSIM_DEDUP=0`.
+scalar wires to the lexicographically smallest canonical name. Small
+1-bit functions (≤6 input bits, ≥20 nodes) are precomputed once to a
+lookup table (`(table >> index) & 1`), like arcilator `arc.make-tables`:
+static exhaustive caching beats the boolean tree when the inputs change
+every tick. All three are on by default and opt out with
+`FLASHSIM_USED_BITS=0` / `FLASHSIM_DEDUP=0` / `FLASHSIM_LUT=0` (or
+`FLASHSIM_LUT_MIN_NODES` to retune).
 Unit GPU benches (Apple M4 Max, alternating baseline/candidate runs) keep
 every `dout` identical to 1-thread Verilator and lift the geomean, with
-`VectorBackend` +28% and `GpuHostAxi` +10%; see the unit table below
-rather than the ARTI wall clock, which was not re-measured in this tree.
+`VectorBackend` +14%, `Gpu` +9%/`InstructionCache` +7% from tables alone
+on top of dedup; see the unit table below rather than the ARTI wall
+clock, which was not re-measured in this tree.
 
 ARTI A/B (needs a probe initramfs under `$WORK/initramfs.cpio.gz`; build via
 `arti-work` probe setup or copy from a prior run):
