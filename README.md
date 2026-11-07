@@ -212,8 +212,10 @@ Trace-guided tuning uses the same runs: `FLASHSIM_COMMIT_PROFILE=1`
 emits `_commit_counts/names` (per-ID `_wl` hits) to find hot writes
 (`GpuSystem` `cycleCount/activeCuCycleCount` 99.99% of 2M commits).
 `FLASHSIM_COMMIT_HOT=cycleCount,activeCuCycleCount` hoists those IDs
-ahead of the cold switch (opt-in per model; warm median +1.1% on
+ahead of the cold switch (opt-in per model; warm median +0.1% on
 `GpuSystem`, correctness kept, default off until tuned per RTL/workload).
+`python3 scripts/commit_profile.py GpuSystem` automates that loop
+(profile, pick top-2, rebuild with `HOT`, warm-median compare).
 For `ARTI` wall clock, `scripts/pgo_arti.sh MODEL_DIR -- <training>`
 automates the two-phase `PGO` build around `build_embedded.sh`
 (instrument, train with `LLVM_PROFILE_FILE`, merge, rebuild); train on
