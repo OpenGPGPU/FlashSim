@@ -8,8 +8,9 @@ import pytest
 from flashsim.circt_frontend import CirctError, circt_verilog_to_mlir, parse_hw_mlir, verilog_sources
 from flashsim.compile import compile_file, compile_verilog
 from flashsim.emit import emit_cpp
-from flashsim.ir import (AlwaysFF, Assign, BinOp, ClockedAssertion, Const, Id,
-                         Module, NbAssign, Signal)
+from flashsim.ir import (AlwaysFF, Assign, BinOp, ClockedAssertion, ClockedPrint,
+                         Const, DecimalFormat, Extract, Id, Module, NbAssign,
+                         Signal)
 from flashsim.opt import optimize
 from flashsim.toolchain import find_bin
 
@@ -228,19 +229,82 @@ endmodule
         compile_file(top, tmp_path / "model/dut.h", frontend="circt", assertions=True)
 
 
-def test_nonfatal_side_effects_are_not_silently_omitted(tmp_path):
+def test_nonfatal_decimal_prints_preserve_stream_and_sample_before_nba(tmp_path):
     _tools()
     top = tmp_path / "Print.sv"
     top.write_text("""
-module Print(input clock, good);
+module Print(input clock, good, log_en, input logic [6:0] data);
+  logic [6:0] previous;
   always @(posedge clock) begin
-    $display("a passing side effect");
+    if (log_en) $fwrite(32'h80000002, "seen=%d next=%0d\\n", previous, data);
+    previous <= data;
     if (!good) $fatal(1, "bad");
   end
 endmodule
 """)
-    with pytest.raises(CirctError, match="nonfatal procedural printing"):
+    directory = tmp_path / "model"
+    compile_file(top, directory / "dut.h", frontend="circt", assertions=True)
+    main = r'''
+#include "dut.h"
+#include <cstdio>
+#include <stdexcept>
+int main() {
+  PrintDut d;
+  d.good = 1; d.log_en = 1; d.data = 7; d.tick();
+  d.good = 1; d.log_en = 0; d.data = 42; d.tick();
+  d.good = 0; d.log_en = 1; d.data = 127;
+  try { d.tick(); } catch (const std::runtime_error &) { return 0; }
+  return 1;
+}
+'''
+    result = subprocess.run([str(_native(directory, main))], capture_output=True, text=True)
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == "seen=  0 next=7\nseen= 42 next=127\n"
+
+
+def test_dynamic_procedural_output_stream_is_rejected(tmp_path):
+    _tools()
+    top = tmp_path / "Print.sv"
+    top.write_text("""
+module Print(input clock, input [31:0] stream);
+  always @(posedge clock) $fwrite(stream, "message\\n");
+endmodule
+""")
+    with pytest.raises(CirctError, match="unsupported procedural output stream"):
         compile_file(top, tmp_path / "model/dut.h", frontend="circt", assertions=True)
+
+
+def test_signed_decimal_print_is_rejected(tmp_path):
+    _tools()
+    top = tmp_path / "Print.sv"
+    top.write_text("""
+module Print(input clock, input signed [7:0] data);
+  always @(posedge clock) $fwrite(32'h80000002, "%d\\n", data);
+endmodule
+""")
+    with pytest.raises(CirctError, match="sim.fmt.dec"):
+        compile_file(top, tmp_path / "model/dut.h", frontend="circt", assertions=True)
+
+
+def test_print_observes_all_bits_of_a_wire_shared_with_a_low_bit_consumer(tmp_path):
+    if shutil.which("c++") is None:
+        pytest.skip("C++ compiler unavailable")
+    signals = {name: Signal(name, width, kind) for name, width, kind in [
+        ("clk", 1, "input"), ("data", 8, "input"), ("wide", 8, "wire"),
+        ("low", 1, "reg")]}
+    mod = Module("Printed", signals,
+        [Assign("wide", BinOp("+", Id("data"), Const(1, 8)))],
+        AlwaysFF("clk", [NbAssign("low", Extract(Id("wide"), 0, 1))]),
+        ["clk", "data"], assertions=[ClockedPrint(Id("clk"), Const(1, 1),
+            ("value=", DecimalFormat(Id("wide"), 8), " max=",
+             DecimalFormat(Const((1 << 64) - 1, 64), 64, 22), "\x00\n"),
+            "observer", "stdout")])
+    (tmp_path / "dut.h").write_text(emit_cpp(optimize(mod)))
+    main = '#include "dut.h"\nint main() { PrintedDut d; d.data=239; d.tick(); }\n'
+    result = subprocess.run([str(_native(tmp_path, main))], capture_output=True, text=True)
+    assert result.returncode == 0
+    assert result.stdout == "value=240 max=  18446744073709551615\x00\n"
 
 
 def test_native_frontend_cannot_accept_bound_assertions():

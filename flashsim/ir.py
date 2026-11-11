@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 
@@ -129,6 +129,42 @@ class ClockedAssertion:
     scope: str
 
 
+@dataclass(frozen=True, slots=True)
+class DecimalFormat:
+    value: Expr
+    width: int
+    field_width: int | None = None
+
+
+@dataclass(slots=True)
+class ClockedPrint:
+    clock: Expr
+    failure: Expr  # The guard for this observable effect.
+    pieces: tuple[str | DecimalFormat, ...]
+    scope: str
+    stream: str
+
+
+def observation_exprs(observation: ClockedAssertion | ClockedPrint) -> list[Expr]:
+    values = [observation.clock, observation.failure]
+    if isinstance(observation, ClockedPrint):
+        values.extend(piece.value for piece in observation.pieces
+                      if isinstance(piece, DecimalFormat))
+    return values
+
+
+def map_observation(observation: ClockedAssertion | ClockedPrint,
+                    transform: Callable[[Expr], Expr]) -> ClockedAssertion | ClockedPrint:
+    if isinstance(observation, ClockedPrint):
+        pieces = tuple(DecimalFormat(transform(piece.value), piece.width, piece.field_width)
+                       if isinstance(piece, DecimalFormat) else piece
+                       for piece in observation.pieces)
+        return ClockedPrint(transform(observation.clock), transform(observation.failure),
+                            pieces, observation.scope, observation.stream)
+    return ClockedAssertion(transform(observation.clock), transform(observation.failure),
+                            observation.message, observation.scope)
+
+
 @dataclass(slots=True)
 class ClockedProcess:
     clock: Expr
@@ -143,7 +179,7 @@ class Module:
     always: AlwaysFF
     ports: list[str]
     mem_writes: list[MemWrite] = field(default_factory=list)
-    assertions: list[ClockedAssertion] = field(default_factory=list)
+    assertions: list[ClockedAssertion | ClockedPrint] = field(default_factory=list)
     clocked_processes: list[ClockedProcess] = field(default_factory=list)
     # Constant reset arms lifted off the per-register fast path. Emitted after
     # hold dispatch so a later write still wins when buckets are not in
