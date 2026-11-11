@@ -26,6 +26,7 @@ from flashsim.ir import (
     Assign,
     BinOp,
     ClockedAssertion,
+    ClockedPrint,
     ClockedProcess,
     CMP_OPS,
     Concat,
@@ -46,6 +47,8 @@ from flashsim.ir import (
     expr_ids,
     expr_width,
     map_expr,
+    map_observation,
+    observation_exprs,
     stmt_reads,
     stmt_writes,
 )
@@ -83,15 +86,14 @@ def optimize(mod: Module) -> Module:
     assigns = _subst_consts(assigns)
     assigns = {k: _rewrite_expr(v, assigns, sigs) for k, v in assigns.items()}
     body = _map_stmts(body, rewrite)
-    assertions = [
-        ClockedAssertion(rewrite(a.clock), rewrite(a.failure), a.message, a.scope)
-        for a in mod.assertions
-    ]
+    assertions = [map_observation(a, rewrite) for a in mod.assertions]
     clocked_processes = [ClockedProcess(rewrite(p.clock), p.scope)
                          for p in mod.clocked_processes]
-    assertion_reads = set().union(*(expr_ids(a.clock) | expr_ids(a.failure)
-                                    for a in assertions))
-    assertion_reads |= set().union(*(expr_ids(p.clock) for p in clocked_processes))
+    def observer_reads():
+        return set().union(*(expr_ids(expr) for a in assertions
+                             for expr in observation_exprs(a)),
+                           *(expr_ids(p.clock) for p in clocked_processes))
+    assertion_reads = observer_reads()
     observed = outputs | assertion_reads
     mem_writes = [
         MemWrite(
@@ -158,12 +160,17 @@ def optimize(mod: Module) -> Module:
         assigns, body, reset_epilogue, mem_writes, assertions, clocked_processes = _dedup_assigns(
             assigns, body, reset_epilogue, mem_writes, assertions, clocked_processes, sigs
         )
+        assertion_reads = observer_reads()
+        observed = outputs | assertion_reads
         assigns = {k: _fold_expr(v) for k, v in assigns.items()}
         body = _map_stmts(body, _fold_expr)
         reset_epilogue = _map_stmts(reset_epilogue, _fold_expr)
         assigns, body = _dce(assigns, body, observed, mem_writes)
     if _USED_BITS:
-        assigns, sigs = _apply_used_bits(assigns, body, reset_epilogue, mem_writes, sigs)
+        observed_exprs = [expr for a in assertions for expr in observation_exprs(a)]
+        observed_exprs.extend(p.clock for p in clocked_processes)
+        assigns, sigs = _apply_used_bits(assigns, body, reset_epilogue, mem_writes,
+                                        sigs, observed_exprs)
         assigns = {k: _fold_expr(v) for k, v in assigns.items()}
         body = _map_stmts(body, _fold_expr)
         reset_epilogue = _map_stmts(reset_epilogue, _fold_expr)
@@ -1777,10 +1784,10 @@ def _dedup_assigns(
     body: list[Stmt],
     reset_epilogue: list[Stmt],
     mem_writes: list[MemWrite],
-    assertions: list[ClockedAssertion],
+    assertions: list[ClockedAssertion | ClockedPrint],
     clocked_processes: list[ClockedProcess],
     sigs: dict[str, Signal],
-) -> tuple[dict[str, Expr], list[Stmt], list[Stmt], list[MemWrite], list[ClockedAssertion], list[ClockedProcess]]:
+) -> tuple[dict[str, Expr], list[Stmt], list[Stmt], list[MemWrite], list[ClockedAssertion | ClockedPrint], list[ClockedProcess]]:
     """Merge structurally identical wires (GSIM commonExpr / arcilator dedup).
     Only scalar wires are merged; array, reg, input, output and mem values stay.
     The smallest name is canonical so the result is PYTHONHASHSEED-independent.
@@ -1814,10 +1821,8 @@ def _dedup_assigns(
         MemWrite(w.mem, _alias_expr(w.addr, alias), _alias_expr(w.data, alias), _alias_expr(w.enable, alias))
         for w in mem_writes
     ]
-    new_assert = [
-        ClockedAssertion(_alias_expr(a.clock, alias), _alias_expr(a.failure, alias), a.message, a.scope)
-        for a in assertions
-    ]
+    new_assert = [map_observation(a, lambda expr: _alias_expr(expr, alias))
+                  for a in assertions]
     new_procs = [ClockedProcess(_alias_expr(p.clock, alias), p.scope) for p in clocked_processes]
     return new_assigns, new_body, new_reset, new_mem, new_assert, new_procs
 
@@ -2026,6 +2031,7 @@ def _apply_used_bits(
     reset_epilogue: list[Stmt],
     mem_writes: list[MemWrite],
     sigs: dict[str, Signal],
+    observed_exprs: list[Expr] = (),
 ) -> tuple[dict[str, Expr], dict[str, Signal]]:
     """Shrink internal wires to their consumed bits (GSIM usedBits)."""
     used: dict[str, int] = {name: 0 for name in sigs}
@@ -2046,6 +2052,8 @@ def _apply_used_bits(
 
     walk(body)
     walk(reset_epilogue)
+    for expr in observed_exprs:
+        body_pairs.append((expr, expr_width(expr, sigs)))
     for wr in mem_writes:
         try:
             body_pairs.append((wr.addr, expr_width(wr.addr, sigs)))

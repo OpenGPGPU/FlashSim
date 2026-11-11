@@ -12,9 +12,12 @@ from flashsim.ir import (
     ArrayInject,
     ArrayZeros,
     BinOp,
+    ClockedAssertion,
+    ClockedPrint,
     CMP_OPS,
     Concat,
     Const,
+    DecimalFormat,
     Expr,
     Extract,
     Id,
@@ -27,6 +30,7 @@ from flashsim.ir import (
     Ternary,
     UnaryOp,
     expr_ids,
+    observation_exprs,
     stmt_writes,
 )
 
@@ -129,7 +133,8 @@ def cached_wires(mod: Module, assigns: dict[str, Expr]) -> set[str]:
     """
     names = seq_skip_roots(mod.always.body) | set(collect_outputs(mod))
     for assertion in mod.assertions:
-        names |= expr_ids(assertion.failure)
+        for expr in observation_exprs(assertion):
+            names |= expr_ids(expr)
     for wr in mod.mem_writes:
         names |= expr_ids(wr.enable)
     cached = {n for n in names if n in assigns}
@@ -2507,6 +2512,8 @@ def emit_cpp(mod: Module) -> str:
         "#include <cstdint>",
         "#include <cstring>",
         *(["#include <stdexcept>", "#include <string>"] if mod.assertions else []),
+        *(["#include <cstdio>"] if any(isinstance(a, ClockedPrint)
+                                      for a in mod.assertions) else []),
         "",
         "static inline uint32_t shl(uint32_t x, uint32_t n) {",
         "  return n >= 32u ? 0u : (x << n);",
@@ -2744,7 +2751,7 @@ def emit_cpp(mod: Module) -> str:
         [
         "",
         f"struct {mod.name}Dut {{",
-        *([f"  static constexpr uint64_t assertion_count = {len(mod.assertions)};"]
+        *([f"  static constexpr uint64_t assertion_count = {sum(isinstance(a, ClockedAssertion) for a in mod.assertions)};"]
           if mod.assertions else []),
         ]
     )
@@ -3072,20 +3079,54 @@ def emit_cpp(mod: Module) -> str:
             method = ("_check_assertions" if len(groups)==1
                       else "_check_assertions_"+str(group_index))
             lines.append(f"  __attribute__((noinline)) void {method}() {{")
-            roots = set().union(*(expr_ids(a.failure) for a in group)) & cached
+            roots = set().union(*(expr_ids(expr) for a in group
+                                  for expr in observation_exprs(a))) & cached
             # Use each wire/pass's own guard, not the shared NBA demand marker.
             lines.extend(dict.fromkeys(_eval_invoke(name, 4) for name in sorted(roots)))
             for local_index, assertion in enumerate(group):
                 condition = "_flashsim_check_"+str(group_index*64+local_index)
                 while condition in sigs:
                     condition += "_"
-                label = json.dumps("FlashSim assertion " + assertion.scope + ": "
-                                   + assertion.message + " (tick ")
                 lines.append("    {")
                 lines.append(f"      uint8_t {condition};")
                 _emit_assign(condition,assertion.failure,cached,sigs,lines,6,"0x1u",[0])
-                lines.append(f"      if ({condition}) throw std::runtime_error(std::string({label})"
-                             ' + std::to_string(_nt) + ")");')
+                if isinstance(assertion, ClockedPrint):
+                    if assertion.stream not in {"stdout", "stderr"}:
+                        raise ValueError("unsupported clocked print stream")
+                    message = "_flashsim_print_message"
+                    while message in sigs:
+                        message += "_"
+                    lines.append(f"      if ({condition}) {{")
+                    lines.append(f"        std::string {message};")
+                    for piece_index, piece in enumerate(assertion.pieces):
+                        if isinstance(piece, str):
+                            data = piece.encode("utf-8")
+                            escaped = "".join(f"\\{byte:03o}" for byte in data)
+                            lines.append(f'        {message}.append("{escaped}", {len(data)});')
+                            continue
+                        value = "_flashsim_print_value_" + str(piece_index)
+                        text = "_flashsim_print_text_" + str(piece_index)
+                        while value in sigs:
+                            value += "_"
+                        while text in sigs:
+                            text += "_"
+                        lines.append(f"        uint64_t {value};")
+                        mask = hex((1 << piece.width) - 1) + "ull"
+                        _emit_assign(value,piece.value,cached,sigs,lines,8,mask,[0])
+                        lines.append(f"        std::string {text} = std::to_string({value});")
+                        field = (len(str((1 << piece.width) - 1))
+                                 if piece.field_width is None else piece.field_width)
+                        if field:
+                            lines.append(f"        if ({text}.size() < {field}) "
+                                         f"{message}.append({field} - {text}.size(), ' ');")
+                        lines.append(f"        {message} += {text};")
+                    lines.append(f"        std::fwrite({message}.data(), 1, {message}.size(), {assertion.stream});")
+                    lines.append("      }")
+                else:
+                    label = json.dumps("FlashSim assertion " + assertion.scope + ": "
+                                       + assertion.message + " (tick ")
+                    lines.append(f"      if ({condition}) throw std::runtime_error(std::string({label})"
+                                 ' + std::to_string(_nt) + ")");')
                 lines.append("    }")
             lines.extend(["  }", ""])
         if len(groups)>1:
