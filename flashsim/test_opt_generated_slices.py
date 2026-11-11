@@ -4,6 +4,7 @@ import subprocess
 
 import pytest
 
+import flashsim.opt as opt
 from flashsim.emit import emit_cpp
 from flashsim.ir import AlwaysFF, Assign, BinOp, Concat, Const, Extract, Id, If, MemWrite, Module, NbAssign, Signal
 from flashsim.opt import _cse_sibling_or_prefixes, _narrow_bit_slices, _reassoc_and_chains, _slice_src, optimize
@@ -54,6 +55,43 @@ def test_reused_shared_slice_skips_rewalking_its_definition():
     # An active recursion or exhausted fuel must not reuse the cached slice.
     assert _slice_src(Id("wide"), 1, 1, assigns, signals, {"wide": 2}, fresh, cache, {"wide"}) is None
     assert _slice_src(Id("wide"), 1, 1, assigns, signals, {"wide": 2}, fresh, cache, set(), 0) is None
+
+
+def test_slice_width_cache_uses_identity_and_has_a_fixed_bound(monkeypatch):
+    signals = {"x": Signal("x", 4, "input")}
+    first = BinOp("&", Id("x"), Const(3, 4))
+    equal_but_distinct = BinOp("&", Id("x"), Const(3, 4))
+    last = BinOp("|", Id("x"), Const(0, 4))
+    cache = {}
+    calls = []
+    original = opt.expr_width
+
+    def count_width(expr, sigs):
+        calls.append(expr)
+        return original(expr, sigs)
+
+    monkeypatch.setattr(opt, "expr_width", count_width)
+    monkeypatch.setattr(opt, "_SLICE_WIDTH_CACHE_MAX", 2)
+    assert opt._slice_width(first, signals, cache) == 4
+    assert opt._slice_width(first, signals, cache) == 4
+    assert len(calls) == 1
+    assert opt._slice_width(equal_but_distinct, signals, cache) == 4
+    assert len(calls) == 2 and len(cache) == 2
+    assert opt._slice_width(last, signals, cache) == 4
+    assert len(cache) <= 2
+
+
+def test_slice_width_cache_does_not_cache_unknown_signals():
+    signals = {}
+    expr = BinOp("&", Id("later"), Const(3, 4))
+    cache = {}
+    with pytest.raises(KeyError, match="later"):
+        opt._slice_width(expr, signals, cache)
+    assert not cache
+    signals["later"] = Signal("later", 8, "wire")
+    assert opt._slice_width(expr, signals, cache) == 8
+    signals["unrelated"] = Signal("unrelated", 1, "wire")
+    assert opt._slice_width(expr, signals, cache) == 8
 
 
 def test_sequential_only_slice_has_a_definition_and_width():

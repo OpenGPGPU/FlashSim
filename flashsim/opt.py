@@ -572,6 +572,24 @@ _RESET_HOIST = os.environ.get("FLASHSIM_RESET_HOIST", "1") != "0"
 _RESET_HOIST_MIN = int(os.environ.get("FLASHSIM_RESET_HOIST_MIN", "2"))
 _RESET_NAME = re.compile(r"(^|_)reset($|_)", re.IGNORECASE)
 _SLICE_INLINE_NODES = 16
+_SLICE_WIDTH_CACHE_MAX = 8192
+
+
+def _slice_width(expr: Expr, sigs: dict[str, Signal],
+                 cache: dict[int, tuple[Expr, int]]) -> int:
+    # Keep the frequently repeated wide subtrees, not every tiny atom in a
+    # whole-host netlist. Holding the object prevents identity reuse.
+    if isinstance(expr, (Id, Const, Extract, ArrayZeros, MemRead)):
+        return expr_width(expr, sigs)
+    key = id(expr)
+    hit = cache.get(key)
+    if hit is not None and hit[0] is expr:
+        return hit[1]
+    width = expr_width(expr, sigs)
+    if len(cache) >= _SLICE_WIDTH_CACHE_MAX:
+        cache.clear()
+    cache[key] = (expr, width)
+    return width
 
 
 def _slice_src(
@@ -585,6 +603,7 @@ def _slice_src(
     cache: dict[tuple[str, int, int], Expr],
     seen: set[str],
     fuel: int = 64,
+    width_cache: dict[int, tuple[Expr, int]] | None = None,
 ) -> Expr | None:
     """Narrow `src[low +: width]` onto the operands that actually feed it.
 
@@ -594,8 +613,10 @@ def _slice_src(
     """
     if fuel <= 0 or width <= 0 or low < 0:
         return None
+    if width_cache is None:
+        width_cache = {}
     try:
-        src_w = expr_width(src, sigs)
+        src_w = _slice_width(src, sigs, width_cache)
     except (KeyError, TypeError):
         return None
     if low + width > src_w:
@@ -609,14 +630,14 @@ def _slice_src(
         if low + width > src.width:
             return None
         inner = _slice_src(
-            src.a, src.low + low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+            src.a, src.low + low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
         )
         return inner if inner is not None else Extract(src.a, src.low + low, width)
     if isinstance(src, Concat) and src.parts:
         widths = []
         for part in src.parts:
             try:
-                widths.append(expr_width(part, sigs))
+                widths.append(_slice_width(part, sigs, width_cache))
             except (KeyError, TypeError):
                 return None
         if any(part_w <= 0 for part_w in widths):
@@ -641,7 +662,7 @@ def _slice_src(
                 pieces.append(part)
                 continue
             inner = _slice_src(
-                part, take_lo, take_w, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+                part, take_lo, take_w, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
             )
             pieces.append(inner if inner is not None else Extract(part, take_lo, take_w))
         if not pieces:
@@ -660,7 +681,7 @@ def _slice_src(
             base = assigns[base.name]
         if isinstance(base, Const) and base.value == 1 and low < src_w:
             try:
-                amt_w = expr_width(src.b, sigs)
+                amt_w = _slice_width(src.b, sigs, width_cache)
             except (KeyError, TypeError):
                 return None
             if low.bit_length() > amt_w:
@@ -668,17 +689,17 @@ def _slice_src(
             return BinOp("==", src.b, Const(low, amt_w))
     if isinstance(src, UnaryOp) and src.op == "~":
         inner = _slice_src(
-            src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+            src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
         )
         if inner is not None and _expr_nodes(inner) <= _SLICE_INLINE_NODES:
             return UnaryOp("~", inner)
         return None
     if isinstance(src, BinOp) and src.op in {"&", "|", "^"}:
         left = _slice_src(
-            src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+            src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
         )
         right = _slice_src(
-            src.b, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+            src.b, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
         )
         if (
             left is not None
@@ -689,10 +710,10 @@ def _slice_src(
         return None
     if isinstance(src, Ternary):
         left = _slice_src(
-            src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+            src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
         )
         right = _slice_src(
-            src.b, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+            src.b, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
         )
         if (
             left is not None
@@ -708,7 +729,7 @@ def _slice_src(
             return hit
         seen.add(src.name)
         sliced = _slice_src(
-            assigns[src.name], low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1
+            assigns[src.name], low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
         )
         seen.remove(src.name)
         if sliced is None:
@@ -757,12 +778,13 @@ def _narrow_expr(
     uses: dict[str, int],
     fresh: dict[str, Expr],
     cache: dict[tuple[str, int, int], Expr],
+    width_cache: dict[int, tuple[Expr, int]],
 ) -> Expr:
     def fn(node: Expr) -> Expr:
         if not isinstance(node, Extract):
             return node
         sliced = _slice_src(
-            node.a, node.low, node.width, assigns, sigs, uses, fresh, cache, set()
+            node.a, node.low, node.width, assigns, sigs, uses, fresh, cache, set(), 64, width_cache
         )
         return sliced if sliced is not None else node
 
@@ -778,9 +800,10 @@ def _narrow_bit_slices(
     uses = _count_uses(assigns, body, mem_writes)
     fresh: dict[str, Expr] = {}
     cache: dict[tuple[str, int, int], Expr] = {}
+    width_cache: dict[int, tuple[Expr, int]] = {}
 
     def narrow(expr: Expr) -> Expr:
-        return _narrow_expr(expr, assigns, sigs, uses, fresh, cache)
+        return _narrow_expr(expr, assigns, sigs, uses, fresh, cache, width_cache)
 
     narrowed = {name: narrow(expr) for name, expr in assigns.items()}
     body = _map_stmts(body, narrow)
