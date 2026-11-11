@@ -13,7 +13,6 @@ from flashsim.ir import (
     ArrayZeros,
     Assign,
     BinOp,
-    ClockedAssertion,
     ClockedProcess,
     Concat,
     Const,
@@ -26,6 +25,7 @@ from flashsim.ir import (
     NbAssign,
     Signal,
     Ternary,
+    map_observation,
 )
 from flashsim.toolchain import find_bin
 
@@ -705,10 +705,9 @@ def _flatten(mod: Module, lib: dict[str, Module], remaining: Counter[str]) -> Mo
                 )
             )
         for assertion in callee.assertions:
-            assertions.append(ClockedAssertion(
-                _rename_expr(assertion.clock, rename),
-                _rename_expr(assertion.failure, rename),
-                assertion.message, inst+"."+assertion.scope))
+            renamed = map_observation(assertion, lambda expr: _rename_expr(expr, rename))
+            renamed.scope = inst+"."+assertion.scope
+            assertions.append(renamed)
         for process in callee.clocked_processes:
             clocked_processes.append(ClockedProcess(
                 _rename_expr(process.clock,rename),inst+"."+process.scope))

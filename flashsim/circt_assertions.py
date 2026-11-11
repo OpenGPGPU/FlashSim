@@ -10,8 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import re
 
-from flashsim.ir import (BinOp, ClockedAssertion, ClockedProcess, Const, Expr,
-                         Id, If, NbAssign, Ternary, map_expr)
+from flashsim.ir import (BinOp, ClockedAssertion, ClockedPrint, ClockedProcess,
+                         Const, DecimalFormat, Expr, Id, If, NbAssign, Ternary,
+                         map_expr)
 
 
 class AssertionLoweringError(ValueError):
@@ -95,6 +96,7 @@ def decode_mlir_string(text: str) -> str:
 
 def lower_process(lines, *, globals, formats, scope, lower_pure, normalize,
                   drives=(), materialize=None, dimensions=None):
+    formats = {name: (value,) for name, value in formats.items()}
     result_name, result_types = process_results(lines[0])
     blocks = {"entry": _Block([], [])}
     current = blocks["entry"]
@@ -123,6 +125,9 @@ def lower_process(lines, *, globals, formats, scope, lower_pure, normalize,
         raise AssertionLoweringError("unknown assertion operand %" + name)
 
     def pure(line, env):
+        if match := re.fullmatch(r'%(\S+)\s*=\s*sim\.fmt\.literal\s+("(?:\\.|[^"\\])*")', line):
+            formats[normalize(match.group(1))] = (decode_mlir_string(match.group(2)),)
+            return
         if match := _PROBE.match(line):
             env[normalize(match.group(1))] = resolve(match.group(2), env)
             return
@@ -270,6 +275,7 @@ def _lower_value_region(blocks, first, values, wait_name, yields, drives,
 
     incoming = {first:[(Const(1,1),[values[arg] for arg in blocks[first].arguments])]}
     updates, assertions, returned_values = [], [], []
+    streams = {}
     def merge_entries(entries):
         # Large reference selectors can converge thousands of mutually
         # exclusive arms. Keep reach predicates and phi values logarithmic
@@ -321,34 +327,74 @@ def _lower_value_region(blocks, first, values, wait_name, yields, drives,
         for index,arg in enumerate(block.arguments):
             values[arg] = wire(name+"_"+arg,merged_values[index],block.types[index])
         prints = []
+        def flush_prints():
+            for pieces, stream in prints:
+                assertions.append(ClockedPrint(clock, reach, pieces,
+                    scope+"."+name, stream))
+            prints.clear()
+
         for index,line in enumerate(block.lines):
             if line.startswith("cf.br "):
                 if index != len(block.lines)-1:
                     raise AssertionLoweringError("instructions follow a branch")
-                if prints:
-                    raise AssertionLoweringError("nonfatal procedural printing is unsupported")
+                flush_prints()
                 send(line[len("cf.br "):],reach)
             elif match := re.fullmatch(r"cf\.cond_br\s+%(\S+),\s*(.*)",line):
                 if index != len(block.lines)-1:
                     raise AssertionLoweringError("instructions follow a conditional branch")
-                if prints:
-                    raise AssertionLoweringError("nonfatal procedural printing is unsupported")
+                flush_prints()
                 guard = resolve(match.group(1),values)
                 yes,no = _split_targets(match.group(2))
                 send(yes,wire(name+"_yes",BinOp("&",reach,guard)))
                 send(no,wire(name+"_no",BinOp("&",reach,BinOp("^",guard,Const(1,1)))))
             elif match := _PROBE.match(line):
                 values[normalize(match.group(1))] = resolve(match.group(2),values)
-            elif match := re.fullmatch(r"sim\.proc\.print\s+%(\S+)",line):
+            elif match := re.fullmatch(r'%(\S+)\s*=\s*sim\.fmt\.literal\s+("(?:\\.|[^"\\])*")',line):
+                formats[normalize(match.group(1))] = (decode_mlir_string(match.group(2)),)
+            elif match := re.fullmatch(
+                    r"%(\S+)\s*=\s*sim\.fmt\.dec\s+%(\S+)"
+                    r"(?:\s+specifierWidth\s+(\d+))?\s*:\s*i(\d+)",line):
+                width = int(match.group(4))
+                if not 1 <= width <= 64:
+                    raise AssertionLoweringError("decimal diagnostic width must be 1..64 bits")
+                field_width = int(match.group(3)) if match.group(3) else None
+                if field_width is not None and field_width > 4096:
+                    raise AssertionLoweringError("decimal diagnostic field is too wide")
+                formats[normalize(match.group(1))] = (DecimalFormat(
+                    resolve(match.group(2),values), width, field_width),)
+            elif match := re.fullmatch(r"%(\S+)\s*=\s*sim\.fmt\.concat\s*\((.*?)\)",line):
+                names = _SSA.findall(match.group(2))
+                if any(normalize(name) not in formats for name in names):
+                    raise AssertionLoweringError("unknown diagnostic format operand")
+                formats[normalize(match.group(1))] = tuple(
+                    piece for name in names for piece in formats[normalize(name)])
+            elif match := re.fullmatch(
+                    r"%(\S+)\s*=\s*sim\.sv\.channel_to_output_stream\s+%(\S+)",line):
+                channel = resolve(match.group(2),values)
+                if not isinstance(channel, Const) or channel.value not in (0x80000001, 0x80000002):
+                    raise AssertionLoweringError("unsupported procedural output stream")
+                streams[normalize(match.group(1))] = (
+                    "stdout" if channel.value == 0x80000001 else "stderr")
+            elif match := re.fullmatch(r"sim\.proc\.print\s+%(\S+)(?:\s+to\s+%(\S+))?",line):
                 ident = normalize(match.group(1))
                 if ident not in formats:
                     raise AssertionLoweringError("unsupported formatted assertion diagnostic")
-                prints.append(formats[ident])
+                stream = "stdout" if not match.group(2) else streams.get(normalize(match.group(2)))
+                if stream is None:
+                    raise AssertionLoweringError("unknown procedural output stream")
+                prints.append((formats[ident], stream))
             elif line in {"sim.terminate failure","sim.terminate failure, quiet"}:
-                if any(trailing != "ub.unreachable" for trailing in block.lines[index+1:]):
+                trailing = block.lines[index+1:]
+                # CIRCT may leave deferred drives after a terminating fatal;
+                # they cannot execute when the block ends in unreachable.
+                if (trailing and (trailing[-1] != "ub.unreachable" or
+                        any(not op.startswith("llhd.drv ") for op in trailing[:-1]))):
                     raise AssertionLoweringError("unsupported effects after fatal termination")
+                pieces = [piece for parts, _ in prints for piece in parts]
+                if any(not isinstance(piece, str) for piece in pieces):
+                    raise AssertionLoweringError("formatted fatal diagnostics are unsupported")
                 assertions.append(ClockedAssertion(clock,reach,
-                    "".join(prints).strip() or "fatal clocked check",scope+"."+name))
+                    "".join(pieces).strip() or "fatal clocked check",scope+"."+name))
                 break
             else:
                 ident,expr,type_info = lower_pure(line)
