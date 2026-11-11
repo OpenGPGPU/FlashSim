@@ -3588,6 +3588,47 @@ def _outline_mem_ports(cls: str, body: list[str]) -> tuple[list[str], list[str],
     return prepared, declarations, helpers
 
 
+def _outline_mem_stores(cls: str, body: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """Bound optimizer work while keeping memory stores in their original order."""
+    pattern = re.compile(r"^    if \(__we(\d+)\) \{\n$")
+    if len(body) < 2 or body[-1].strip() != "}":
+        return body, [], []
+    ports: list[tuple[str, list[str]]] = []
+    i = 1
+    while i < len(body) - 1:
+        match = pattern.match(body[i])
+        if not match:
+            return body, [], []
+        start = i
+        depth = 0
+        while i < len(body) - 1:
+            depth += _method_brace_delta(body[i])
+            i += 1
+            if depth == 0:
+                break
+        if depth:
+            return body, [], []
+        ports.append((match.group(1), body[start:i]))
+    if len(ports) < 64:
+        return body, [], []
+
+    result = [body[0]]
+    declarations: list[str] = []
+    helpers: list[str] = []
+    for index in range(0, len(ports), 32):
+        chunk = ports[index:index + 32]
+        name = f"_mem_store_part_{index // 32}"
+        enabled = " || ".join(f"__we{port}" for port, _ in chunk)
+        result.append(f"    if ({enabled}) {name}();\n")
+        declarations.append(f"  __attribute__((noinline)) void {name}();\n")
+        helpers.append(f"void {cls}::{name}() {{\n")
+        for _, lines in chunk:
+            helpers.extend(lines)
+        helpers.append("}\n\n")
+    result.append(body[-1])
+    return result, declarations, helpers
+
+
 _COMMIT_CHUNK_MIN_CASES = 4096
 _COMMIT_CHUNK_CASES = 512
 
@@ -3942,6 +3983,14 @@ def split_dut_methods(
                     own_files["_mem_ports"].extend([f'#include "dut.h"\n', "\n"])
                 bucket = own_files["_mem_ports"]
                 bucket.extend(helpers)
+        if name == "_mem_store":
+            converted, declarations, helpers = _outline_mem_stores(cls, converted)
+            out_lines.extend(declarations)
+            if helpers:
+                if "_mem_stores" not in own_files:
+                    own_files["_mem_stores"] = _SplitSink()
+                    own_files["_mem_stores"].extend([f'#include "dut.h"\n', "\n"])
+                own_files["_mem_stores"].extend(helpers)
         if name in _SPLIT_OWN_FILE:
             if name not in own_files:
                 own_files[name] = _SplitSink()

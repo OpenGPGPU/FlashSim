@@ -4,7 +4,8 @@ import subprocess
 
 import pytest
 
-from flashsim.emit import emit_cpp, split_dut_methods
+from flashsim import reshard
+from flashsim.emit import _outline_mem_stores, emit_cpp, split_dut_methods
 from flashsim.ir import AlwaysFF, Assign, BinOp, Const, Id, MemRead, MemWrite, Module, Signal
 
 
@@ -64,7 +65,9 @@ def test_outlined_ports_read_preedge_memory_before_ordered_stores(tmp_path):
                     for i in range(64)])
     header,parts = split_dut_methods(emit_cpp(mod),n_shards=2)
     assert "dut_mem_ports.cpp" in dict(parts)
+    assert "dut_mem_stores.cpp" in dict(parts)
     assert "void _mem_port_63();" in header
+    assert "void _mem_store_part_1();" in header
     (tmp_path / "dut.h").write_text(header)
     sources = []
     for name,source in parts:
@@ -86,6 +89,112 @@ int main() {
     binary = tmp_path / "check"
     subprocess.run([compiler,"-std=c++17","-O2",str(main),*sources,"-o",str(binary)],check=True)
     subprocess.run([str(binary)],check=True)
+
+
+def test_outlined_stores_preserve_write_order_across_chunks(tmp_path):
+    compiler = shutil.which("c++")
+    if not compiler:
+        pytest.skip("C++ compiler unavailable")
+    signals = {name: Signal(name, width, kind, depth=depth)
+               for name, width, kind, depth in [
+                   ("clock", 1, "input", 0), ("addr", 2, "input", 0),
+                   ("even", 1, "input", 0), ("odd", 1, "input", 0),
+                   ("even_enabled", 1, "wire", 0), ("odd_enabled", 1, "wire", 0),
+                   ("old", 32, "output", 0), ("m", 32, "mem", 4)]}
+    mod = Module(name="OrderedStores", signals=signals,
+        assigns=[Assign("old", MemRead("m", Id("addr"))),
+                 Assign("even_enabled", Id("even")), Assign("odd_enabled", Id("odd"))],
+        always=AlwaysFF("clock", []), ports=["clock", "addr", "even", "odd", "old"],
+        mem_writes=[MemWrite("m", Id("addr"), BinOp("+", Id("old"), Const(i)),
+                             Id("odd_enabled" if i % 2 else "even_enabled")) for i in range(96)])
+    header, parts = split_dut_methods(emit_cpp(mod), n_shards=2)
+    assert "void _mem_store_part_2();" in header
+    (tmp_path / "dut.h").write_text(header)
+    sources = []
+    for name, source in parts:
+        path = tmp_path / name
+        path.write_text(source)
+        sources.append(str(path))
+    main = tmp_path / "main.cpp"
+    main.write_text('''#include "dut.h"
+int main() {
+  OrderedStoresDut d; unsigned expected[4] = {};
+  for (unsigned i = 0; i < 256; ++i) {
+    d.addr = (i / 3) % 4; d.even = i & 1; d.odd = (i >> 1) & 1;
+    if (d.odd) expected[d.addr] += 95;
+    else if (d.even) expected[d.addr] += 94;
+    d.tick();
+    for (unsigned j = 0; j < 4; ++j) if (d.m[j] != expected[j]) return 1;
+  }
+}
+''')
+    binary = tmp_path / "check"
+    subprocess.run([compiler, "-std=c++17", "-O2", str(main), *sources, "-o", str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+
+
+def test_store_outliner_leaves_unrecognized_methods_unchanged():
+    body = ["void ExampleDut::_mem_store() {\n"]
+    body += [f"    if (__we{i}) {{\n      m[__wa{i}] = __wd{i};\n    }}\n" for i in range(64)]
+    # Keep one physical source line per list element, as in the splitter.
+    body = "".join(body + ["    unexpected();\n", "}\n"]).splitlines(keepends=True)
+    assert _outline_mem_stores("ExampleDut", body) == (body, [], [])
+
+
+def test_outlined_wide_stores_keep_all_limbs_and_port_priority(tmp_path):
+    compiler = shutil.which("c++")
+    if not compiler:
+        pytest.skip("C++ compiler unavailable")
+    signals = {name: Signal(name, width, kind, depth=depth)
+               for name, width, kind, depth in [
+                   ("clock", 1, "input", 0), ("addr", 2, "input", 0),
+                   ("even", 1, "input", 0), ("odd", 1, "input", 0),
+                   ("even_enabled", 1, "wire", 0), ("odd_enabled", 1, "wire", 0),
+                   ("a", 192, "input", 0), ("b", 192, "input", 0),
+                   ("m", 192, "mem", 4)]}
+    mod = Module(name="WideStores", signals=signals,
+        assigns=[Assign("even_enabled", Id("even")), Assign("odd_enabled", Id("odd"))],
+        always=AlwaysFF("clock", []), ports=["clock", "addr", "even", "odd", "a", "b"],
+        mem_writes=[MemWrite("m", Id("addr"), Id("b" if i % 2 else "a"),
+                             Id("odd_enabled" if i % 2 else "even_enabled")) for i in range(64)])
+    header, parts = split_dut_methods(emit_cpp(mod), n_shards=2)
+    assert "void _mem_store_part_1();" in header
+    original = tmp_path / "original"
+    original.mkdir()
+    (original / "dut.h").write_text(header)
+    sources = []
+    for name, source in parts:
+        path = original / name
+        path.write_text(source)
+        sources.append(str(path))
+    main = tmp_path / "main.cpp"
+    main.write_text('''#include "dut.h"
+int main() {
+  WideStoresDut d; uint64_t expected[4][3] = {};
+  for (unsigned i = 0; i < 256; ++i) {
+    d.addr = (i / 3) % 4; d.even = i & 1; d.odd = (i >> 1) & 1;
+    for (unsigned j = 0; j < 3; ++j) {
+      d.a[j] = i * 17 + j; d.b[j] = i * 19 + j + 1;
+      if (d.odd) expected[d.addr][j] = d.b[j];
+      else if (d.even) expected[d.addr][j] = d.a[j];
+    }
+    d.tick();
+    for (unsigned j = 0; j < 4; ++j)
+      for (unsigned k = 0; k < 3; ++k) if (d.m[j][k] != expected[j][k]) return 1;
+  }
+}
+''')
+    binary = tmp_path / "check"
+    subprocess.run([compiler, "-std=c++17", "-O2", "-I", str(original),
+                    str(main), *sources, "-o", str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+    derived = tmp_path / "resharded"
+    reshard.create(original, derived, maximum=4096, commit_parts=1)
+    reshard.verify(original, derived)
+    assert (derived / "dut_mem_stores.cpp").read_bytes() == (original / "dut_mem_stores.cpp").read_bytes()
+    subprocess.run([compiler, "-std=c++17", "-O2", "-I", str(derived), str(main),
+                    *map(str, sorted(derived.glob("dut_*.cpp"))), "-o", str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
 
 
 def test_enable_regions_are_not_demanded_twice_before_commit(tmp_path):
