@@ -6,6 +6,7 @@ import re
 import sys
 import zlib
 from collections import Counter, OrderedDict, defaultdict
+from io import StringIO
 
 from flashsim.ir import (
     ArrayGet,
@@ -3794,6 +3795,50 @@ void {fast}(uint32_t*pg,const uint16_t*data,unsigned scalars) {{
     return transformed, source
 
 
+_LINE_END_RE = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
+
+
+def _iter_lines(text: str):
+    """Yield splitlines(keepends=True) with bounded temporary line storage."""
+    start = 0
+    while start < len(text):
+        end = min(start + 1024 * 1024, len(text))
+        if end < len(text):
+            # Generated C++ uses LF; find a complete line boundary cheaply.
+            last_lf = text.rfind("\n", start, end)
+            if last_lf >= start:
+                end = last_lf + 1
+            else:
+                last = None
+                for last in _LINE_END_RE.finditer(text, start, end):
+                    pass
+                if last is None:
+                    last = _LINE_END_RE.search(text, end)
+                end = last.end() if last else len(text)
+                if text[end - 1:end + 1] == "\r\n":
+                    end += 1
+        yield from text[start:end].splitlines(keepends=True)
+        start = end
+
+
+class _SplitSink:
+    """Pack output incrementally instead of retaining one Python object per line."""
+    def __init__(self):
+        self._text = StringIO()
+
+    def append(self, text: str) -> None:
+        self._text.write(text)
+
+    def extend(self, lines) -> None:
+        for line in lines:
+            self.append(line)
+
+    def finish(self) -> str:
+        text = self._text.getvalue()
+        self._text.close()
+        return text
+
+
 def split_dut_methods(
     cpp: str, n_shards: int = 8
 ) -> tuple[str, list[tuple[str, str]]]:
@@ -3812,44 +3857,43 @@ def split_dut_methods(
     if not m:
         raise ValueError("dut header has no struct")
     cls = m.group(1)
-    lines = cpp.splitlines(keepends=True)
-    out_lines: list[str] = []
-    shards: list[list[str]] = [[] for _ in range(n_shards)]
-    own_files: dict[str, list[str]] = {}
+    lines = iter(_iter_lines(cpp))
+    out_lines = _SplitSink()
+    shards = [_SplitSink() for _ in range(n_shards)]
+    own_files: dict[str, _SplitSink] = {}
     for s in shards:
         s.append(f'#include "dut.h"\n')
         s.append("\n")
 
-    i = 0
-    while i < len(lines):
-        line = lines[i]
+    line = next(lines, None)
+    while line is not None:
         mm = _METHOD_START_RE.match(line.rstrip("\n"))
         if not mm:
             out_lines.append(line)
-            i += 1
+            line = next(lines, None)
             continue
         attr, name, empty = mm.group(1), mm.group(2), mm.group(3)
         if name in _SPLIT_KEEP_INLINE:
             out_lines.append(line)
-            i += 1
+            line = next(lines, None)
             continue
         # One-line empty body: keep inline (no cross-TU stub tax).
         if empty == "}":
             out_lines.append(line)
-            i += 1
+            line = next(lines, None)
             continue
         # Multi-line body: brace-match from this line's `{`
         depth = _method_brace_delta(line)
         body_lines = [line]
-        i += 1
-        while i < len(lines) and depth > 0:
-            body_lines.append(lines[i])
-            depth += _method_brace_delta(lines[i])
-            i += 1
+        line = next(lines, None)
+        while line is not None and depth > 0:
+            body_lines.append(line)
+            depth += _method_brace_delta(line)
+            line = next(lines, None)
         trailing_blank = ""
-        if i < len(lines) and lines[i].strip() == "":
-            trailing_blank = lines[i]
-            i += 1
+        if line is not None and line.strip() == "":
+            trailing_blank = line
+            line = next(lines, None)
         body_bytes = sum(len(bl) for bl in body_lines)
         # Tiny helpers: stay in-class (implicit inline across all shards).
         if body_bytes <= _SPLIT_INLINE_MAX_BYTES:
@@ -3880,10 +3924,16 @@ def split_dut_methods(
             converted, declarations, helpers = _outline_mem_ports(cls, converted)
             out_lines.extend(declarations)
             if helpers:
-                bucket = own_files.setdefault("_mem_ports", [f'#include "dut.h"\n', "\n"])
+                if "_mem_ports" not in own_files:
+                    own_files["_mem_ports"] = _SplitSink()
+                    own_files["_mem_ports"].extend([f'#include "dut.h"\n', "\n"])
+                bucket = own_files["_mem_ports"]
                 bucket.extend(helpers)
         if name in _SPLIT_OWN_FILE:
-            bucket = own_files.setdefault(name, [f'#include "dut.h"\n', "\n"])
+            if name not in own_files:
+                own_files[name] = _SplitSink()
+                own_files[name].extend([f'#include "dut.h"\n', "\n"])
+            bucket = own_files[name]
             bucket.extend(converted)
             if not converted[-1].endswith("\n"):
                 bucket.append("\n")
@@ -3895,10 +3945,10 @@ def split_dut_methods(
             shards[shard_i].append("\n")
         shards[shard_i].append("\n")
 
-    header = "".join(out_lines)
-    parts = [(f"dut_{k}.cpp", "".join(shards[k])) for k in range(n_shards)]
-    for name, body_lines in sorted(own_files.items()):
-        body = "".join(body_lines)
+    header = out_lines.finish()
+    parts = [(f"dut_{k}.cpp", shards[k].finish()) for k in range(n_shards)]
+    for name, sink in sorted(own_files.items()):
+        body = sink.finish()
         if name == "_commit" and "fs_bump(" in body:
             # The large commit switch stays at -O0 for bounded compile time.
             # Its page-invalidation loop is small but can dominate real GTK
