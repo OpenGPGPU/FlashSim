@@ -1860,9 +1860,14 @@ def _dedup_assigns(
             continue
         if isinstance(rhs, (Id, Const, ArrayZeros)):
             continue
-        if _expr_nodes(rhs) < _DEDUP_MIN_NODES:
+        try:
+            if _expr_nodes(rhs) < _DEDUP_MIN_NODES:
+                continue
+            groups.setdefault(rhs, []).append(lhs)
+        except RecursionError:
+            # Dataclass hashing can overflow the Python/C stack on very deep
+            # expressions. Deduplication is optional; keep that wire intact.
             continue
-        groups.setdefault(rhs, []).append(lhs)
     alias: dict[str, str] = {}
     for rhs, names in groups.items():
         if len(names) < 2:
@@ -1873,16 +1878,21 @@ def _dedup_assigns(
             alias[dup] = canonical
     if not alias:
         return assigns, body, reset_epilogue, mem_writes, assertions, clocked_processes
-    new_assigns = {n: _alias_expr(e, alias) for n, e in assigns.items() if n not in alias}
-    new_body = _map_stmts(body, lambda e: _alias_expr(e, alias))
-    new_reset = _map_stmts(reset_epilogue, lambda e: _alias_expr(e, alias))
-    new_mem = [
-        MemWrite(w.mem, _alias_expr(w.addr, alias), _alias_expr(w.data, alias), _alias_expr(w.enable, alias))
-        for w in mem_writes
-    ]
-    new_assert = [map_observation(a, lambda expr: _alias_expr(expr, alias))
-                  for a in assertions]
-    new_procs = [ClockedProcess(_alias_expr(p.clock, alias), p.scope) for p in clocked_processes]
+    try:
+        new_assigns = {n: _alias_expr(e, alias) for n, e in assigns.items() if n not in alias}
+        new_body = _map_stmts(body, lambda e: _alias_expr(e, alias))
+        new_reset = _map_stmts(reset_epilogue, lambda e: _alias_expr(e, alias))
+        new_mem = [
+            MemWrite(w.mem, _alias_expr(w.addr, alias), _alias_expr(w.data, alias), _alias_expr(w.enable, alias))
+            for w in mem_writes
+        ]
+        new_assert = [map_observation(a, lambda expr: _alias_expr(expr, alias))
+                      for a in assertions]
+        new_procs = [ClockedProcess(_alias_expr(p.clock, alias), p.scope) for p in clocked_processes]
+    except RecursionError:
+        # Publishing only part of an alias rewrite would leave dangling wires.
+        # Retain the complete original IR if any observer or use is too deep.
+        return assigns, body, reset_epilogue, mem_writes, assertions, clocked_processes
     return new_assigns, new_body, new_reset, new_mem, new_assert, new_procs
 
 
