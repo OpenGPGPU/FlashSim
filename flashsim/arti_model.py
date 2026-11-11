@@ -1380,21 +1380,40 @@ extern "C" int arti_rtl_model_check_irq(unsigned index)
 '''
 
 
+def _checked_assertion_source(source: str, tick: str) -> str:
+    """Fail inside the C++ bridge rather than unwind through QEMU's C frames."""
+    include = '#include <cstdio>\n'
+    call = f'  g_rtl->{tick}();'
+    if source.count(include) != 1 or source.count(call) != 1:
+        raise ValueError('ARTI assertion bridge insertion point changed')
+    source = source.replace(include, include + '#include <exception>\n', 1)
+    return source.replace(call,
+        '  try {\n' + call + '\n'
+        '  } catch (const std::exception &error) {\n'
+        '    std::fprintf(stderr, "FlashSim ARTI tick failed: %s\\n", error.what());\n'
+        '    std::fflush(stderr);\n'
+        '    std::abort();\n'
+        '  }', 1)
+
+
 def write_embedded_model(out_dir: Path, top: str, verilog: Path | None = None,
-                         frontend: str = "circt") -> None:
+                         frontend: str = "circt", *, assertions: bool = False) -> None:
     """Compile `top` and emit the ARTI embedded library sources."""
     out_dir.mkdir(parents=True, exist_ok=True)
     if verilog is not None:
         # GpuHostSystemAxi is too large for a single -O2 TU; emit method shards.
         split = _dut_shard_count(top, verilog)
-        compile_file(verilog, out_dir / "dut.h", frontend=frontend, split=split)
+        compile_file(verilog, out_dir / "dut.h", frontend=frontend, split=split,
+                     assertions=assertions)
     (out_dir / "arti_rtl_model.h").write_text(HEADER)
     if top == "GpuHostSystemAxi":
-        (out_dir / "arti_rtl_model.cpp").write_text(SYSTEM_SOURCE)
+        source, tick = SYSTEM_SOURCE, "tick_nba"
     elif top == "GpuHostAxi":
-        (out_dir / "arti_rtl_model.cpp").write_text(SOURCE)
+        source, tick = SOURCE, "tick"
     else:
         raise SystemExit(f"unsupported ARTI top {top}")
+    (out_dir / "arti_rtl_model.cpp").write_text(
+        _checked_assertion_source(source, tick) if assertions else source)
     (out_dir / "arti_smoke.cpp").write_text(SMOKE)
     script = BUILD_EMBEDDED.replace("__TOP__", top)
     path = out_dir / "build_embedded.sh"

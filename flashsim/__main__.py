@@ -39,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     p_arti.add_argument("-o", "--output", type=Path, required=True)
     p_arti.add_argument("--top", default=None, help="defaults to the Verilog file stem")
     p_arti.add_argument("--frontend", choices=("auto", "circt", "native"), default="auto")
+    p_arti.add_argument("--assertions", action="store_true",
+                        help="include bound posedge fatal checks (requires CIRCT)")
     sub.add_parser("which-circt", help="print CIRCT tool paths")
 
     args = parser.parse_args(argv)
@@ -61,7 +63,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_qemu_smoke(frontend=args.frontend)
     if args.cmd == "arti-model":
         top = args.top or args.verilog.stem
-        write_embedded_model(args.output, top, verilog=args.verilog, frontend=args.frontend)
+        write_embedded_model(args.output, top, verilog=args.verilog, frontend=args.frontend,
+                             assertions=args.assertions)
         print(f"wrote FlashSim ARTI model for {top} to {args.output}")
         return 0
     raise AssertionError(args.cmd)

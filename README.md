@@ -70,6 +70,7 @@ By default CIRCT source discovery skips `verification/` and
 
 ```bash
 python3 -m flashsim compile path/to/Top.sv -o build/dut.h --frontend circt --assertions
+python3 -m flashsim arti-model path/to/GpuHostSystemAxi.sv -o build/arti --frontend circt --assertions
 python3 -m pytest flashsim/test_clocked_assertions.py
 ```
 
@@ -77,6 +78,9 @@ The library equivalent is `compile_file(..., assertions=True)`. Supported
 checks wait on the model's single rising-edge clock and terminate on a fatal
 condition. Generated bind layers are included even when absent from Chisel's
 file list, sharing their preprocessing guards in one compilation unit.
+For `arti-model`, checks are opt-in and the C++ bridge prints the failure and
+aborts before an exception can unwind through QEMU's C code. Loading or building
+the model alone does not prove that an ARTI guest has exercised the checks.
 Reference bindings and every fatal control-flow path survive
 flattening and optimization. Checks sample settled current state before NBA
 updates; a failure raises a native exception with the instance path, diagnostic
