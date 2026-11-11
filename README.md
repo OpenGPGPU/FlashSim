@@ -89,9 +89,12 @@ Reference-based combinational selectors and zero-initialized clocked capture
 state are retained as well. SSA joins merge conditional updates without
 enumerating combinations of independent register enables; large selectors
 use balanced joins. Large check sets use bounded C++ helpers, and diagnostic
-braces remain string contents during method splitting. Other events,
+braces remain string contents during method splitting. Clocked nonfatal prints
+to standard output or standard error preserve their text and unsigned decimal
+values up to 64 bits, including default or explicit field widths. Dynamic file
+descriptors, signed formats and other format operations are rejected. Other events,
 nonzero LLHD state initialization, persistent process-local wait state,
-nonfatal procedural prints and unsupported effects are rejected. This is not
+and unsupported effects are rejected. This is not
 general event-driven or temporal SVA simulation. Native failure probes,
 reset/mask cases and actual host trace/image comparisons remain necessary
 before product qualification;
