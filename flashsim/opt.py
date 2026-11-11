@@ -702,6 +702,10 @@ def _slice_src(
             return Ternary(src.cond, left, right)
         return None
     if isinstance(src, Id) and src.name in assigns and src.name not in seen:
+        key = (src.name, low, width)
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
         seen.add(src.name)
         sliced = _slice_src(
             assigns[src.name], low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1
@@ -731,10 +735,6 @@ def _slice_src(
             return None
         if _expr_nodes(sliced) <= _SLICE_INLINE_NODES or uses.get(src.name, 0) <= 1:
             return sliced
-        key = (src.name, low, width)
-        hit = cache.get(key)
-        if hit is not None:
-            return hit
         name = f"{src.name}__b{low}_{width}"
         suffix = 0
         while name in assigns or name in fresh or name in sigs:

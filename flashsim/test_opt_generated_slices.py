@@ -6,7 +6,7 @@ import pytest
 
 from flashsim.emit import emit_cpp
 from flashsim.ir import AlwaysFF, Assign, BinOp, Concat, Const, Extract, Id, If, MemWrite, Module, NbAssign, Signal
-from flashsim.opt import _cse_sibling_or_prefixes, _narrow_bit_slices, _reassoc_and_chains, optimize
+from flashsim.opt import _cse_sibling_or_prefixes, _narrow_bit_slices, _reassoc_and_chains, _slice_src, optimize
 
 
 def circuit():
@@ -32,6 +32,28 @@ def test_assignment_slice_registers_width_before_reassociation():
     assert signals[generated[0]].width == 1
     assert narrowed["second"] == Id(generated[0])
     _reassoc_and_chains(narrowed, signals)
+
+
+def test_reused_shared_slice_skips_rewalking_its_definition():
+    signals, wide = circuit()
+
+    class CountReads(dict):
+        reads = 0
+
+        def __getitem__(self, key):
+            self.reads += 1
+            return super().__getitem__(key)
+
+    assigns = CountReads(wide=wide)
+    fresh, cache = {}, {}
+    first = _slice_src(Id("wide"), 1, 1, assigns, signals, {"wide": 2}, fresh, cache, set())
+    assert isinstance(first, Id) and first.name in fresh
+    reads = assigns.reads
+    second = _slice_src(Id("wide"), 1, 1, assigns, signals, {"wide": 2}, fresh, cache, set())
+    assert second == first and assigns.reads == reads
+    # An active recursion or exhausted fuel must not reuse the cached slice.
+    assert _slice_src(Id("wide"), 1, 1, assigns, signals, {"wide": 2}, fresh, cache, {"wide"}) is None
+    assert _slice_src(Id("wide"), 1, 1, assigns, signals, {"wide": 2}, fresh, cache, set(), 0) is None
 
 
 def test_sequential_only_slice_has_a_definition_and_width():
