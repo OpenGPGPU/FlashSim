@@ -44,7 +44,9 @@ zero-initialized clocked captures are supported; conditional immediate drives
 and clocked state with unknown initialization remain rejected. Flattening
 retains reusable child modules only until their last reachable instance,
 reducing intermediate memory
-without merging instance state. Single-use expression inlining tracks its
+without merging instance state. A specialized expression renamer reduces
+traversal overhead while retaining memory names and unchanged subtrees.
+Single-use expression inlining tracks its
 dependency graph and expands substitutions iteratively; rewrites reuse
 unchanged immutable branches. Generated signal widths use a shared lookup
 instead of repeatedly copying large tables. Eager dependency ordering sorts
@@ -60,6 +62,7 @@ entries. Exercise these cases with:
 ```bash
 python3 -m pytest flashsim/test_circt_array_create.py \
   flashsim/test_circt_output_register.py flashsim/test_circt_hierarchy_reuse.py \
+  flashsim/test_flatten_rename.py \
   flashsim/test_ir_structural_sharing.py flashsim/test_opt_deep_literals.py \
   flashsim/test_opt_inline_worklist.py flashsim/test_opt_signal_lookup.py \
   flashsim/test_emit_cone_memo.py flashsim/test_eager_leaf_order.py \

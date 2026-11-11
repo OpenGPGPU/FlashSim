@@ -25,6 +25,7 @@ from flashsim.ir import (
     NbAssign,
     Signal,
     Ternary,
+    UnaryOp,
     map_observation,
 )
 from flashsim.toolchain import find_bin
@@ -743,17 +744,40 @@ def _flatten(mod: Module, lib: dict[str, Module], remaining: Counter[str]) -> Mo
 
 
 def _rename_expr(expr: Expr, rename: dict[str, str]) -> Expr:
-    from flashsim.ir import Id as IrId
-    from flashsim.ir import map_expr
-
-    def fn(node: Expr) -> Expr:
-        if isinstance(node, IrId) and node.name in rename:
-            return IrId(rename[node.name])
-        if isinstance(node, MemRead):
-            return MemRead(rename.get(node.mem, node.mem), node.addr)
-        return node
-
-    return map_expr(expr, fn)
+    # This is a specialized post-order map_expr visitor: hierarchy flattening
+    # applies it to every assignment, so avoid a fresh callback and a second
+    # dynamic type dispatch for each node. Preserve unchanged subtrees just as
+    # map_expr does; memory names are renamed separately from their addresses.
+    if isinstance(expr, Id):
+        return Id(rename[expr.name]) if expr.name in rename else expr
+    if isinstance(expr, (Const, ArrayZeros)):
+        return expr
+    if isinstance(expr, UnaryOp):
+        a = _rename_expr(expr.a, rename)
+        return expr if a is expr.a else UnaryOp(expr.op, a)
+    if isinstance(expr, BinOp):
+        a, b = _rename_expr(expr.a, rename), _rename_expr(expr.b, rename)
+        return expr if a is expr.a and b is expr.b else BinOp(expr.op, a, b)
+    if isinstance(expr, Ternary):
+        cond = _rename_expr(expr.cond, rename)
+        a, b = _rename_expr(expr.a, rename), _rename_expr(expr.b, rename)
+        return expr if cond is expr.cond and a is expr.a and b is expr.b else Ternary(cond, a, b)
+    if isinstance(expr, Extract):
+        a = _rename_expr(expr.a, rename)
+        return expr if a is expr.a else Extract(a, expr.low, expr.width)
+    if isinstance(expr, Concat):
+        parts = tuple(_rename_expr(p, rename) for p in expr.parts)
+        return expr if all(a is b for a, b in zip(parts, expr.parts)) else Concat(parts)
+    if isinstance(expr, ArrayGet):
+        arr, index = _rename_expr(expr.arr, rename), _rename_expr(expr.index, rename)
+        return expr if arr is expr.arr and index is expr.index else ArrayGet(arr, index)
+    if isinstance(expr, ArrayInject):
+        arr, index = _rename_expr(expr.arr, rename), _rename_expr(expr.index, rename)
+        value = _rename_expr(expr.value, rename)
+        return expr if arr is expr.arr and index is expr.index and value is expr.value else ArrayInject(arr, index, value)
+    if isinstance(expr, MemRead):
+        return MemRead(rename.get(expr.mem, expr.mem), _rename_expr(expr.addr, rename))
+    raise TypeError(type(expr))
 
 
 def _rename_stmt(stmt, rename: dict[str, str]):
