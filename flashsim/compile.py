@@ -7,6 +7,7 @@ from pathlib import Path
 
 from flashsim.circt_frontend import (
     CirctError,
+    circt_serial_import,
     circt_verilog_to_mlir,
     parse_hw_mlir,
     verilog_sources,
@@ -32,6 +33,7 @@ def compile_verilog(
     if kind == "circt":
         if path is None:
             raise CirctError("CIRCT frontend needs a Verilog file path")
+        serial = circt_serial_import()
         if mlir_path is None or not (
             _mlir_fresh(mlir_path, path, assertions=assertions)
             and _mlir_matches(mlir_path, path, assertions=assertions)
@@ -43,12 +45,15 @@ def compile_verilog(
                 raise CirctError("assertion inputs changed during CIRCT compilation")
             if mlir_path is not None:
                 mlir_path.parent.mkdir(parents=True, exist_ok=True)
+                serial_marker = mlir_path.with_suffix(".mlir.circt-serial")
+                serial_marker.unlink(missing_ok=True)
                 mlir_path.write_text(mlir)
                 mlir_path.with_suffix(".mlir.top").write_text(path.stem)
                 mlir_path.with_suffix(".mlir.assertions").write_text("1" if assertions else "0")
                 if assertions:
                     mlir_path.with_suffix(".mlir.assertion-sources.json").write_text(
                         json.dumps(fingerprint, sort_keys=True))
+                serial_marker.write_text("1" if serial else "0")
         else:
             mlir = mlir_path.read_text()
         mod = parse_hw_mlir(mlir, top=path.stem)
@@ -184,7 +189,10 @@ def _mlir_matches(mlir_path: Path, verilog: Path, *, assertions: bool = False) -
     try:
         marker = mlir_path.with_suffix(".mlir.assertions")
         cached_assertions = marker.is_file() and marker.read_text().strip() == "1"
+        serial_marker = mlir_path.with_suffix(".mlir.circt-serial")
+        cached_serial = serial_marker.read_text().strip()
         return (cached_assertions == assertions
+                and cached_serial == ("1" if circt_serial_import() else "0")
                 and mlir_path.with_suffix(".mlir.top").read_text().strip() == verilog.stem)
     except OSError:
         return False
