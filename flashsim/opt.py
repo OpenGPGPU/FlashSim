@@ -150,7 +150,7 @@ def optimize(mod: Module) -> Module:
         body = _merge_hold_ifs(body)
         body = _self_gate_const_holds(body, sigs)
         body = _map_stmts(body, _fold_expr)
-    body = _cse_sibling_or_prefixes(body, assigns)
+    body = _cse_sibling_or_prefixes(body, assigns, sigs)
     reset_epilogue = _self_gate_const_holds(reset_epilogue, sigs)
     reset_epilogue = _map_stmts(reset_epilogue, _fold_expr)
     assigns, body = _dce(assigns, body, observed, mem_writes)
@@ -741,6 +741,9 @@ def _slice_src(
             suffix += 1
             name = f"{src.name}__b{low}_{width}_{suffix}"
         fresh[name] = sliced
+        # Subsequent narrowing and reassociation ask for widths before the
+        # final signal table is built. The slice's width is already known.
+        sigs[name] = Signal(name, width, "wire")
         ref = Id(name)
         cache[key] = ref
         return ref
@@ -780,12 +783,13 @@ def _narrow_bit_slices(
         return _narrow_expr(expr, assigns, sigs, uses, fresh, cache)
 
     narrowed = {name: narrow(expr) for name, expr in assigns.items()}
-    narrowed.update(fresh)
     body = _map_stmts(body, narrow)
     mem_writes = [
         MemWrite(w.mem, narrow(w.addr), narrow(w.data), narrow(w.enable))
         for w in mem_writes
     ]
+    # Sequential and memory-write expressions can create new slices too.
+    narrowed.update(fresh)
     return narrowed, body, mem_writes
 
 
@@ -1037,7 +1041,8 @@ def _chain_op(op: str, parts: list[Expr]) -> Expr:
 
 
 def _cse_or_prefix_run(
-    stmts: list[Stmt], assigns: dict[str, Expr], counter: list[int]
+    stmts: list[Stmt], assigns: dict[str, Expr], counter: list[int],
+    sigs: dict[str, Signal] | None = None,
 ) -> list[Stmt]:
     """Factor shared &/| prefixes across a flat list of sibling stmts."""
     out: list[Stmt] = []
@@ -1099,10 +1104,19 @@ def _cse_or_prefix_run(
             out.append(stmt)
             i += 1
             continue
-        cse = f"_fs_cse_t{counter[0]}"
-        counter[0] += 1
+        while True:
+            cse = f"_fs_cse_t{counter[0]}"
+            counter[0] += 1
+            if cse not in assigns and (sigs is None or cse not in sigs):
+                break
         prefix = best_seqs[0][:best_pre]
         assigns[cse] = prefix[0] if len(prefix) == 1 else _chain_op(best_op, prefix)
+        if sigs is not None:
+            try:
+                sigs[cse] = Signal(cse, expr_width(assigns[cse], sigs), "wire")
+            except (KeyError, TypeError):
+                # Later validation reports genuinely unresolved wires.
+                pass
         for ifs, terms in zip(best_group, best_seqs):
             suffix = terms[best_pre:]
             if suffix:
@@ -1115,7 +1129,7 @@ def _cse_or_prefix_run(
 
 
 def _cse_sibling_or_prefixes(
-    body: list[Stmt], assigns: dict[str, Expr]
+    body: list[Stmt], assigns: dict[str, Expr], sigs: dict[str, Signal] | None = None
 ) -> list[Stmt]:
     """CSE long shared &/| prefixes among sibling hold/if conditions (L2)."""
     counter = [0]
@@ -1129,7 +1143,7 @@ def _cse_sibling_or_prefixes(
                 )
             else:
                 mapped.append(stmt)
-        return _cse_or_prefix_run(mapped, assigns, counter)
+        return _cse_or_prefix_run(mapped, assigns, counter, sigs)
 
     return walk(body)
 
@@ -1488,7 +1502,12 @@ def _reassoc_and_chains(
     """
 
     def bit(e: Expr) -> bool:
-        return expr_width(e, sigs) == 1
+        try:
+            return expr_width(e, sigs) == 1
+        except (KeyError, TypeError):
+            # Leave an unknown-width cone untouched; final IR validation
+            # distinguishes an unresolved signal from a valid temporary.
+            return False
 
     flat: dict[str, frozenset[Expr] | None] = {}
 
