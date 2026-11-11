@@ -19,9 +19,10 @@ def _need(name: str) -> str:
     return path
 
 
-def run_qemu_smoke(frontend: str = "circt") -> int:
+def run_qemu_smoke(rtl: Path, frontend: str = "circt") -> int:
+    if not rtl.is_file():
+        raise SystemExit(f"GPU RTL top does not exist: {rtl}")
     root = repo_root()
-    rtl = root / "rtl" / "gpu" / "host-axi" / "GpuHostAxi.sv"
     work = root / "build" / "GpuHostAxi"
     compile_file(rtl, work / "dut.h", frontend=frontend)
     header, source, smoke = write_arti_model(work)

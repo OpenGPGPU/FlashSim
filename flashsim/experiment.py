@@ -49,22 +49,22 @@ CRITERIA = {
 }
 
 GPU_BENCHES = {
-    "DrawContextFifo": Path("rtl/gpu/draw-fifo/DrawContextFifo.sv"),
-    "TriangleRasterizer": Path("rtl/gpu/raster-quad/TriangleRasterizer.sv"),
-    "WarpScheduler": Path("rtl/gpu/warp-scheduler/WarpScheduler.sv"),
-    "GpuCommandRouter": Path("rtl/gpu/command-router/GpuCommandRouter.sv"),
-    "BankedSharedMemory": Path("rtl/gpu/shared-mem/BankedSharedMemory.sv"),
-    "GpuFrontend": Path("rtl/gpu/frontend/GpuFrontend.sv"),
-    "InstructionCache": Path("rtl/gpu/icache/InstructionCache.sv"),
-    "FrontendICache": Path("rtl/gpu/frontend-icache/FrontendICache.sv"),
-    "ScalarBackend": Path("rtl/gpu/scalar-pipe/ScalarBackend.sv"),
-    "VectorBackend": Path("rtl/gpu/vector-pipe/VectorBackend.sv"),
-    "FpuBackend": Path("rtl/gpu/fpu-pipe/FpuBackend.sv"),
-    "FrontendScalar": Path("rtl/gpu/frontend-scalar/FrontendScalar.sv"),
-    "FrontendScalarFpu": Path("rtl/gpu/frontend-scalar-fpu/FrontendScalarFpu.sv"),
-    "Gpu": Path("rtl/gpu/gpu/Gpu.sv"),
-    "GpuSystem": Path("rtl/gpu/gpu-system/GpuSystem.sv"),
-    "GpuHostAxi": Path("rtl/gpu/host-axi/GpuHostAxi.sv"),
+    "DrawContextFifo": Path("draw-fifo/DrawContextFifo.sv"),
+    "TriangleRasterizer": Path("raster-quad/TriangleRasterizer.sv"),
+    "WarpScheduler": Path("warp-scheduler/WarpScheduler.sv"),
+    "GpuCommandRouter": Path("command-router/GpuCommandRouter.sv"),
+    "BankedSharedMemory": Path("shared-mem/BankedSharedMemory.sv"),
+    "GpuFrontend": Path("frontend/GpuFrontend.sv"),
+    "InstructionCache": Path("icache/InstructionCache.sv"),
+    "FrontendICache": Path("frontend-icache/FrontendICache.sv"),
+    "ScalarBackend": Path("scalar-pipe/ScalarBackend.sv"),
+    "VectorBackend": Path("vector-pipe/VectorBackend.sv"),
+    "FpuBackend": Path("fpu-pipe/FpuBackend.sv"),
+    "FrontendScalar": Path("frontend-scalar/FrontendScalar.sv"),
+    "FrontendScalarFpu": Path("frontend-scalar-fpu/FrontendScalarFpu.sv"),
+    "Gpu": Path("gpu/Gpu.sv"),
+    "GpuSystem": Path("gpu-system/GpuSystem.sv"),
+    "GpuHostAxi": Path("host-axi/GpuHostAxi.sv"),
 }
 
 
@@ -370,16 +370,26 @@ def _compiled_dut_fresh(vfile: Path, out_h: Path) -> bool:
         return False
 
 
-def run_experiment(stages: int = 12, rounds: int = 8, frontend: str = "auto") -> list[BenchResult]:
+def run_experiment(stages: int = 12, rounds: int = 8, frontend: str = "auto",
+                   gpu_rtl_dir: Path | None = None) -> list[BenchResult]:
+    gpu_paths = {}
+    if gpu_rtl_dir is not None:
+        if not gpu_rtl_dir.is_dir():
+            raise SystemExit(f"GPU RTL directory does not exist: {gpu_rtl_dir}")
+        gpu_paths = {name: gpu_rtl_dir / rel for name, rel in GPU_BENCHES.items()
+                     if (gpu_rtl_dir / rel).is_file()}
+        if not gpu_paths:
+            raise SystemExit(f"no recognized GPU benchmark tops in {gpu_rtl_dir}")
     root = repo_root()
     bench_dir = root / "build" / "benches"
     paths = write_benches(bench_dir, stages=stages, rounds=rounds)
-    for name, rel in GPU_BENCHES.items():
-        src = root / rel
-        if src.exists():
-            paths[name] = src
+    paths.update(gpu_paths)
     results: list[BenchResult] = []
     print(f"frontend={frontend}  verilator_threads={verilator_thread_count()}")
+    if gpu_rtl_dir is None:
+        print("GPU benches omitted; pass --gpu-rtl-dir to include external GPU RTL")
+    else:
+        print(f"GPU benches: {len(gpu_paths)}/{len(GPU_BENCHES)} from {gpu_rtl_dir}")
     kind = _resolve_frontend(frontend)
     for name, vfile in paths.items():
         if kind == "native" and name in CIRCT_ONLY:

@@ -2,7 +2,7 @@
 """Profile _commit hot writes, then bench the hoisted build.
 
 Usage (from repo root):
-  python3 scripts/commit_profile.py GpuSystem [--cycles 1000000]
+  python3 scripts/commit_profile.py GpuSystem --gpu-rtl-dir /path/to/rtl [--cycles 1000000]
 
 Steps: generate a FLASHSIM_COMMIT_PROFILE=1 build, run perf, print
 top IDs, rebuild with FLASHSIM_COMMIT_HOT=<top names>, run perf again,
@@ -37,11 +37,9 @@ def _run_perf(work: Path, exe: Path, runs: int = 5) -> list[float]:
     return out
 
 
-def _build_and_profile(name: str, cycles: int) -> tuple[str, Path]:
-    from flashsim.compile import compile_file
-    from flashsim.experiment import GPU_BENCHES, _compile_flash
+def _build_and_profile(name: str, cycles: int, vfile: Path) -> tuple[str, Path]:
+    from flashsim.experiment import _compile_flash
 
-    vfile = ROOT / GPU_BENCHES[name]
     work = ROOT / "build" / name
     env = dict(os.environ)
     env["FLASHSIM_COMMIT_PROFILE"] = "1"
@@ -93,11 +91,9 @@ def _build_and_profile(name: str, cycles: int) -> tuple[str, Path]:
     return ",".join(top_names), exe
 
 
-def _build_with_hot(name: str, hot: str, cycles: int):
-    from flashsim.compile import compile_file
-    from flashsim.experiment import GPU_BENCHES, _compile_flash
+def _build_with_hot(name: str, hot: str, cycles: int, vfile: Path):
+    from flashsim.experiment import _compile_flash
 
-    vfile = ROOT / GPU_BENCHES[name]
     work = ROOT / "build" / name
     env = dict(os.environ)
     env["FLASHSIM_COMMIT_HOT"] = hot
@@ -113,21 +109,24 @@ def _build_with_hot(name: str, hot: str, cycles: int):
 
 
 def main() -> int:
+    from flashsim.experiment import GPU_BENCHES, _compile_flash
+
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("name")
+    parser.add_argument("name", choices=GPU_BENCHES)
     parser.add_argument("--cycles", type=int, default=1_000_000)
+    parser.add_argument("--gpu-rtl-dir", type=Path, required=True,
+                        help="directory of externally generated GPU RTL slices")
     args = parser.parse_args()
-    hot, _ = _build_and_profile(args.name, args.cycles)
+    vfile = args.gpu_rtl_dir.resolve() / GPU_BENCHES[args.name]
+    if not vfile.is_file():
+        parser.error(f"GPU RTL top does not exist: {vfile}")
+    hot, _ = _build_and_profile(args.name, args.cycles, vfile)
     if not hot:
         print("no hot writes found; nothing to hoist")
         return 0
     print(f"hot={hot}")
     # Baseline (profile build already has counters, which add a few
     # increments per commit); rebuild clean baseline for a fair median.
-    from flashsim.compile import compile_file
-    from flashsim.experiment import GPU_BENCHES, _compile_flash
-
-    vfile = ROOT / GPU_BENCHES[args.name]
     work = ROOT / "build" / args.name
     env = dict(os.environ)
     env.pop("FLASHSIM_COMMIT_PROFILE", None)
@@ -141,7 +140,7 @@ def main() -> int:
         capture_output=True,
     )
     base_exe = _compile_flash(work, args.name, "perf", args.cycles)
-    hot_exe = _build_with_hot(args.name, hot, args.cycles)
+    hot_exe = _build_with_hot(args.name, hot, args.cycles, vfile)
     base = _run_perf(work, base_exe)
     hot_runs = _run_perf(work, hot_exe)
     base_med = _median(base[1:])

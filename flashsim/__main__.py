@@ -26,11 +26,15 @@ def main(argv: list[str] | None = None) -> int:
     p_exp.add_argument("--stages", type=int, default=12)
     p_exp.add_argument("--rounds", type=int, default=8)
     p_exp.add_argument("--frontend", choices=("auto", "circt", "native"), default="auto")
+    p_exp.add_argument("--gpu-rtl-dir", type=Path,
+                       help="optional external directory of generated GPU RTL slices")
     p_qemu = sub.add_parser(
         "qemu-smoke",
         help="ARTI MMIO C API on GpuHostAxi: ID read, COLOR_BASE write/read",
     )
     p_qemu.add_argument("--frontend", choices=("auto", "circt", "native"), default="auto")
+    p_qemu.add_argument("--rtl", type=Path, required=True,
+                        help="external generated GpuHostAxi.sv")
     p_arti = sub.add_parser(
         "arti-model",
         help="compile a GPU top and emit the ARTI embedded C API + QEMU build script",
@@ -57,10 +61,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {args.output}")
         return 0
     if args.cmd == "experiment":
-        results = run_experiment(stages=args.stages, rounds=args.rounds, frontend=args.frontend)
+        results = run_experiment(stages=args.stages, rounds=args.rounds, frontend=args.frontend,
+                                 gpu_rtl_dir=args.gpu_rtl_dir)
         return print_summary(results)
     if args.cmd == "qemu-smoke":
-        return run_qemu_smoke(frontend=args.frontend)
+        return run_qemu_smoke(args.rtl, frontend=args.frontend)
     if args.cmd == "arti-model":
         top = args.top or args.verilog.stem
         write_embedded_model(args.output, top, verilog=args.verilog, frontend=args.frontend,

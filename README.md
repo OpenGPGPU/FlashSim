@@ -746,10 +746,30 @@ Release tarballs go to `third_party/circt-release/` (gitignored). Override with
 ```bash
 python3 -m flashsim experiment
 python3 -m flashsim experiment --frontend native   # skip CIRCT
-python3 -m flashsim qemu-smoke                     # ARTI MMIO C API on GpuHostAxi
-python3 -m flashsim arti-model rtl/gpu/host-axi/GpuHostAxi.sv -o build/GpuHostAxi
 # GPU_SIM=flashsim ../gpu/scripts/run_arti_gpu.sh  # QEMU embeds FlashSim instead of Verilator
 ```
+
+The synthetic benches are included with FlashSim. GPU RTL belongs to the GPU
+checkout and is supplied separately. For example, emit a draw FIFO and the
+ARTI control top using OpenGPU (with its documented Java and CIRCT setup):
+
+```bash
+gpu_rtl=/tmp/opengpu-flashsim-rtl
+cd /path/to/OpenGPU
+sbt "runMain opengpu.elaboration.EmitPpaRtl draw-fifo $gpu_rtl/draw-fifo" \
+    "runMain opengpu.elaboration.EmitGpuHostAxi $gpu_rtl/host-axi --width 16 --height 16"
+cd /path/to/FlashSim
+python3 -m flashsim experiment --frontend circt --gpu-rtl-dir "$gpu_rtl"
+python3 -m flashsim qemu-smoke --rtl "$gpu_rtl/host-axi/GpuHostAxi.sv"
+python3 -m flashsim arti-model "$gpu_rtl/host-axi/GpuHostAxi.sv" -o build/GpuHostAxi
+python3 scripts/commit_profile.py DrawContextFifo --gpu-rtl-dir "$gpu_rtl"
+```
+
+The optional GPU directory can contain any subset of the slices listed below;
+the experiment prints the number found. A specified directory with no
+recognized tops is an error. Omit `--gpu-rtl-dir` to run only synthetic benches.
+Each slice is expected in a subdirectory such as `draw-fifo/` or `host-axi/`,
+with all generated SystemVerilog dependencies next to its top.
 
 `experiment` uses CIRCT when `circt-verilog` is on `PATH` (or under
 `third_party/circt-release/`). This generates circuits, compiles FlashSim and
@@ -774,7 +794,7 @@ and register arrays):
 - `hier_pipe` — `hw.instance` flattened into the parent
 - `mini_rf` — 16×32 register file (`hw.array` + `seq.firreg`)
 
-GPU slices from `rtl/gpu/` (Chisel → SystemVerilog, still compared to Verilator):
+Optional externally generated GPU slices (still compared to Verilator):
 
 - `DrawContextFifo` — depth-4 draw-context queue, `clock`/`reset`, Decoupled ports
 - `TriangleRasterizer` — 128×128 triangle setup/scan, 64-bit edges, widths up to 67 bits
@@ -799,6 +819,8 @@ ports.
 
 Measured 2026-10-27 on an Apple M4 Max (14 cores), CIRCT `firtool-1.158.0`,
 Verilator 5.050, Apple clang 16 `-O3`, 12 stages × 8 mix rounds, 1e6 cycles.
+The GPU rows used the historical RTL snapshot formerly in this repository;
+newly generated RTL may differ and must be measured again.
 Ports match for 4096 cycles. Every bench passed the 1-thread gate.
 `python3 -m flashsim experiment --stages 12 --rounds 8` prints the MHz behind
 these ratios. On the small benches Verilator `--threads 8` is slower than one
@@ -841,5 +863,5 @@ same RTL and stimulus on both sides.
 
 ```bash
 python3 -m flashsim compile build/benches/counter.v -o /tmp/counter.h
-python3 -m flashsim compile rtl/gpu/draw-fifo/DrawContextFifo.sv -o /tmp/fifo.h --frontend circt
+python3 -m flashsim compile "$gpu_rtl/draw-fifo/DrawContextFifo.sv" -o /tmp/fifo.h --frontend circt
 ```
