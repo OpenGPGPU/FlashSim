@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from flashsim.circt_frontend import CirctError, circt_verilog_to_mlir, parse_hw_mlir
+from flashsim.circt_frontend import CirctError, circt_verilog_to_mlir, parse_hw_mlir, verilog_sources
 from flashsim.compile import compile_file, compile_verilog
 from flashsim.emit import emit_cpp
 from flashsim.ir import (AlwaysFF, Assign, BinOp, ClockedAssertion, Const, Id,
@@ -17,6 +17,18 @@ from flashsim.toolchain import find_bin
 def _tools():
     if find_bin("circt-verilog") is None or shutil.which("c++") is None:
         pytest.skip("CIRCT and a C++ compiler are required")
+
+
+def test_assertion_mode_keeps_all_listed_verification_sources(tmp_path):
+    top, check = _design(tmp_path)
+    parent = top.parent / "verification" / "Leaf_Verification.sv"
+    parent.write_text("module Leaf_Verification; endmodule\n")
+    with (top.parent / "filelist.f").open("a") as file:
+        file.write("verification/Leaf_Verification.sv\n")
+    assert parent in verilog_sources(top, assertions=True)
+    assert check in verilog_sources(top, assertions=True)
+    assert parent not in verilog_sources(top)
+    assert check not in verilog_sources(top)
 
 
 def _design(tmp_path):
