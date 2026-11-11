@@ -32,6 +32,7 @@ from flashsim.ir import (
     UnaryOp,
     expr_ids,
     observation_exprs,
+    stmt_reads,
     stmt_writes,
 )
 
@@ -2358,8 +2359,19 @@ def emit_cpp(mod: Module) -> str:
     mems = collect_mems(mod)
     observed_clocks = ([(a.clock, a.scope) for a in mod.assertions]
                        + [(p.clock, p.scope) for p in mod.clocked_processes])
-    inputs = [n for n in collect_inputs(mod)
-              if n != mod.always.clock or observed_clocks]
+    all_inputs = collect_inputs(mod)
+    clock = mod.always.clock
+    # A clock converted back to i1 may also be ordinary combinational data.
+    # Keep it as a driven input in that case, not just for assertion clocks.
+    clock_as_data = clock in all_inputs and not observed_clocks and (
+        any(clock in expr_ids(expr) for expr in assigns.values()) or
+        any(clock in stmt_reads(stmt) for stmt in mod.always.body + mod.reset_epilogue) or
+        any(clock in expr_ids(expr) for wr in mod.mem_writes
+            for expr in (wr.addr, wr.data, wr.enable)) or
+        any(clock in expr_ids(expr) for item in mod.assertions
+            for expr in observation_exprs(item)))
+    inputs = [n for n in all_inputs
+              if n != clock or observed_clocks or clock_as_data]
     outputs = collect_outputs(mod)
     sigs = mod.signals
     if observed_clocks:
@@ -2376,7 +2388,7 @@ def emit_cpp(mod: Module) -> str:
             if clock != Id(mod.always.clock):
                 raise ValueError("assertion clock differs from the model posedge clock: "
                                  + scope)
-    stop = set(regs) | set(collect_inputs(mod)) | set(mems)
+    stop = set(regs) | set(all_inputs) | set(mems)
     writes = always_writes(mod.always.body)
     if mod.reset_epilogue:
         # Reset-only registers leave the always body, but they still need

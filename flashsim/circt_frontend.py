@@ -31,7 +31,7 @@ from flashsim.toolchain import find_bin
 
 _PORT = re.compile(
     r"(in|out)\s+%?([A-Za-z_][A-Za-z0-9_.:]*)\s*:\s*"
-    r"(!llhd\.ref<i\d+>|i\d+)"
+    r"(!llhd\.ref<i\d+>|!seq\.clock|i\d+)"
 )
 _MODULE = re.compile(
     r"hw\.module(?:\s+private)?\s+@([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)"
@@ -42,7 +42,7 @@ _EXTRACT = re.compile(
 )
 _CONCAT = re.compile(r"%(\S+)\s*=\s*comb\.concat\s+(.+?)\s*:\s*(.+)$")
 _BIN = re.compile(
-    r"%(\S+)\s*=\s*comb\.(add|xor|and|or|sub|mul|divu|divs|modu|mods|shl|shru|shrs)\s+(.+?)\s*:\s*i(\d+)\s*$"
+    r"%(\S+)\s*=\s*comb\.(add|xor|and|or|sub|mul|divu|divs|modu|mods|shl|shru|shrs)(?:\s+bin)?\s+(.+?)\s*:\s*i(\d+)\s*$"
 )
 _ICMP = re.compile(
     r"%(\S+)\s*=\s*comb\.icmp\s+([A-Za-z]+)\s+(.+?)\s*:\s*i(\d+)\s*$"
@@ -82,14 +82,16 @@ _INSTANCE = re.compile(
 )
 # A module with no results still ends in `hw.output`. Operand-less is legal.
 _OUTPUT = re.compile(r"hw\.output(?:\s+(.+))?$")
-_TO_CLOCK = re.compile(r"%(\S+)\s*=\s*seq\.to_clock\s+%(\S+)")
+_CLOCK_CAST = re.compile(r"%(\S+)\s*=\s*seq\.(?:to_clock|from_clock)\s+%(\S+)$")
 _SSA = re.compile(r"%([A-Za-z0-9_.:#-]+)")
 _ARRAY_TY = re.compile(r"!hw\.array<(\d+)xi(\d+)>")
 _INT_TY = re.compile(r"i(\d+)$")
 _REF_TY = re.compile(r"!llhd\.ref<(.*)>$")
 _TIME = re.compile(r"%(\S+)\s*=\s*llhd\.constant_time\s+<([^>]+)>$")
-_SIG = re.compile(r'%(\S+)\s*=\s*llhd\.sig(?:\s+name\s+"[^"]*")?\s+%(\S+)\s*:\s*(.*)$')
+_SIG = re.compile(r'%(\S+)\s*=\s*llhd\.sig(?:\s+name\s+"[^"]*")?(?:\s+%(\S+))?\s*:\s*(.*)$')
 _PROBE = re.compile(r"%(\S+)\s*=\s*llhd\.prb\s+%(\S+)\s*:\s*(.*)$")
+_ASSIGN_SIGNAL = re.compile(r"llhd\.assign\s+%(\S+),\s*%(\S+)"
+                            r"(?:\s+if\s+%(\S+))?\s*:\s*(.*)$")
 _DRIVE = re.compile(r"llhd\.drv\s+%(\S+),\s*%(\S+)\s+after\s+%(\S+)"
                     r"(?:\s+if\s+%(\S+))?\s*:\s*(.*)$")
 _FORMAT = re.compile(r'%(\S+)\s*=\s*sim\.fmt\.literal\s+("(?:\\.|[^"\\])*")$')
@@ -158,6 +160,8 @@ def _parse_type(text: str) -> tuple[int, int]:
     text = text.strip()
     if m := _REF_TY.fullmatch(text):
         text = m.group(1)
+    if text == "!seq.clock":
+        return 1, 0
     if m := _INT_TY.match(text):
         return int(m.group(1)), 0
     if m := _ARRAY_TY.search(text):
@@ -312,7 +316,10 @@ def _lower_module(raw: _ParsedMod) -> Module:
         line = raw_line.strip().rstrip(",")
         if not line or line.startswith("//") or line in {"}", "{"}:
             continue
-        if _TO_CLOCK.match(line):
+        if m := _CLOCK_CAST.fullmatch(line):
+            ident = ssa_name(m.group(1))
+            signals[ident] = Signal(ident, 1, "wire")
+            assigns.append(Assign(ident, _ref(m.group(2))))
             continue
         if m := _FORMAT.fullmatch(line):
             from flashsim.circt_assertions import decode_mlir_string
@@ -323,15 +330,28 @@ def _lower_module(raw: _ParsedMod) -> Module:
             continue
         if m := _SIG.fullmatch(line):
             ident = ssa_name(m.group(1))
-            width, depth = _parse_type(m.group(3))
+            type_src = m.group(3).strip()
+            # Recent CIRCT prints the referenced element as `<iN>` here.
+            if type_src.startswith("<") and type_src.endswith(">"):
+                type_src = type_src[1:-1]
+            width, depth = _parse_type(type_src)
             signals[ident] = Signal(ident, width, "wire", depth)
             references.add(ident)
-            initializers[ident] = ssa_name(m.group(2))
+            initializers[ident] = ssa_name(m.group(2)) if m.group(2) else None
             continue
         if m := _PROBE.fullmatch(line):
             ident = ssa_name(m.group(1))
             width, depth = _parse_type(m.group(3))
             signals[ident] = Signal(ident, width, "wire", depth)
+            assigns.append(Assign(ident, _ref(m.group(2))))
+            continue
+        if m := _ASSIGN_SIGNAL.fullmatch(line):
+            ident = ssa_name(m.group(1))
+            if m.group(3):
+                raise CirctError("conditional immediate signal assignment is unsupported: " + line)
+            if ident in driven:
+                raise CirctError("multiple reference drivers: " + ident)
+            driven.add(ident)
             assigns.append(Assign(ident, _ref(m.group(2))))
             continue
         if m := _DRIVE.fullmatch(line):
@@ -342,7 +362,7 @@ def _lower_module(raw: _ParsedMod) -> Module:
             delay = times.get(ssa_name(m.group(3)), "").replace(" ", "")
             if delay == "0ns,0d,1e" and not m.group(4):
                 assigns.append(Assign(ident, _ref(m.group(2))))
-            elif delay == "0ns,1d,0e":
+            elif delay in ("0ns,1d,0e", "0ns,1d"):
                 nba_drives.append((ident,m.group(2),m.group(4)))
             else:
                 raise CirctError("unsupported procedural reference drive: " + line)
@@ -499,7 +519,7 @@ def _lower_module(raw: _ParsedMod) -> Module:
             inputs: dict[str, str] = {}
             for pm in re.finditer(
                 r"([A-Za-z_][A-Za-z0-9_.:]*)\s*:\s*%(\S+?)\s*:\s*"
-                r"(?:!llhd\.ref<i\d+>|i\d+)", m.group(4)
+                r"(?:!llhd\.ref<i\d+>|!seq\.clock|i\d+)", m.group(4)
             ):
                 inputs[ssa_name(pm.group(1))] = ssa_name(pm.group(2))
             instances.append((results, inst, callee, inputs))

@@ -37,8 +37,13 @@ python3 -m pytest flashsim/test_circt_empty_output.py
 ```
 
 The CIRCT frontend also lowers integer `hw.array_create` values and registered
-outputs whose SSA names match their ports. Flattening retains reusable child
-modules only until their last reachable instance, reducing intermediate memory
+outputs whose SSA names match their ports. Clock-typed ports and `seq.to_clock`/
+`seq.from_clock` casts retain their one-bit value, including when used as data.
+For the newer LLHD syntax, unconditionally assigned signal references and
+zero-initialized clocked captures are supported; conditional immediate drives
+and clocked state with unknown initialization remain rejected. Flattening
+retains reusable child modules only until their last reachable instance,
+reducing intermediate memory
 without merging instance state. Single-use expression inlining tracks its
 dependency graph and expands substitutions iteratively; rewrites reuse
 unchanged immutable branches. Generated signal widths use a shared lookup
