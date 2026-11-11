@@ -1419,6 +1419,12 @@ def _merge_sop_terms(
         return tuple(sorted(map(literal_key, term)))
 
     def simplify(terms: set[frozenset]) -> set[frozenset]:
+        # Reductions repeatedly sort the same immutable terms.  Keep only a
+        # cone-local bounded cache so it cannot retain other modules' trees.
+        @lru_cache(maxsize=_SOP_TERMS_MAX)
+        def cached_term_key(term: frozenset) -> tuple[str, ...]:
+            return term_key(term)
+
         # Large CIRCT mux cones commonly contain pairs that differ only in
         # one literal polarity.  Looking for those pairs by scanning every
         # term against every other term made the 256-entry L2 sharer cones
@@ -1429,7 +1435,7 @@ def _merge_sop_terms(
         if len(terms) > 64:
             while True:
                 merged = False
-                snapshot = sorted(terms, key=term_key)
+                snapshot = sorted(terms, key=cached_term_key)
                 for t in snapshot:
                     if t not in terms:
                         continue
@@ -1448,7 +1454,7 @@ def _merge_sop_terms(
         changed = True
         while changed:
             changed = False
-            by_size = [(len(t), t) for t in sorted(terms, key=lambda t: (len(t), term_key(t)))]
+            by_size = [(len(t), t) for t in sorted(terms, key=lambda t: (len(t), cached_term_key(t)))]
             for t_size, t in by_size:
                 if t not in terms:
                     continue
