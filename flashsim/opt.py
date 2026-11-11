@@ -1448,12 +1448,16 @@ def _merge_sop_terms(
         changed = True
         while changed:
             changed = False
-            by_size = sorted(terms, key=lambda t: (len(t), term_key(t)))
-            for t in by_size:
+            by_size = [(len(t), t) for t in sorted(terms, key=lambda t: (len(t), term_key(t)))]
+            for t_size, t in by_size:
                 if t not in terms:
                     continue
-                for s in by_size:
-                    if s is t or len(s) > len(t) or s not in terms:
+                for s_size, s in by_size:
+                    # Later terms cannot be subsets or one-literal reductions
+                    # once their size exceeds this term's size.
+                    if s_size > t_size:
+                        break
+                    if s is t or s not in terms:
                         continue
                     if s <= t:
                         terms.discard(t)
@@ -1465,7 +1469,7 @@ def _merge_sop_terms(
                         if (k, not pol) in t:
                             nt = t - {(k, not pol)}
                             terms.discard(t)
-                            if len(s) == len(t):
+                            if s_size == t_size:
                                 terms.discard(s)
                             terms.add(nt)
                             changed = True

@@ -1,6 +1,7 @@
 """SOP term sets must not leak Python hash order into generated shards."""
 import os
 from pathlib import Path
+import random
 import subprocess
 import sys
 
@@ -47,3 +48,41 @@ print(repr(y))
         env=dict(os.environ,PYTHONHASHSEED=str(seed),PYTHONPATH=str(root)))
         for seed in range(8)]
     assert len(set(results)) == 1
+
+
+def test_sop_varied_term_sizes_preserve_truth_tables():
+    from flashsim.ir import BinOp, Const, Id, Signal, UnaryOp
+    from flashsim.opt import _merge_sop_terms
+
+    names = 'abcdef'
+    signals = {name: Signal(name, 1, 'input') for name in names}
+    signals['out'] = Signal('out', 1, 'output')
+
+    def value(expr, bits):
+        if isinstance(expr, Const):
+            return bool(expr.value)
+        if isinstance(expr, Id):
+            return bool(bits & (1 << names.index(expr.name)))
+        if isinstance(expr, UnaryOp):
+            return not value(expr.a, bits)
+        if isinstance(expr, BinOp):
+            a, b = value(expr.a, bits), value(expr.b, bits)
+            return a and b if expr.op == '&' else a or b
+        raise AssertionError(expr)
+
+    rng = random.Random(8937)
+    for _ in range(20):
+        terms = []
+        for _ in range(32):
+            literals = [Id(name) if rng.randrange(2) else UnaryOp('!', Id(name))
+                        for name in rng.sample(names, rng.randint(1, len(names)))]
+            term = literals[0]
+            for literal in literals[1:]:
+                term = BinOp('&', term, literal)
+            terms.append(term)
+        original = terms[0]
+        for term in terms[1:]:
+            original = BinOp('|', original, term)
+        optimized = _merge_sop_terms({'out': original}, signals)['out']
+        for bits in range(1 << len(names)):
+            assert value(original, bits) == value(optimized, bits)
