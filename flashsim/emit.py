@@ -6,6 +6,7 @@ import re
 import sys
 import zlib
 from collections import Counter, OrderedDict, defaultdict
+from collections.abc import Set as AbstractSet
 from io import StringIO
 
 from flashsim.ir import (
@@ -55,6 +56,60 @@ def cone_leaves(root: str, assigns: dict[str, Expr], stop: set[str]) -> set[str]
             continue
         stack.extend(expr_ids(assigns[name]))
     return found
+
+
+def _cone_leaves_many(roots: set[str], assigns: dict[str, Expr], stop: set[str],
+                      temporary_limit: int = 32768) -> dict[str, frozenset[str]]:
+    """Compute exact leaves for shared cones with a bounded temporary cache.
+
+    Root results are retained for the output; other reusable intermediate
+    results use an LRU and large intermediate sets are not cached. If a cone
+    has a cycle, fall back to the existing per-root traversal so no partially
+    explored strongly connected component can be cached.
+    """
+    ordered = sorted(roots)
+    results: dict[str, frozenset[str]] = {}
+    temporary: OrderedDict[str, frozenset[str]] = OrderedDict()
+    for root in ordered:
+        if root in results:
+            continue
+        if root in stop or root not in assigns:
+            results[root] = frozenset((root,))
+            continue
+        active = {root}
+        stack = [(root, iter(expr_ids(assigns[root])), set())]
+        while stack:
+            name, children, leaves = stack[-1]
+            try:
+                child = next(children)
+            except StopIteration:
+                value = frozenset(leaves)
+                stack.pop()
+                active.remove(name)
+                if name in roots:
+                    results[name] = value
+                elif temporary_limit > 0 and len(value) <= 256:
+                    temporary[name] = value
+                    temporary.move_to_end(name)
+                    if len(temporary) > temporary_limit:
+                        temporary.popitem(last=False)
+                if stack:
+                    stack[-1][2].update(value)
+                continue
+            if child in results:
+                leaves.update(results[child])
+            elif child in temporary:
+                leaves.update(temporary[child])
+                temporary.move_to_end(child)
+            elif child in stop or child not in assigns:
+                leaves.add(child)
+            elif child in active:
+                results[root] = frozenset(cone_leaves(root, assigns, stop))
+                break
+            else:
+                active.add(child)
+                stack.append((child, iter(expr_ids(assigns[child])), set()))
+    return {root: results[root] for root in ordered}
 
 
 def collect_regs(mod: Module) -> list[str]:
@@ -1196,7 +1251,7 @@ def skip_partition_key(name: str) -> str:
 
 def _partition_maps(
     cached: set[str],
-    wire_deps: dict[str, set[str]],
+    wire_deps: dict[str, AbstractSet[str]],
     eager_of: dict[str, int] | None = None,
 ) -> tuple[dict[str, int], dict[str, list[int]], int]:
     if len(cached) <= 128:
@@ -1247,7 +1302,7 @@ def _ordered_leaf_sets(leaf_sets):
 def _eager_regions(
     cached: set[str],
     cdeps: dict[str, list[str]],
-    wire_deps: dict[str, set[str]],
+    wire_deps: dict[str, AbstractSet[str]],
 ) -> tuple[dict[str, int], list[list[str]]]:
     """Cached wires to evaluate as straight-line passes instead of lazily.
 
@@ -1372,7 +1427,7 @@ def _pass_inputs(
     assigns: dict[str, Expr],
     cached: set[str],
     stop: set[str],
-    wire_deps: dict[str, set[str]],
+    wire_deps: dict[str, AbstractSet[str]],
     cdeps: dict[str, list[str]],
 ) -> tuple[list[set[str]], dict[str, list[int]]]:
     """Per pass: leaves it reads other than through another pass, and for
@@ -1445,7 +1500,7 @@ def _cond_stop_leaves(
     cond: Expr,
     assigns: dict[str, Expr],
     stop: set[str],
-    wire_deps: dict[str, set[str]],
+    wire_deps: dict[str, AbstractSet[str]],
 ) -> set[str]:
     leaves: set[str] = set()
     for name in expr_ids(cond):
@@ -1462,7 +1517,7 @@ def _stmt_stop_leaves(
     stmt: Stmt,
     assigns: dict[str, Expr],
     stop: set[str],
-    wire_deps: dict[str, set[str]],
+    wire_deps: dict[str, AbstractSet[str]],
 ) -> set[str]:
     """Leaves that can change what a hold statement does, data path included.
 
@@ -2403,7 +2458,7 @@ def emit_cpp(mod: Module) -> str:
     )
     if always_body is None:
         always_body = mod.always.body
-    wire_deps = {w: cone_leaves(w, assigns, stop) for w in sorted(cached)}
+    wire_deps = _cone_leaves_many(cached, assigns, stop)
     cdeps = {w: cached_deps(w, assigns, cached, stop) for w in sorted(cached)}
     eager_of, eager_regions = _eager_regions(cached, cdeps, wire_deps)
     wire_part, leaf_parts, nparts = _partition_maps(cached, wire_deps, eager_of)

@@ -252,6 +252,14 @@ memory-write root. On the full four-CU desktop model, the optimized IR is
 byte-identical to the previous optimizer's captured output. This improves model
 generation; generated simulation behavior and runtime code remain unchanged.
 
+Shared combinational leaf cones are computed once for each cached root, with
+a bounded LRU for small intermediate cones. Cycles fall back to the original
+per-root traversal. For an extracted 720p texture assertion module with 342
+checks, one local run produced byte-identical C++ and reduced emitter CPU time
+from 34.7 to 12.0 seconds; this is not a whole-model or simulation-speed result.
+Run `python3 -m pytest flashsim/test_emit_leaf_cones.py` for the cyclic,
+deep-chain and generated-code comparisons.
+
 GSIM/arcilator-style used-bits and dedup shrink the busy path. `usedBits`
 propagates low-bit demand backwards from outputs/registers/memory writes
 (ADD/SUB/MUL/AND/OR/XOR narrow to the demand, compares/division keep full
