@@ -107,6 +107,9 @@ def optimize(mod: Module) -> Module:
     # Array reads index named storage in the emitter.  Inlining an array-valued
     # SSA definition would turn that storage into an unsupported expression.
     array_wires = {n for n, s in sigs.items() if s.kind == "wire" and s.depth}
+    # Discard unreachable assignment cones before constructing the much larger
+    # per-assignment reference and reverse-use graphs for inlining.
+    assigns, body = _dce(assigns, body, observed, mem_writes)
     assigns, body = _inline_single_use(assigns, body, observed | array_wires, mem_writes)
     assigns = {k: _fold_expr(v) for k, v in assigns.items()}
     body = _map_stmts(body, _fold_expr)
