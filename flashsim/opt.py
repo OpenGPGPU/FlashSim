@@ -414,6 +414,39 @@ def _count_uses(
     return uses
 
 
+_INLINE_NODE_BUDGET = 512
+
+
+def _bounded_inline_size(expr: Expr) -> int:
+    """Conservatively bound the expanded tree without recursive hashing."""
+    size = 0
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        size += 1
+        if size > _INLINE_NODE_BUDGET:
+            return size
+        if isinstance(node, (Id, Const, ArrayZeros)):
+            continue
+        if isinstance(node, (UnaryOp, Extract)):
+            stack.append(node.a)
+        elif isinstance(node, BinOp):
+            stack.extend((node.a, node.b))
+        elif isinstance(node, Ternary):
+            stack.extend((node.cond, node.a, node.b))
+        elif isinstance(node, Concat):
+            stack.extend(node.parts)
+        elif isinstance(node, ArrayGet):
+            stack.extend((node.arr, node.index))
+        elif isinstance(node, ArrayInject):
+            stack.extend((node.arr, node.index, node.value))
+        elif isinstance(node, MemRead):
+            stack.append(node.addr)
+        else:
+            raise TypeError(type(node))
+    return size
+
+
 def _inline_single_use(
     assigns: dict[str, Expr],
     body: list[Stmt],
@@ -433,6 +466,14 @@ def _inline_single_use(
     pending = deque(assigns)
     queued = set(assigns)
     substitutions: dict[str, Expr] = {}
+    sizes: dict[str, int] = {}
+
+    def size(name: str) -> int:
+        cached = sizes.get(name)
+        if cached is None:
+            cached = _bounded_inline_size(assigns[name])
+            sizes[name] = cached
+        return cached
 
     def enqueue(name: str) -> None:
         if name in assigns and name not in queued:
@@ -447,6 +488,7 @@ def _inline_single_use(
         n = uses.get(name, 0)
         if n == 0:
             del assigns[name]
+            sizes.pop(name, None)
             for dep, count in refs.pop(name).items():
                 if dep in assigns:
                     uses[dep] -= count
@@ -458,6 +500,15 @@ def _inline_single_use(
         user = next(iter(users[name]))
         if user not in assigns or user == name:
             continue
+        source_size = size(name)
+        user_size = size(user)
+        expanded_size = source_size + user_size - 1
+        if source_size > 1 and expanded_size > _INLINE_NODE_BUDGET:
+            # Keep the named intermediate: a huge inlined tree can overflow
+            # Python hashing/emission or the C++ compiler's nesting limit.
+            continue
+        sizes[user] = min(expanded_size, _INLINE_NODE_BUDGET + 1)
+        sizes.pop(name, None)
         dependencies = refs.pop(name)
         destination = refs[user]
         assert destination.pop(name) == 1

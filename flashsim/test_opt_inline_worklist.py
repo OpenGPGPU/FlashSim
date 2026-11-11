@@ -1,9 +1,11 @@
 """Single-use inlining preserves independently evaluated logic and roots."""
 
 import random
+import subprocess
 
-from flashsim.ir import BinOp, Const, Id, MemWrite, NbAssign, Ternary, expr_ids
-from flashsim.opt import _inline_single_use
+from flashsim.emit import emit_cpp
+from flashsim.ir import AlwaysFF, Assign, BinOp, Const, Id, MemWrite, Module, NbAssign, Signal, Ternary
+from flashsim.opt import _inline_single_use, optimize
 
 
 def _value(expr, inputs, assigns):
@@ -70,9 +72,39 @@ def test_long_operation_chain_expands_without_python_recursion():
     chain = {f"w{i}": BinOp("&", Id(f"w{i-1}" if i else "input"), Const(1, 1))
              for i in range(size)}
     result, _ = _inline_single_use(chain, [], {f"w{size-1}"})
-    assert expr_ids(result[f"w{size-1}"]) == {"input"}
     expr = result[f"w{size-1}"]
-    for _ in range(size):
-        assert isinstance(expr, BinOp) and expr.op == "&"
-        expr = expr.a
+    seen = 0
+    while isinstance(expr, BinOp) or (isinstance(expr, Id) and expr.name in result):
+        if isinstance(expr, Id):
+            expr = result[expr.name]
+        else:
+            assert expr.op == "&" and expr.b == Const(1, 1)
+            expr = expr.a
+            seen += 1
+    assert seen == size and len(result) > 1
     assert expr == Id("input")
+
+
+def test_deep_mux_chain_emits_and_executes(tmp_path):
+    size = 7500
+    sigs = {"clock": Signal("clock", 1, "input"), "out": Signal("out", 1, "output")}
+    sigs.update({f"i{i}": Signal(f"i{i}", 1, "input") for i in range(8)})
+    assigns = []
+    for i in range(size):
+        name = f"w{i}"
+        sigs[name] = Signal(name, 1, "wire")
+        assigns.append(Assign(name, Ternary(Id(f"i{i % 8}"),
+                                           Id(f"w{i-1}" if i else "i0"), Id("i1"))))
+    assigns.append(Assign("out", Id(f"w{size-1}")))
+    module = Module("DeepSynthetic", sigs, assigns, AlwaysFF("clock", []), ["clock"])
+    (tmp_path / "dut.h").write_text(emit_cpp(optimize(module)))
+    set_inputs = " ".join(f"d.i{i}=(bits>>{i})&1;" for i in range(8))
+    (tmp_path / "check.cpp").write_text(
+        '#include "dut.h"\nint main() {\n'
+        'for (unsigned bits=0; bits<256; ++bits) { DeepSyntheticDut d; ' + set_inputs +
+        ' unsigned expected=bits&1; for (int i=0;i<7500;++i) '
+        'expected=((bits>>(i%8))&1) ? expected : ((bits>>1)&1); '
+        'd.poke_inputs(); d.eval_out(); if (d.out!=expected) return 1; } return 0; }\n')
+    subprocess.run(["c++", "-std=c++17", "-O0", str(tmp_path / "check.cpp"),
+                    "-o", str(tmp_path / "check")], check=True)
+    subprocess.run([str(tmp_path / "check")], check=True)
