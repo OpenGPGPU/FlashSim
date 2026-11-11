@@ -1,4 +1,5 @@
 """A saved model can be repartitioned without changing its execution."""
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -99,3 +100,28 @@ def test_rejects_tampering_and_unexpected_top_level_content(tmp_path):
     with pytest.raises(ValueError, match="top-level content"):
         create(source, tmp_path / "failed", maximum=70, commit_parts=2)
     assert not (tmp_path / "failed").exists()
+
+
+def test_optnone_marks_only_large_methods_and_preserves_behavior(tmp_path, monkeypatch):
+    compiler = shutil.which("clang++")
+    if not compiler:
+        pytest.skip("Clang unavailable")
+    source, out = tmp_path / "original", tmp_path / "derived"
+    fixture(source)
+    shard = source / "dut_0.cpp"
+    original = shard.read_text()
+    shard.write_text(original.replace("  value *= 3;", "  value *= 3;\n" + "  value += 0;\n" * 20))
+    baseline = run_model(source, tmp_path, "unoptimized_baseline")
+    create(source, out, maximum=70, commit_parts=2, optnone_bytes=100)
+    record = json.loads((out / "flashsim-reshard.json").read_text())
+    assert record["optnone_methods"]["dut_0.cpp"] == ["b"]
+    annotated = next(p for p in out.glob("dut_*.cpp") if b"optnone" in p.read_bytes())
+    assert b"#error" in annotated.read_bytes()
+    verify(source, out)
+    monkeypatch.setattr(shutil, "which", lambda name: compiler if name == "c++" else None)
+    assert run_model(out, tmp_path, "unoptimized_derived") == baseline
+
+    record["optnone_methods"]["dut_0.cpp"] = ["a"]
+    (out / "flashsim-reshard.json").write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="optnone methods"):
+        verify(source, out)

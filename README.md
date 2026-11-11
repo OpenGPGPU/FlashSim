@@ -154,6 +154,15 @@ python -m flashsim.reshard create --source model --output model-resharded \
 python -m flashsim.reshard verify --source model --output model-resharded
 ```
 
+For models with exceptionally large individual methods, pass
+`--optnone-mib 8` to `create` to disable optimization only for methods over
+8 MiB. This derived model requires Clang. Other methods keep the compiler
+flags selected for the build. The manifest records the threshold and marked
+methods, and verification checks each annotation against the original method
+size and reconstructs the original source. Compilation may become faster at
+the expense of runtime; validate the resulting model against a reference for
+the intended workload before drawing performance conclusions.
+
 The output directory must be new. The transformer splits complete generated
 methods and, when requested, an existing chunked commit dispatcher. It adds a
 header guard if needed and records hashes of the original and derived files

@@ -18,7 +18,13 @@ from flashsim import emit
 INCLUDE = b'#include "dut.h"\n'
 GUARD = b'#pragma once\n'
 NUMBERED = re.compile(r"dut_(\d+)\.cpp")
-METHOD = re.compile(rb"^void ([A-Za-z_]\w*)::[A-Za-z_]\w*\(\) \{\n$")
+METHOD = re.compile(rb"^void ([A-Za-z_]\w*)::([A-Za-z_]\w*)\(\) \{\n$")
+OPTNONE = (b"#if defined(__clang__)\n"
+           b"__attribute__((optnone, noinline))\n"
+           b"#else\n"
+           b'#error "this resharded model requires Clang"\n'
+           b"#endif\n")
+OPTNONE_LINES = OPTNONE.splitlines(keepends=True)
 MANIFEST = "flashsim-reshard.json"
 
 
@@ -40,7 +46,33 @@ def _files(source: Path) -> list[Path]:
     return [header, *shards]
 
 
-def _split_methods(source: Path, out: Path, maximum: int) -> tuple[list[str], str | None]:
+def _large_methods(source: Path, threshold: int) -> list[str]:
+    """Find whole methods larger than threshold without buffering their bodies."""
+    if not threshold:
+        return []
+    found = []
+    name = None
+    size = 0
+    with source.open("rb") as stream:
+        for line in stream:
+            if name is None:
+                match = METHOD.fullmatch(line)
+                if match:
+                    name = match.group(2).decode("ascii")
+                    size = len(line)
+            else:
+                size += len(line)
+                if line == b"}\n":
+                    if size > threshold:
+                        found.append(name)
+                    name = None
+    if name is not None or len(found) != len(set(found)):
+        raise ValueError("unterminated or duplicate large method in " + source.name)
+    return found
+
+
+def _split_methods(source: Path, out: Path, maximum: int,
+                   optnone: set[str]) -> tuple[list[str], str | None]:
     number = NUMBERED.fullmatch(source.name).group(1)
     outputs: list[str] = []
     current = None
@@ -76,6 +108,9 @@ def _split_methods(source: Path, out: Path, maximum: int) -> tuple[list[str], st
                         if size >= maximum and found:
                             current.close()
                             start()
+                        if match.group(2).decode("ascii") in optnone:
+                            current.write(OPTNONE)
+                            size += len(OPTNONE)
                         in_method = True
                         found = True
                     elif line.strip():
@@ -94,12 +129,13 @@ def _split_methods(source: Path, out: Path, maximum: int) -> tuple[list[str], st
     return outputs, class_name
 
 
-def create(source: Path, out: Path, *, maximum: int, commit_parts: int) -> None:
+def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
+           optnone_bytes: int = 0) -> None:
     source, out = source.resolve(), out.resolve()
     if source == out or source in out.parents or out in source.parents:
         raise ValueError("source and output must be separate directories")
-    if maximum <= len(INCLUDE) or not 1 <= commit_parts <= 64:
-        raise ValueError("maximum must exceed the include and commit parts must be 1..64")
+    if maximum <= len(INCLUDE) or not 1 <= commit_parts <= 64 or optnone_bytes < 0:
+        raise ValueError("maximum must exceed the include, commit parts must be 1..64, and optnone must be nonnegative")
     inputs = _files(source)
     if any(p.name.startswith("dut_extra_") for p in inputs):
         raise ValueError("input has already been method-resharded")
@@ -117,10 +153,13 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int) -> None:
             dst.write(first)
             shutil.copyfileobj(src, dst, 1024 * 1024)
         methods = {}
+        unoptimized = {}
         class_name = None
         for path in inputs[1:]:
             if NUMBERED.fullmatch(path.name):
-                names, cls = _split_methods(path, out, maximum)
+                marked = _large_methods(path, optnone_bytes)
+                unoptimized[path.name] = marked
+                names, cls = _split_methods(path, out, maximum, set(marked))
                 methods[path.name] = names
                 if cls is not None:
                     if class_name is not None and cls != class_name:
@@ -149,6 +188,7 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int) -> None:
                   "emitter_sha256": digest(Path(emit.__file__)), "input_sha256": before,
                   "output_sha256": outputs, "method_parts": methods, "class": class_name,
                   "guard_added": guard_added, "maximum_bytes": maximum,
+                  "optnone_bytes": optnone_bytes, "optnone_methods": unoptimized,
                   "commit_parts": commit_parts, "commit_outputs": commit_outputs}
         (out / MANIFEST).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
         verify(source, out)
@@ -169,6 +209,12 @@ def verify(source: Path, out: Path) -> None:
     numbered = {p.name for p in inputs if NUMBERED.fullmatch(p.name)}
     if set(record["method_parts"]) != numbered or not 1 <= record["commit_parts"] <= 64:
         raise ValueError("reshard manifest does not cover the original methods")
+    threshold = record.get("optnone_bytes", 0)
+    if not isinstance(threshold, int) or threshold < 0:
+        raise ValueError("invalid optnone threshold")
+    unoptimized = {p.name: _large_methods(p, threshold) for p in inputs if NUMBERED.fullmatch(p.name)}
+    if record.get("optnone_methods", {name: [] for name in numbered}) != unoptimized:
+        raise ValueError("optnone methods do not match the original source")
     expected = {"dut.h"}
     for name, parts in record["method_parts"].items():
         number = NUMBERED.fullmatch(name).group(1)
@@ -203,6 +249,7 @@ def verify(source: Path, out: Path) -> None:
         raise ValueError("derived header is not the original with an optional guard")
     for name, parts in record["method_parts"].items():
         joined = hashlib.sha256()
+        seen_optnone = []
         for i, part in enumerate(parts):
             with (out / part).open("rb") as stream:
                 if stream.readline() != INCLUDE:
@@ -210,13 +257,27 @@ def verify(source: Path, out: Path) -> None:
                 if not i:
                     joined.update(INCLUDE)
                 in_method = False
-                for line in stream:
+                while line := stream.readline():
+                    marked = False
+                    if not in_method and line == OPTNONE_LINES[0]:
+                        for expected_line in OPTNONE_LINES[1:]:
+                            if stream.readline() != expected_line:
+                                raise ValueError("invalid optnone annotation")
+                        line = stream.readline()
+                        marked = True
                     if not in_method:
                         match = METHOD.fullmatch(line)
                         if match:
                             if match.group(1).decode("ascii") != record["class"]:
                                 raise ValueError("derived shard contains another DUT class")
+                            method = match.group(2).decode("ascii")
+                            if marked:
+                                seen_optnone.append(method)
+                            if marked != (method in unoptimized[name]):
+                                raise ValueError("derived method has incorrect optnone annotation")
                             in_method = True
+                        elif marked:
+                            raise ValueError("optnone annotation has no method")
                         elif line.strip():
                             raise ValueError("derived shard contains top-level content")
                     elif line == b"}\n":
@@ -228,6 +289,8 @@ def verify(source: Path, out: Path) -> None:
                     raise ValueError("derived shard ends within a method")
         if joined.hexdigest() != record["input_sha256"][name]:
             raise ValueError("derived methods do not reconstruct " + name)
+        if seen_optnone != unoptimized[name]:
+            raise ValueError("derived optnone methods differ from original order")
     if record["commit_parts"] > 1:
         parts = emit._partition_commit_chunks(record["class"],
             (source / "dut_commit_chunks.cpp").read_text(), record["commit_parts"])
@@ -251,10 +314,12 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-mib", type=int, default=16)
     parser.add_argument("--commit-parts", type=int, default=1)
+    parser.add_argument("--optnone-mib", type=int, default=0,
+                        help="compile methods above this size without Clang optimization; 0 disables")
     args = parser.parse_args()
     if args.operation == "create":
         create(args.source, args.output, maximum=args.max_mib * 1024 * 1024,
-               commit_parts=args.commit_parts)
+               commit_parts=args.commit_parts, optnone_bytes=args.optnone_mib * 1024 * 1024)
     else:
         verify(args.source, args.output)
     print("reshard", args.operation, "verified", flush=True)
