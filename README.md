@@ -146,6 +146,23 @@ host, compiling a 625 MB header into a PCH took 54 seconds; compiling that
 shard then took 10.7 seconds versus 536.9 seconds normally, with identical
 object bytes. This measures one shard, not full-build or simulation speed.
 
+An existing split DUT can also be resharded without regenerating it from RTL:
+
+```sh
+python -m flashsim.reshard create --source model --output model-resharded \
+  --max-mib 16 --commit-parts 16
+python -m flashsim.reshard verify --source model --output model-resharded
+```
+
+The output directory must be new. The transformer splits complete generated
+methods and, when requested, an existing chunked commit dispatcher. It adds a
+header guard if needed and records hashes of the original and derived files
+and transformer in `flashsim-reshard.json`. Verification reconstructs the
+original method bytes and checks the commit partition. Build all derived DUT
+objects and the wrapper against its header; never mix them with old objects.
+The output is derived C++, not a fresh RTL emission. These checks do not replace
+running and validating the target simulation.
+
 For compilers that support it, `FLASHSIM_STRICT_FLEX_ARRAYS=1` passes
 `-fstrict-flex-arrays=1`. This can reduce Clang's compile time on generated
 models with very large classes and many fixed-size arrays. It treats trailing
