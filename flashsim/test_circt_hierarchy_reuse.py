@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+from collections import Counter
 
 import pytest
 
@@ -9,6 +10,7 @@ from flashsim.circt_frontend import (
     _flatten, _lower_module, _reachable_instances, _split_modules, parse_hw_mlir,
 )
 from flashsim.emit import emit_cpp
+from flashsim.ir import AlwaysFF, Assign, Const, Id, Module, NbAssign, Signal
 from flashsim.opt import optimize
 
 
@@ -68,6 +70,40 @@ int main() {
   d.a = 44; d.b = 55; d.c = 66; d.tick();
   d.eval_x(); d.eval_y(); d.eval_z(); d.eval_u(); d.eval_v();
   return d.x != 44 || d.y != 55 || d.z != 66 || d.u != 55 || d.v != 66;
+}
+''')
+    binary = tmp_path / "check"
+    subprocess.run([compiler, "-std=c++17", "-O1", str(main), "-o", str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+
+
+def test_private_child_names_remain_distinct_from_parent_and_instance_ports(tmp_path):
+    compiler = shutil.which("c++")
+    if not compiler:
+        pytest.skip("C++ compiler unavailable")
+    parent_signals = {name: Signal(name, width, kind) for name, width, kind in [
+        ("clock", 1, "input"), ("data", 8, "input"), ("out", 8, "output"),
+        ("one_x", 8, "wire"), ("one_x__flashsim_local", 8, "wire")]}
+    parent = Module("Top", parent_signals,
+        [Assign("one_x", Const(55, 8)), Assign("one_x__flashsim_local", Const(66, 8))],
+        AlwaysFF("clock", []), ["clock", "data", "out"])
+    parent.instances = [(["out"], "one", "Leaf", {"clock": "clock", "d": "data"})]
+    leaf_signals = {name: Signal(name, width, kind) for name, width, kind in [
+        ("clock", 1, "input"), ("d", 8, "input"), ("q", 8, "output"),
+        ("x", 8, "reg")]}
+    leaf = Module("Leaf", leaf_signals, [Assign("q", Id("x"))],
+                  AlwaysFF("clock", [NbAssign("x", Id("d"))]), ["clock", "d", "q"])
+    result = _flatten(parent, {"Leaf": leaf}, Counter(Leaf=1))
+    registers = [name for name, signal in result.signals.items() if signal.kind == "reg"]
+    assert len(registers) == 1
+    assert registers[0] not in parent_signals
+    (tmp_path / "dut.h").write_text(emit_cpp(optimize(result)))
+    main = tmp_path / "check.cpp"
+    main.write_text('''#include "dut.h"
+int main() {
+  TopDut d;
+  d.data = 42; d.tick(); d.eval_out(); if (d.out != 42) return 1;
+  d.data = 81; d.tick(); d.eval_out(); return d.out != 81;
 }
 ''')
     binary = tmp_path / "check"

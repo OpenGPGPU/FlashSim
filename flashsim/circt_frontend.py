@@ -671,7 +671,10 @@ def _flatten(mod: Module, lib: dict[str, Module], remaining: Counter[str]) -> Mo
             )
         out_map = dict(zip(out_ports, results))
         rename: dict[str, str] = {}
-        reserved = set(signals) | set(out_map.values()) | set(inputs.values())
+        # The parent signal dictionary is already the live set of occupied
+        # names. Copy only the current instance's external names; copying the
+        # whole parent once per instance is quadratic in large hierarchies.
+        external = set(out_map.values()) | set(inputs.values())
         for n, sig in callee.signals.items():
             if n in inputs:
                 mapped = inputs[n]
@@ -682,9 +685,8 @@ def _flatten(mod: Module, lib: dict[str, Module], remaining: Counter[str]) -> Mo
                 # A parent result such as left.q can normalize to the same
                 # name as a prefixed private child wire. They are different
                 # values, including when a bind makes the output a reference.
-                while mapped in reserved:
+                while mapped in signals or mapped in external:
                     mapped += "__flashsim_local"
-                reserved.add(mapped)
             rename[n] = mapped
             if n in inputs:
                 continue
