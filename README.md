@@ -98,7 +98,10 @@ before product qualification;
 an assertion-free FlashSim screen cannot replace that evidence.
 
 Large `GpuHostSystemAxi` models are emitted as C++ method shards and compiled
-in parallel. Multi-CU RTL is detected from the generated source and uses a
+in parallel. Set `FLASHSIM_CIRCT_SERIAL=1` to disable CIRCT's internal
+threading during RTL import when memory is constrained. This setting is part
+of the imported MLIR cache identity and does not disable assertions. Multi-CU
+RTL is detected from the generated source and uses a
 32-way split by default; set `FLASHSIM_DUT_SHARDS` to pin the split count for
 machines with a smaller memory or compiler parallelism budget. Set
 `FLASHSIM_COMPILE_JOBS` to limit parallel shard compilation (including the

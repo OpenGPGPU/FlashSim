@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from collections import Counter
@@ -815,6 +816,13 @@ def verilog_sources(path: Path, *, assertions: bool = False) -> list[Path]:
     return files if files else [path]
 
 
+def circt_serial_import() -> bool:
+    value = os.environ.get("FLASHSIM_CIRCT_SERIAL", "0")
+    if value not in ("0", "1"):
+        raise CirctError("FLASHSIM_CIRCT_SERIAL must be 0 or 1")
+    return value == "1"
+
+
 def circt_verilog_command(path: Path, *, assertions: bool = False) -> list[str]:
     tool = find_bin("circt-verilog")
     if tool is None:
@@ -824,7 +832,8 @@ def circt_verilog_command(path: Path, *, assertions: bool = False) -> list[str]:
     srcs = [str(p) for p in files]
     # Bind layers recursively include one another. Their generated guards
     # must share a compilation unit rather than instantiate checks twice.
-    return [str(tool), *(["--single-unit"] if assertions else []),
+    return [str(tool), *(["--mlir-disable-threading"] if circt_serial_import() else []),
+            *(["--single-unit"] if assertions else []),
             *("-I"+directory for directory in includes), *srcs, "-o", "-"]
 
 
