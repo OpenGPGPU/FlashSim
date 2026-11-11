@@ -127,6 +127,25 @@ pieces; use `FLASHSIM_COMPILE_JOBS` to fit the available memory. These options
 are opt-in; measure simulator runtime for the workload before selecting them
 for performance runs. Shard cache keys include the compiler choices.
 
+For Clang ARTI builds, generate the model with the current FlashSim and set
+`FLASHSIM_PRECOMPILED_HEADER=1` when running `build_embedded.sh`. The builder
+creates a temporary precompiled `dut.h` for each optimization level, with the
+same alias, flex-array and PGO flags as its shards; the wrapper is still built
+normally. It disables ccache for that build and removes the temporary headers
+on exit. This option needs temporary disk and memory and rejects older,
+unguarded generated headers. For example:
+
+```sh
+FLASHSIM_COMMIT_PARTS=16 python -m flashsim arti-model design.sv -o model --frontend circt
+QEMU_SRC=/path/to/qemu FLASHSIM_PRECOMPILED_HEADER=1 FLASHSIM_COMPILE_JOBS=2 \
+  FLASHSIM_COMMIT_CHUNKS_OPT=-O0 bash model/build_embedded.sh
+```
+
+In one isolated Clang experiment on a 23 MB commit shard from a 32x32 four-CU
+host, compiling a 625 MB header into a PCH took 54 seconds; compiling that
+shard then took 10.7 seconds versus 536.9 seconds normally, with identical
+object bytes. This measures one shard, not full-build or simulation speed.
+
 For compilers that support it, `FLASHSIM_STRICT_FLEX_ARRAYS=1` passes
 `-fstrict-flex-arrays=1`. This can reduce Clang's compile time on generated
 models with very large classes and many fixed-size arrays. It treats trailing

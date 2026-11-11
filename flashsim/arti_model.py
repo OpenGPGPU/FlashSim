@@ -384,6 +384,7 @@ SHARD_OPT="${FLASHSIM_SHARD_OPT:--O2}"
 COMMIT_CHUNKS_OPT="${FLASHSIM_COMMIT_CHUNKS_OPT:-$SHARD_OPT}"
 CONSERVATIVE_ALIAS="${FLASHSIM_CONSERVATIVE_ALIAS:-0}"
 STRICT_FLEX_ARRAYS="${FLASHSIM_STRICT_FLEX_ARRAYS:-0}"
+PRECOMPILED_HEADER="${FLASHSIM_PRECOMPILED_HEADER:-0}"
 CALLBACK_WRITE_BYTES="${FLASHSIM_WRITE_CALLBACK_BYTES:-8}"
 case "$CALLBACK_WRITE_BYTES" in
   1|2|4|8|16|32|64) ;;
@@ -405,30 +406,40 @@ case "$STRICT_FLEX_ARRAYS" in
   0|1) ;;
   *) echo "FLASHSIM_STRICT_FLEX_ARRAYS must be 0 or 1" >&2; exit 1 ;;
 esac
+case "$PRECOMPILED_HEADER" in
+  0|1) ;;
+  *) echo "FLASHSIM_PRECOMPILED_HEADER must be 0 or 1" >&2; exit 1 ;;
+esac
 # Keep this opt-in: a profile from a tiny smoke test can over-specialize the
 # model and make a full-system workload slower.
 OBJS=()
 
-compile_one() {
-  local src="$1" obj="$2" opt="$3"
-  local CXXFLAGS_BASE=(-std=gnu++17 -fPIC -fPIE -w -Wno-parentheses-equality -fbracket-depth=4096 -I.)
+set_base_flags() {
+  CXXFLAGS_BASE=(-std=gnu++17 -fPIC -fPIE -w -Wno-parentheses-equality -fbracket-depth=4096 -I.)
   if [[ "$CONSERVATIVE_ALIAS" == 1 ]]; then
     CXXFLAGS_BASE+=(-fno-strict-aliasing)
   fi
   if [[ "$STRICT_FLEX_ARRAYS" == 1 ]]; then
     CXXFLAGS_BASE+=(-fstrict-flex-arrays=1)
   fi
+  if [[ -n "$PGO_PROFILE" ]]; then
+    CXXFLAGS_BASE+=("-fprofile-instr-use=$PGO_PROFILE")
+  elif [[ "$PGO_GENERATE" == 1 ]]; then
+    CXXFLAGS_BASE+=(-fprofile-instr-generate)
+  fi
+}
+
+compile_one() {
+  local src="$1" obj="$2" opt="$3"
+  local -a CXXFLAGS_BASE
+  set_base_flags
   if [[ "$src" == arti_rtl_model.cpp ]]; then
     CXXFLAGS_BASE+=("-DARTI_MODEL_WRITE_CALLBACK_BYTES=$CALLBACK_WRITE_BYTES")
+  elif [[ "$PRECOMPILED_HEADER" == 1 && "$(head -n 1 "$src")" == '#include "dut.h"' ]]; then
+    CXXFLAGS_BASE+=(-include-pch "$PCH_DIR/${opt#-}.pch")
   fi
   echo "  c++ $opt $src"
-  if [[ -n "$PGO_PROFILE" ]]; then
-    c++ "${CXXFLAGS_BASE[@]}" -fprofile-instr-use="$PGO_PROFILE" "$opt" -c "$src" -o "$obj"
-  elif [[ "$PGO_GENERATE" == 1 ]]; then
-    c++ "${CXXFLAGS_BASE[@]}" -fprofile-instr-generate "$opt" -c "$src" -o "$obj"
-  else
-    c++ "${CXXFLAGS_BASE[@]}" "$opt" -c "$src" -o "$obj"
-  fi
+  c++ "${CXXFLAGS_BASE[@]}" "$opt" -c "$src" -o "$obj"
 }
 
 shopt -s nullglob
@@ -449,9 +460,11 @@ if ((${#SHARDS[@]} > 0)); then
   [[ "$NPROC" =~ ^[1-9][0-9]*$ ]] || {
     echo "FLASHSIM_COMPILE_JOBS must be a positive integer" >&2; exit 1;
   }
-  export -f compile_one
-  export PGO_PROFILE PGO_GENERATE CONSERVATIVE_ALIAS STRICT_FLEX_ARRAYS
+  export -f compile_one set_base_flags
+  PCH_DIR=""
   tasks=()
+  pch_opts=()
+  pch_opts_seen=" "
   for src in "${SHARDS[@]}"; do
     obj="${src%.cpp}.o"
     OBJS+=("$obj")
@@ -460,7 +473,34 @@ if ((${#SHARDS[@]} > 0)); then
     [[ "$src" != "dut_commit_chunks.cpp" ]] || opt="$COMMIT_CHUNKS_OPT"
     [[ ! "$src" =~ ^dut_commit_part[0-9]+\.cpp$ ]] || opt="$COMMIT_CHUNKS_OPT"
     tasks+=("$src" "$obj" "$opt")
+    if [[ "$PRECOMPILED_HEADER" == 1 && "$(head -n 1 "$src")" == '#include "dut.h"' ]]; then
+      case "$pch_opts_seen" in
+        *" $opt "*) ;;
+        *) pch_opts+=("$opt"); pch_opts_seen+="$opt " ;;
+      esac
+    fi
   done
+  if [[ "$PRECOMPILED_HEADER" == 1 && ${#pch_opts[@]} -gt 0 ]]; then
+    [[ "$(head -n 1 dut.h)" == '#pragma once' ]] || {
+      echo "precompiled headers require a newly generated guarded dut.h" >&2; exit 1;
+    }
+    compiler_version="$(c++ --version)"
+    [[ "$compiler_version" == *clang* || "$compiler_version" == *Clang* ]] || {
+      echo "FLASHSIM_PRECOMPILED_HEADER requires Clang" >&2; exit 1;
+    }
+    # Cache wrappers need additional PCH-specific assumptions. Bypass them for
+    # this opt-in path; each temporary PCH uses precisely the shard flags.
+    export CCACHE_DISABLE=1
+    PCH_DIR="$(mktemp -d "${TMPDIR:-/tmp}/flashsim-pch.XXXXXX")"
+    trap 'rm -rf "$PCH_DIR"' EXIT
+    for opt in "${pch_opts[@]}"; do
+      CXXFLAGS_BASE=()
+      set_base_flags
+      echo "  c++ $opt precompiled dut.h"
+      c++ "${CXXFLAGS_BASE[@]}" "$opt" -x c++-header dut.h -o "$PCH_DIR/${opt#-}.pch"
+    done
+  fi
+  export PGO_PROFILE PGO_GENERATE CONSERVATIVE_ALIAS STRICT_FLEX_ARRAYS PRECOMPILED_HEADER PCH_DIR
   # Compile the largest sources first to reduce the final serial tail.
   # Keep OBJS in filename order so scheduling does not reorder the archive.
   python3 -c 'import os,sys

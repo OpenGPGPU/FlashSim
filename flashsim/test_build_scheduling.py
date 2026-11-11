@@ -11,7 +11,7 @@ import pytest
 from flashsim.arti_model import BUILD_EMBEDDED
 
 
-def build_fixture(tmp_path, fail="", *, conservative=False, chunk_opt=None, strict_flex=None):
+def build_fixture(tmp_path, fail="", *, conservative=False, chunk_opt=None, strict_flex=None, pch=False):
     if not shutil.which("ar") or not shutil.which("xargs"):
         pytest.skip("archive/build tools unavailable")
     model=tmp_path/"model with spaces"
@@ -21,6 +21,11 @@ def build_fixture(tmp_path, fail="", *, conservative=False, chunk_opt=None, stri
                  "dut_commit_part000.cpp","dut_commit_helpers.cpp"):
         (model/name).write_text("// fixture\n")
     (model/"dut_commit_helpers.cpp").write_text("// largest source\n"*100)
+    if pch:
+        (model/"dut.h").write_text("#pragma once\n")
+        for path in model.glob("dut_*.cpp"):
+            if path.name != "dut_commit_helpers.cpp":
+                path.write_text('#include "dut.h"\n' + path.read_text())
     script=model/"build_embedded.sh"
     script.write_text(BUILD_EMBEDDED.replace("__TOP__","Fixture"))
     bindir=tmp_path/"bin"
@@ -28,7 +33,11 @@ def build_fixture(tmp_path, fail="", *, conservative=False, chunk_opt=None, stri
     compiler=bindir/"c++"
     compiler.write_text("#!"+sys.executable+"\n"+'''import os,sys,time,json,fcntl
 from pathlib import Path
-src=sys.argv[sys.argv.index("-c")+1]
+if "--version" in sys.argv:
+    print("clang fixture")
+    sys.exit(0)
+src=(sys.argv[sys.argv.index("-c")+1] if "-c" in sys.argv else
+     sys.argv[sys.argv.index("-x")+2])
 def record(event):
     with open(os.environ["BUILD_EVENTS"],"a") as f:
         fcntl.flock(f,fcntl.LOCK_EX)
@@ -64,12 +73,16 @@ sys.exit(subprocess.run([REAL_XARGS,*sys.argv[1:]],input=raw).returncode)
     env.pop("FLASHSIM_CONSERVATIVE_ALIAS",None)
     env.pop("FLASHSIM_COMMIT_CHUNKS_OPT",None)
     env.pop("FLASHSIM_STRICT_FLEX_ARRAYS",None)
+    env.pop("FLASHSIM_PRECOMPILED_HEADER",None)
     if conservative:
         env["FLASHSIM_CONSERVATIVE_ALIAS"]="1"
     if chunk_opt is not None:
         env["FLASHSIM_COMMIT_CHUNKS_OPT"]=chunk_opt
     if strict_flex is not None:
         env["FLASHSIM_STRICT_FLEX_ARRAYS"]=strict_flex
+    if pch:
+        env["FLASHSIM_PRECOMPILED_HEADER"]="1"
+        env["TMPDIR"]=str(tmp_path)
     result=subprocess.run(["bash",str(script)],env=env,capture_output=True,text=True)
     rows=[json.loads(line) for line in events.read_text().splitlines()] if events.exists() else []
     return model,stage,result,rows,profile
@@ -127,3 +140,33 @@ def test_invalid_flex_option_fails_before_compiling(tmp_path):
     assert result.returncode!=0
     assert "FLASHSIM_STRICT_FLEX_ARRAYS must be 0 or 1" in result.stderr
     assert not rows
+
+
+def test_pch_keeps_profile_and_flags_per_optimization_level(tmp_path):
+    model,stage,result,rows,profile=build_fixture(tmp_path,conservative=True,
+        chunk_opt="-O0",strict_flex="1",pch=True)
+    assert result.returncode==0,result.stdout+result.stderr
+    starts=[row for row in rows if row["event"]=="start"]
+    headers=[row for row in starts if row["source"]=="dut.h"]
+    assert len(headers)==2
+    assert {next(v for v in row["args"] if v in ("-O0","-O2")) for row in headers}=={"-O0","-O2"}
+    for row in starts:
+        assert "-fprofile-instr-use="+str(profile) in row["args"]
+        assert "-fno-strict-aliasing" in row["args"]
+        assert "-fstrict-flex-arrays=1" in row["args"]
+        if row["source"] in ("dut.h","dut_commit_helpers.cpp","arti_rtl_model.cpp"):
+            assert "-include-pch" not in row["args"]
+        else:
+            index=row["args"].index("-include-pch")
+            opt=next(v for v in row["args"] if v in ("-O0","-O2"))
+            assert Path(row["args"][index+1]).name==opt[1:]+".pch"
+    assert not list(tmp_path.glob("flashsim-pch.*"))
+    assert (stage/"hw/misc/libarti_rtl_model.a").exists()
+
+
+def test_failed_pch_build_cleans_temporary_files_and_cannot_publish(tmp_path):
+    model,stage,result,rows,_=build_fixture(tmp_path,fail="dut.h",pch=True)
+    assert result.returncode!=0
+    assert not (model/"libarti_rtl_model.a").exists()
+    assert not (stage/"hw/misc/libarti_rtl_model.a").exists()
+    assert not list(tmp_path.glob("flashsim-pch.*"))

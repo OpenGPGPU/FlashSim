@@ -2510,6 +2510,7 @@ def emit_cpp(mod: Module) -> str:
     _LARGE = large
 
     lines: list[str] = [
+        "#pragma once",
         "#include <cstdint>",
         "#include <cstring>",
         *(["#include <stdexcept>", "#include <string>"] if mod.assertions else []),
