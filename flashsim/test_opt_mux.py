@@ -244,6 +244,36 @@ def test_cse_sibling_or_prefixes_factors_shared_spine() -> None:
     )
 
 
+def test_cse_handles_shrinking_prefixes_and_preserves_each_condition() -> None:
+    from flashsim.ir import BinOp
+    from flashsim.opt import _and_chain, _cse_sibling_or_prefixes
+
+    common = [Id(f"p{i}") for i in range(20)]
+    body = [If(_and_chain(common[:length] + [Id(f"u{i}")]),
+               [NbAssign(f"r{i}", Const(1, 1))], [])
+            for i, length in enumerate((20, 18, 15, 10))]
+    assigns = {}
+    transformed = _cse_sibling_or_prefixes(body, assigns)
+    assert len(assigns) == 1
+    assert len(transformed) == len(body)
+
+    def evaluate(expr, values):
+        if isinstance(expr, Id):
+            return values[expr.name]
+        if isinstance(expr, BinOp) and expr.op == "&":
+            return evaluate(expr.a, values) & evaluate(expr.b, values)
+        raise TypeError(expr)
+
+    scenarios = [None, *(f"p{i}" for i in range(20)), *(f"u{i}" for i in range(4))]
+    for missing in scenarios:
+        values = {f"p{i}": 1 for i in range(20)} | {f"u{i}": 1 for i in range(4)}
+        if missing is not None:
+            values[missing] = 0
+        values.update({name: evaluate(expr, values) for name, expr in assigns.items()})
+        assert [evaluate(stmt.cond, values) for stmt in transformed] == [
+            evaluate(stmt.cond, values) for stmt in body]
+
+
 if __name__ == "__main__":
     test_self_reference_else_is_a_hold()
     test_self_reference_then_inverts_the_condition()

@@ -1035,16 +1035,6 @@ def _chain_op(op: str, parts: list[Expr]) -> Expr:
     return expr
 
 
-def _common_term_prefix(seqs: list[list[Expr]]) -> int:
-    if not seqs:
-        return 0
-    n = min(len(s) for s in seqs)
-    i = 0
-    while i < n and all(_expr_eq(s[i], seqs[0][i]) for s in seqs[1:]):
-        i += 1
-    return i
-
-
 def _cse_or_prefix_run(
     stmts: list[Stmt], assigns: dict[str, Expr], counter: list[int]
 ) -> list[Stmt]:
@@ -1068,28 +1058,34 @@ def _cse_or_prefix_run(
                 continue
             group = [stmt]
             seqs = [first]
+            # The current group already shares `pre` terms. Comparing its
+            # members again for every new sibling makes a long run quadratic.
+            pre = len(first)
+            prefix_nodes = [0]
             j = i + 1
             while j < len(stmts):
                 nxt = stmts[j]
                 if not isinstance(nxt, If):
                     break
                 nl = _flatten_op(nxt.cond, op)
-                trial = seqs + [nl]
-                pre = _common_term_prefix(trial)
-                if pre < 1:
+                limit = min(pre, len(nl))
+                next_pre = 0
+                while next_pre < limit and _expr_eq(nl[next_pre], first[next_pre]):
+                    next_pre += 1
+                if next_pre < 1:
                     break
-                nodes = _expr_nodes(_chain_op(op, trial[0][:pre]))
+                while len(prefix_nodes) <= next_pre:
+                    prefix_nodes.append(prefix_nodes[-1] + _expr_nodes(first[len(prefix_nodes)-1]))
+                nodes = prefix_nodes[next_pre] + next_pre - 1
                 if nodes < _CSE_CHAIN_NODES_MIN:
                     break
                 group.append(nxt)
                 seqs.append(nl)
+                pre = next_pre
                 j += 1
             if len(group) < _CSE_OR_GROUP_MIN:
                 continue
-            pre = _common_term_prefix(seqs)
-            if pre < 1:
-                continue
-            nodes = _expr_nodes(_chain_op(op, seqs[0][:pre]))
+            nodes = prefix_nodes[pre] + pre - 1
             if nodes > best_nodes:
                 best_op, best_group, best_seqs, best_pre, best_nodes = (
                     op,
