@@ -779,8 +779,7 @@ def verilog_sources(path: Path, *, assertions: bool = False) -> list[Path]:
             if not line or line.startswith("#") or line.startswith("//"):
                 continue
             normalized = line.replace("\\", "/")
-            if "verification/" in normalized and not (
-                    assertions and "verification/assert/" in normalized):
+            if "verification/" in normalized and not assertions:
                 continue
             candidate = (path.parent / line).resolve()
             if not candidate.is_file():
