@@ -515,6 +515,51 @@ int main(int argc,char **) {
     assert failing.returncode==42 and "selected reference mismatch" in failing.stderr
 
 
+def test_grouped_assertions_share_roots_without_losing_preedge_effects(tmp_path):
+    if shutil.which("c++") is None:
+        pytest.skip("C++ compiler unavailable")
+    signals = {name: Signal(name, width, kind) for name, width, kind in [
+        ("clk", 1, "input"), ("a", 1, "input"), ("b", 1, "input"),
+        ("data", 8, "input"), ("bad0", 1, "wire"), ("bad1", 1, "wire"),
+        ("shown", 8, "wire"), ("q", 8, "reg")]}
+    body = [NbAssign("q", BinOp("+", Id("q"), Const(1, 8)))]
+    for i in range(260):
+        name = "r" + str(i)
+        signals[name] = Signal(name, 8, "reg")
+        body.append(NbAssign(name, Id("data")))
+    assertions = [ClockedAssertion(Id("clk"), Id("bad0"), "early", "early")
+                  for _ in range(63)]
+    assertions.append(ClockedPrint(Id("clk"), Const(1, 1),
+        ("value=", DecimalFormat(Id("shown"), 8, 0), "\n"), "print", "stdout"))
+    assertions.append(ClockedAssertion(Id("clk"), Id("bad1"), "late", "late"))
+    mod = Module("Grouped", signals,
+        [Assign("bad0", Id("a")), Assign("bad1", Id("b")),
+         Assign("shown", BinOp("+", Id("data"), Id("q")))],
+        AlwaysFF("clk", body), ["clk", "a", "b", "data"], assertions=assertions)
+    (tmp_path / "dut.h").write_text(emit_cpp(optimize(mod)))
+    main = r'''
+#include "dut.h"
+#include <string>
+int main() {
+  GroupedDut d; d.a=0; d.b=0; d.data=10; d.tick();
+  d.data=20; d.tick();
+  d.data=30; d.b=1;
+  try { d.tick(); return 1; } catch(const std::exception &e) {
+    if(std::string(e.what()).find("late") == std::string::npos || d.q != 2) return 2;
+  }
+  d.b=0; d.a=1;
+  try { d.tick(); return 3; } catch(const std::exception &e) {
+    if(std::string(e.what()).find("early") == std::string::npos || d.q != 2) return 4;
+  }
+  d.a=0; d.data=40; d.tick();
+  return d.q != 3;
+}
+'''
+    result = subprocess.run([str(_native(tmp_path, main))], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "value=10\nvalue=21\nvalue=32\nvalue=42\n"
+
+
 def test_wide_assertion_compares_every_limb(tmp_path):
     if shutil.which("c++") is None:
         pytest.skip("C++ compiler unavailable")

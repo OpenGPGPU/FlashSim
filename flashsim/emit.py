@@ -3097,6 +3097,10 @@ def emit_cpp(mod: Module) -> str:
                                   for expr in observation_exprs(a))) & cached
             # Use each wire/pass's own guard, not the shared NBA demand marker.
             lines.extend(dict.fromkeys(_eval_invoke(name, 4) for name in sorted(roots)))
+            # Each observation below reads the same pre-edge state. Their
+            # cached roots were just demanded above, so don't emit another
+            # validity guard for every use within the group.
+            _EAGER_DONE = set(roots)
             for local_index, assertion in enumerate(group):
                 condition = "_flashsim_check_"+str(group_index*64+local_index)
                 while condition in sigs:
@@ -3143,6 +3147,7 @@ def emit_cpp(mod: Module) -> str:
                                  ' + std::to_string(_nt) + ")");')
                 lines.append("    }")
             lines.extend(["  }", ""])
+            _EAGER_DONE = set()
         if len(groups)>1:
             lines.append("  __attribute__((noinline)) void _check_assertions() {")
             lines.extend(f"    _check_assertions_{i}();" for i in range(len(groups)))
