@@ -17,6 +17,7 @@ import re
 import sys
 from collections import ChainMap, Counter, deque
 from collections.abc import Mapping
+from functools import lru_cache
 
 from flashsim.ir import (
     AlwaysFF,
@@ -1306,11 +1307,28 @@ def _merge_sop_terms(
                 return None
         return frozenset(lits)
 
+    @lru_cache(maxsize=8192)
+    def simple_literal_key(literal) -> str:
+        return repr(literal)
+
+    def literal_key(literal) -> str:
+        # Cache the common small atoms without retaining potentially large
+        # expression trees and their representations across all cones.
+        if isinstance(literal[0], (Id, Const)):
+            return simple_literal_key(literal)
+        return repr(literal)
+
+    @lru_cache(maxsize=2048)
+    def simple_term_key(term: frozenset) -> tuple[str, ...]:
+        return tuple(sorted(map(literal_key, term)))
+
     def term_key(term: frozenset) -> tuple[str, ...]:
         # repr(frozenset) preserves its hash-dependent iteration order.
         # Canonicalize literals as well as the outer collection: otherwise
         # identical RTL needlessly invalidates large compiler-cache shards.
-        return tuple(sorted(map(repr, term)))
+        if all(isinstance(literal[0], (Id, Const)) for literal in term):
+            return simple_term_key(term)
+        return tuple(sorted(map(literal_key, term)))
 
     def simplify(terms: set[frozenset]) -> set[frozenset]:
         # Large CIRCT mux cones commonly contain pairs that differ only in
@@ -1327,7 +1345,7 @@ def _merge_sop_terms(
                 for t in snapshot:
                     if t not in terms:
                         continue
-                    for k, pol in sorted(t, key=repr):
+                    for k, pol in sorted(t, key=literal_key):
                         candidate = (t - {(k, pol)}) | {(k, not pol)}
                         if candidate in terms:
                             terms.discard(t)
@@ -1370,7 +1388,7 @@ def _merge_sop_terms(
 
     def build(lits: frozenset, negs: dict[Expr, Expr]) -> Expr:
         parts: list[Expr] = []
-        for k, pol in sorted(lits, key=repr):
+        for k, pol in sorted(lits, key=literal_key):
             if pol:
                 parts.append(k)
             else:
