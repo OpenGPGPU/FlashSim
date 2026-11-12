@@ -19,6 +19,16 @@ INCLUDE = b'#include "dut.h"\n'
 GUARD = b'#pragma once\n'
 NUMBERED = re.compile(r"dut_(\d+)\.cpp")
 METHOD = re.compile(rb"^void ([A-Za-z_]\w*)::([A-Za-z_]\w*)\(\) \{\n$")
+STORE_DECL = re.compile(rb"^  __attribute__\(\(noinline\)\) void _mem_store_part_(\d+)\(\);\n$")
+STORE_CALL = re.compile(rb"^    if \((__we\d+(?: \|\| __we\d+)*)\) _mem_store_part_(\d+)\(\);\n$")
+STORE_PORT = re.compile(rb"^    if \(__we(\d+)\) \{\n", re.MULTILINE)
+STORE_CONTEXT = re.compile(
+    rb"\b(?:__func__|__FUNCTION__|__PRETTY_FUNCTION__|__builtin_FUNCTION|"
+    rb"__FILE__|__BASE_FILE__|__FILE_NAME__|__LINE__|__COUNTER__|"
+    rb"__DATE__|__TIME__|__TIMESTAMP__|__builtin_FILE|__builtin_LINE|"
+    rb"__builtin_COLUMN|__builtin_source_location|source_location|_Pragma)\b|"
+    rb"(?m:^[ \t]*#)|\bassert\s*\("
+)
 OPTNONE = (b"#if defined(__clang__)\n"
            b"__attribute__((optnone, noinline))\n"
            b"#else\n"
@@ -26,6 +36,85 @@ OPTNONE = (b"#if defined(__clang__)\n"
            b"#endif\n")
 OPTNONE_LINES = OPTNONE.splitlines(keepends=True)
 MANIFEST = "flashsim-reshard.json"
+
+
+class _LocalStores:
+    """Move emitted store helpers into equivalent local noinline closures."""
+
+    def __init__(self, source: Path, class_name: str | None = None):
+        helper = source / "dut_mem_stores.cpp"
+        if not helper.is_file():
+            raise ValueError("local store helpers require outlined memory stores")
+        text = helper.read_bytes()
+        first = re.match(re.escape(INCLUDE + b"\n") +
+                         rb"void ([A-Za-z_]\w*)::_mem_store_part_0\(\) \{\n", text)
+        if not first:
+            raise ValueError("unexpected outlined store helper class")
+        self.class_name = first.group(1).decode("ascii")
+        if class_name is not None and self.class_name != class_name:
+            raise ValueError("outlined store helpers use a different DUT class")
+        class_name = self.class_name
+        prefix = rb"^void " + re.escape(class_name.encode()) + rb"::_mem_store_part_(\d+)\(\) \{\n"
+        pattern = re.compile(prefix + rb"(.*?)^\}\n\n", re.MULTILINE | re.DOTALL)
+        matches = list(pattern.finditer(text))
+        self.parts = {int(match.group(1)): match.group(2) for match in matches}
+        if (not matches or len(self.parts) != len(matches) or
+                sorted(self.parts) != list(range(len(self.parts))) or
+                pattern.sub(b"", text) != INCLUDE + b"\n"):
+            raise ValueError("unexpected outlined store helper contents")
+        if any(STORE_CONTEXT.search(body) or b"_mem_store_part_" in body
+               for body in self.parts.values()):
+            raise ValueError("outlined store helpers use context-sensitive syntax")
+        self.seen: set[int] = set()
+
+    def line(self, line: bytes, method: str | None) -> bytes:
+        if b"_mem_store_part_" not in line:
+            return line
+        match = STORE_CALL.fullmatch(line)
+        if not match or method != "_mem_store":
+            raise ValueError("unexpected outlined store helper reference")
+        index = int(match.group(2))
+        if index not in self.parts or index in self.seen:
+            raise ValueError("missing or repeated outlined store helper call")
+        body = self.parts[index]
+        guards = [int(item) for item in re.findall(rb"__we(\d+)", match.group(1))]
+        ports = [int(item) for item in STORE_PORT.findall(body)]
+        if not ports or guards != ports:
+            raise ValueError("outlined store guards do not match helper ports")
+        self.seen.add(index)
+        return (b"    if (" + match.group(1) + b") [this]() __attribute__((noinline)) {\n" +
+                body + b"    }();\n")
+
+    def finish(self) -> None:
+        if sorted(self.seen) != sorted(self.parts):
+            raise ValueError("not all outlined store helpers were called")
+
+    def header_lines(self, stream):
+        removed = []
+        for line in stream:
+            match = STORE_DECL.fullmatch(line)
+            if match:
+                removed.append(int(match.group(1)))
+            elif b"_mem_store_part_" in line:
+                raise ValueError("unexpected outlined store helper declaration")
+            else:
+                yield line
+        if removed != sorted(self.parts):
+            raise ValueError("outlined store declarations do not match helpers")
+
+
+def _no_other_store_references(inputs: list[Path]) -> None:
+    """Reject references outside the numbered methods or helper definitions."""
+    for path in inputs:
+        if path.name in ("dut.h", "dut_mem_stores.cpp") or NUMBERED.fullmatch(path.name):
+            continue
+        tail = b""
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                data = tail + block
+                if b"_mem_store_part_" in data:
+                    raise ValueError("unexpected store helper reference in " + path.name)
+                tail = data[-32:]
 
 
 def digest(path: Path) -> str:
@@ -72,7 +161,7 @@ def _large_methods(source: Path, threshold: int) -> list[str]:
 
 
 def _split_methods(source: Path, out: Path, maximum: int,
-                   optnone: set[str]) -> tuple[list[str], str | None]:
+                   optnone: set[str], stores: _LocalStores | None = None) -> tuple[list[str], str | None]:
     number = NUMBERED.fullmatch(source.name).group(1)
     outputs: list[str] = []
     current = None
@@ -80,6 +169,7 @@ def _split_methods(source: Path, out: Path, maximum: int,
     in_method = False
     found = False
     class_name = None
+    method_name = None
 
     def start() -> None:
         nonlocal current, size, found
@@ -105,6 +195,9 @@ def _split_methods(source: Path, out: Path, maximum: int,
                         if class_name is not None and name != class_name:
                             raise ValueError("multiple DUT classes in " + source.name)
                         class_name = name
+                        method_name = match.group(2).decode("ascii")
+                        if stores is not None and name != stores.class_name:
+                            raise ValueError("numbered shard and store helper classes differ")
                         if size >= maximum and found:
                             current.close()
                             start()
@@ -119,7 +212,11 @@ def _split_methods(source: Path, out: Path, maximum: int,
                     in_method = False
                 elif line[:1] not in (b" ", b"\t", b"\n", b"\r"):
                     raise ValueError("unexpected unindented method content in " + source.name)
-                current.write(line)
+                current.write(stores.line(line, method_name) if stores is not None else line)
+                if not in_method:
+                    method_name = None
+                # Partition at the same original method boundaries even when a
+                # closure changes the physical size of the emitted method.
                 size += len(line)
         if in_method:
             raise ValueError("unterminated method in " + source.name)
@@ -129,8 +226,26 @@ def _split_methods(source: Path, out: Path, maximum: int,
     return outputs, class_name
 
 
+def _localized_digest(path: Path, stores: _LocalStores) -> str:
+    """Hash the exact method stream expected after localizing store calls."""
+    value = hashlib.sha256()
+    method = None
+    with path.open("rb") as stream:
+        for line in stream:
+            if method is None:
+                match = METHOD.fullmatch(line)
+                if match:
+                    if match.group(1).decode("ascii") != stores.class_name:
+                        raise ValueError("numbered shard and store helper classes differ")
+                    method = match.group(2).decode("ascii")
+            value.update(stores.line(line, method))
+            if line == b"}\n":
+                method = None
+    return value.hexdigest()
+
+
 def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
-           optnone_bytes: int = 0) -> None:
+           optnone_bytes: int = 0, local_store_helpers: bool = False) -> None:
     source, out = source.resolve(), out.resolve()
     if source == out or source in out.parents or out in source.parents:
         raise ValueError("source and output must be separate directories")
@@ -141,6 +256,11 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
         raise ValueError("input has already been method-resharded")
     if commit_parts > 1 and any(re.fullmatch(r"dut_commit_part\d+\.cpp", p.name) for p in inputs):
         raise ValueError("input commit helpers are already partitioned")
+    if not isinstance(local_store_helpers, bool):
+        raise ValueError("local_store_helpers must be a boolean")
+    stores = _LocalStores(source) if local_store_helpers else None
+    if stores is not None:
+        _no_other_store_references(inputs)
     before = {p.name: digest(p) for p in inputs}
     out.mkdir(parents=True, exist_ok=False)
     try:
@@ -150,8 +270,12 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
             guard_added = first != GUARD
             if guard_added:
                 dst.write(GUARD)
-            dst.write(first)
-            shutil.copyfileobj(src, dst, 1024 * 1024)
+            src.seek(0)
+            if stores is None:
+                shutil.copyfileobj(src, dst, 1024 * 1024)
+            else:
+                for line in stores.header_lines(src):
+                    dst.write(line)
         methods = {}
         unoptimized = {}
         class_name = None
@@ -159,7 +283,7 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
             if NUMBERED.fullmatch(path.name):
                 marked = _large_methods(path, optnone_bytes)
                 unoptimized[path.name] = marked
-                names, cls = _split_methods(path, out, maximum, set(marked))
+                names, cls = _split_methods(path, out, maximum, set(marked), stores)
                 methods[path.name] = names
                 if cls is not None:
                     if class_name is not None and cls != class_name:
@@ -167,9 +291,13 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
                     class_name = cls
         if not class_name:
             raise ValueError("numbered DUT shards contain no methods")
+        if stores is not None:
+            stores.finish()
         commit_outputs = []
         for path in inputs[1:]:
             if NUMBERED.fullmatch(path.name):
+                continue
+            if stores is not None and path.name == "dut_mem_stores.cpp":
                 continue
             if path.name == "dut_commit_chunks.cpp" and commit_parts > 1:
                 for name, text in emit._partition_commit_chunks(class_name, path.read_text(), commit_parts):
@@ -190,6 +318,8 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
                   "guard_added": guard_added, "maximum_bytes": maximum,
                   "optnone_bytes": optnone_bytes, "optnone_methods": unoptimized,
                   "commit_parts": commit_parts, "commit_outputs": commit_outputs}
+        if stores is not None:
+            record.update(local_store_helpers=True, local_store_count=len(stores.parts))
         (out / MANIFEST).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
         verify(source, out)
     except BaseException:
@@ -206,6 +336,14 @@ def verify(source: Path, out: Path) -> None:
     inputs = _files(source)
     if {p.name: digest(p) for p in inputs} != record["input_sha256"]:
         raise ValueError("reshard input differs from its manifest")
+    local = record.get("local_store_helpers", False)
+    if not isinstance(local, bool):
+        raise ValueError("invalid local store helper setting")
+    stores = _LocalStores(source, record["class"]) if local else None
+    if stores is not None:
+        if record.get("local_store_count") != len(stores.parts):
+            raise ValueError("local store helper count differs")
+        _no_other_store_references(inputs)
     numbered = {p.name for p in inputs if NUMBERED.fullmatch(p.name)}
     if set(record["method_parts"]) != numbered or not 1 <= record["commit_parts"] <= 64:
         raise ValueError("reshard manifest does not cover the original methods")
@@ -224,6 +362,8 @@ def verify(source: Path, out: Path) -> None:
         expected.update(parts)
     for path in inputs[1:]:
         if path.name not in numbered and path.name != "dut_commit_chunks.cpp":
+            if stores is not None and path.name == "dut_mem_stores.cpp":
+                continue
             if path.name in expected:
                 raise ValueError("reshard helper collides with a method part")
             expected.add(path.name)
@@ -243,10 +383,19 @@ def verify(source: Path, out: Path) -> None:
     if record["guard_added"]:
         header.update(GUARD)
     with (source / "dut.h").open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            header.update(block)
+        if stores is None:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                header.update(block)
+        else:
+            for line in stores.header_lines(stream):
+                header.update(line)
     if header.hexdigest() != record["output_sha256"]["dut.h"]:
-        raise ValueError("derived header is not the original with an optional guard")
+        raise ValueError("derived header does not match the verified transformation")
+    localized = {}
+    if stores is not None:
+        localized = {p.name: _localized_digest(p, stores) for p in inputs
+                     if NUMBERED.fullmatch(p.name)}
+        stores.finish()
     for name, parts in record["method_parts"].items():
         joined = hashlib.sha256()
         seen_optnone = []
@@ -287,7 +436,8 @@ def verify(source: Path, out: Path) -> None:
                     joined.update(line)
                 if in_method:
                     raise ValueError("derived shard ends within a method")
-        if joined.hexdigest() != record["input_sha256"][name]:
+        expected_digest = localized[name] if stores is not None else record["input_sha256"][name]
+        if joined.hexdigest() != expected_digest:
             raise ValueError("derived methods do not reconstruct " + name)
         if seen_optnone != unoptimized[name]:
             raise ValueError("derived optnone methods differ from original order")
@@ -300,6 +450,8 @@ def verify(source: Path, out: Path) -> None:
             raise ValueError("derived commit helpers do not match the emitter")
     for path in inputs[1:]:
         if path.name not in record["method_parts"] and path.name != "dut_commit_chunks.cpp":
+            if stores is not None and path.name == "dut_mem_stores.cpp":
+                continue
             if record["output_sha256"].get(path.name) != record["input_sha256"][path.name]:
                 raise ValueError("unchanged helper differs: " + path.name)
     if record["commit_parts"] == 1 and "dut_commit_chunks.cpp" in record["input_sha256"]:
@@ -316,10 +468,13 @@ def main() -> None:
     parser.add_argument("--commit-parts", type=int, default=1)
     parser.add_argument("--optnone-mib", type=int, default=0,
                         help="compile methods above this size without Clang optimization; 0 disables")
+    parser.add_argument("--local-store-helpers", action="store_true",
+                        help="localize outlined store helpers while verifying their exact bodies and order")
     args = parser.parse_args()
     if args.operation == "create":
         create(args.source, args.output, maximum=args.max_mib * 1024 * 1024,
-               commit_parts=args.commit_parts, optnone_bytes=args.optnone_mib * 1024 * 1024)
+               commit_parts=args.commit_parts, optnone_bytes=args.optnone_mib * 1024 * 1024,
+               local_store_helpers=args.local_store_helpers)
     else:
         verify(args.source, args.output)
     print("reshard", args.operation, "verified", flush=True)

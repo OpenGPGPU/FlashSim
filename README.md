@@ -172,6 +172,14 @@ python -m flashsim.reshard create --source model --output model-resharded \
 python -m flashsim.reshard verify --source model --output model-resharded
 ```
 
+For a model with outlined memory stores, `--local-store-helpers` on `create`
+keeps each store group's original guard and body in a local noinline closure.
+The derived header no longer declares those helpers, and verification checks
+the declarations, guard order, complete bodies and transformed method stream
+against the original model. The option requires a compiler supporting GNU
+`noinline` attributes. It can preserve header identity with an older model,
+but does not itself cache objects or guarantee faster simulation.
+
 For models with exceptionally large individual methods, pass
 `--optnone-mib 8` to `create` to disable optimization only for methods over
 8 MiB. This derived model requires Clang. Other methods keep the compiler
@@ -185,8 +193,10 @@ The output directory must be new. The transformer splits complete generated
 methods and, when requested, an existing chunked commit dispatcher. It adds a
 header guard if needed and records hashes of the original and derived files
 and transformer in `flashsim-reshard.json`. Verification reconstructs the
-original method bytes and checks the commit partition. Build all derived DUT
-objects and the wrapper against its header; never mix them with old objects.
+original method bytes, or the specified local-store transformation, and checks
+the commit partition. Build all derived DUT objects and the wrapper against
+the same header. Reuse an existing object only after checking the complete
+header, source, compiler, flags, relevant environment and object integrity.
 The output is derived C++, not a fresh RTL emission. These checks do not replace
 running and validating the target simulation.
 
