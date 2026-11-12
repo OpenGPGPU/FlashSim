@@ -256,9 +256,14 @@ the [qualification and all timing samples](docs/uniform-pass-dispatch-2026-10-17
 Dense immutable commit-invalidation lists use predecoded eight/four-cell blocks
 plus scalar remainders, allowing portable counter increments to vectorize.
 Duplicates and unsigned wraparound are preserved; unknown, mutable, partial or
-shadowed lists keep the generic helper. Set `FLASHSIM_COMMIT_BLOCKS=0` during
-generation for the legacy path. This host optimization is independent of RTL
-lanes and shader VLEN. On the same four-CU model, final balanced measurements
+shadowed lists keep the generic helper. Packed tables use 16-bit or 32-bit
+entries as needed; 32-bit tables require at least 1,024 IDs. Partitioned commit
+files retain only the packed tables their own methods reference. Set
+`FLASHSIM_COMMIT_BLOCKS=0` during generation
+for the legacy path. This host optimization is independent of RTL lanes and
+shader VLEN. The 32-bit path matched final memory and the observed bus trace over a
+one-million-cycle 1280×720 desktop prefix; this is not a full-frame result.
+On the earlier four-CU model, final balanced measurements
 save another **5.08%** on Mesa64 and **1.80–3.96%** on native renders, with
 identical RAM, cycles and counters. Both host changes together save **8.21%**
 on that fixed Mesa64 trace. The actual full desktop and redraw, strict replay,

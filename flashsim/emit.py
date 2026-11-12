@@ -3819,21 +3819,46 @@ def _partition_commit_chunks(cls: str, body: str, count: int) -> list[tuple[str,
         groups.append(current)
     declarations = "".join(f"void {tag}{i}({cls} *, unsigned);\n"
                            for i in range(len(matches)))
-    parts = [("dut_commit_chunks.cpp", prefix + declarations + "\n" + tail)]
+    # The block transform can add large immutable tables to the prefix.
+    # Each partition only needs the tables that its methods actually use.
+    # Limit pruning to the emitter's simple generated prefix; unknown C++ or
+    # preprocessor syntax retains the original prefix in every partition.
+    table_line = re.compile(
+        r"^static const uint(?:16|32)_t (_inv\d+_blocks)\[\] = \{[0-9, ]+\};\n$")
+    extern_line = re.compile(
+        r"extern void \w+\(uint32_t \*, const uint(?:16|32|64)_t \*, unsigned\);")
+    pieces = []
+    safe_prefix = True
+    for line in _iter_lines(prefix):
+        table = table_line.fullmatch(line)
+        if table:
+            pieces.append((table[1], line))
+        else:
+            if line.strip() and line.strip() != '#include "dut.h"' and not extern_line.fullmatch(line.strip()):
+                safe_prefix = False
+            pieces.append((None, line))
+
+    def prefix_for(text: str) -> str:
+        if not safe_prefix:
+            return prefix
+        needed = set(re.findall(r"\b_inv\d+_blocks\b", text))
+        return "".join(line for name, line in pieces if name is None or name in needed)
+
+    parts = [("dut_commit_chunks.cpp", prefix_for(tail) + declarations + "\n" + tail)]
     for i, group in enumerate(groups):
         helpers = "".join(body[start + len("static "):end] for start, end in group)
-        parts.append((f"dut_commit_part{i:03d}.cpp", prefix + helpers))
+        parts.append((f"dut_commit_part{i:03d}.cpp", prefix_for(helpers) + helpers))
     return parts
 
 
-def _invalidation_blocks(ids: list[int]) -> tuple[list[int], int] | None:
+def _invalidation_blocks(ids: list[int], *, max_index: int = 65535) -> tuple[list[int], int] | None:
     """Pack dense page increments into fixed 8/4-cell blocks and scalar tails.
 
     Counters are ordinary uint32 storage: addition modulo 2**32 commutes.
     Keep every occurrence, including duplicates, while moving scalar tails
     behind the vector blocks. Arbitrary/mutable ID lists keep the old helper.
     """
-    if not ids or any(i < 0 or i > 65535 for i in ids):
+    if not ids or any(i < 0 or i > max_index for i in ids):
         return None
     blocks8: list[int] = []
     blocks4: list[int] = []
@@ -3859,9 +3884,9 @@ def _invalidation_blocks(ids: list[int]) -> tuple[list[int], int] | None:
         scalars.extend(range(start, start + count))
     vector_cells = len(blocks8) * 8 + len(blocks4) * 4
     # Avoid extra stream setup for small or mostly scattered tables. These
-    # bounds also keep both metadata header counts in uint16 storage.
+    # bounds also keep both metadata header counts in the chosen storage.
     if (vector_cells < 16 or vector_cells * 2 < len(ids)
-            or max(len(blocks8), len(blocks4), len(scalars)) > 65535):
+            or max(len(blocks8), len(blocks4), len(scalars)) > max_index):
         return None
     return [len(blocks8), len(blocks4), *blocks8, *blocks4, *scalars], len(scalars)
 
@@ -3877,32 +3902,57 @@ def _outline_static_commit_blocks(header: str, cls: str,
     """
     helper = f"{cls}_commit_bump"
     if (os.environ.get("FLASHSIM_COMMIT_BLOCKS", "1") == "0"
-            or helper + "(" not in body):
+            or helper + "(" not in body or helper + "_blocks" in header
+            or helper + "_blocks" in body):
         return body, None
-    code = body.replace('#include "dut.h"', '')
-    if '"' in code or "'" in code:
+    if '"' in body.replace('#include "dut.h"', '') or "'" in body:
         return body, None
     declarations = list(re.finditer(
         r"^static const uint(?:16|32|64)_t (_inv\d+)\[\] = \{([0-9, ]+)\};$", header, re.M))
     definitions = Counter(m[1] for m in declarations)
-    tables = {m[1]: list(map(int, re.findall(r"\d+", m[2])))
-              for m in declarations if definitions[m[1]] == 1
-              and re.fullmatch(r"\s*\d+(?:\s*,\s*\d+)*\s*", m[2])}
-    text = header + body
-    uses = Counter(re.findall(r"\b_inv\d+\b", text))
-    calls = list(re.finditer(
+    # Count without concatenating the (potentially huge) header and commit
+    # body, and parse only one table at a time. A full product model can have
+    # tens of millions of page IDs in these declarations.
+    uses = Counter()
+    reserved = set()
+    for text in (header, body):
+        for match in re.finditer(r"\b(_inv\d+)(_blocks)?\b", text):
+            if match[2]:
+                reserved.add(match[1])
+            else:
+                uses[match[1]] += 1
+    calls = Counter((m[1], int(m[2])) for text in (header, body) for m in re.finditer(
         rf"\b(?:fs_bump|{re.escape(helper)})\(\s*(?:_pg|d->_pg)\s*,\s*"
         r"(_inv\d+)\s*,\s*(\d+)u\s*\)", text))
-    known = Counter(m[1] for m in calls
-                    if m[1] in tables and int(m[2]) == len(tables[m[1]]))
+    call_lengths: dict[str, dict[int, int]] = defaultdict(dict)
+    for (name, length), count in calls.items():
+        call_lengths[name][length] = count
     selected = {}
-    for name, ids in tables.items():
-        if uses[name] == 1 + known[name] and known[name]:
-            encoded = _invalidation_blocks(ids)
-            if encoded is not None:
-                selected[name] = encoded
+    for declaration in declarations:
+        name, values = declaration[1], declaration[2]
+        lengths = call_lengths.get(name, {})
+        if (definitions[name] != 1 or name in reserved or len(lengths) != 1 or
+                next(iter(lengths)) > 0xffffffff or
+                uses[name] != 1 + sum(lengths.values()) or
+                not re.fullmatch(r"\s*\d+(?:\s*,\s*\d+)*\s*", values)):
+            continue
+        ids = [int(value) for value in values.split(",")]
+        if len(ids) not in lengths:
+            continue
+        max_id = max(ids)
+        # Small wide tables did not improve the product prefix. Leave
+        # them on the generic path; retain the existing 16-bit policy.
+        if max_id > 65535 and len(ids) < 1024:
+            continue
+        encoded = _invalidation_blocks(ids, max_index=0xffffffff)
+        if encoded is not None:
+            words, scalars = encoded
+            width = 16 if max(max_id, max(words)) <= 65535 else 32
+            # Wide metadata can also be required by many small page IDs.
+            if width == 32 and len(ids) < 1024:
+                continue
+            selected[name] = (words, scalars, width)
     used: set[str] = set()
-    fast = helper + "_blocks"
     pattern = re.compile(rf"{re.escape(helper)}\((d->_pg|_pg), (_inv\d+), (\d+)u\)")
 
     def replace(match):
@@ -3910,19 +3960,24 @@ def _outline_static_commit_blocks(header: str, cls: str,
         if name not in selected:
             return match[0]
         used.add(name)
+        fast = helper + ("_blocks" if selected[name][2] == 16 else "_blocks32")
         return f"{fast}({match[1]}, {name}_blocks, {selected[name][1]}u)"
 
     transformed = pattern.sub(replace, body)
     if not used:
         return body, None
-    prefix = [f"extern void {fast}(uint32_t *, const uint16_t *, unsigned);"]
+    widths = sorted({selected[name][2] for name in used})
+    prefix = [f"extern void {helper}_blocks{'32' if width == 32 else ''}"
+              f"(uint32_t *, const uint{width}_t *, unsigned);" for width in widths]
     for name in sorted(used):
         values = ", ".join(map(str, selected[name][0]))
-        prefix.append(f"static const uint16_t {name}_blocks[] = {{{values}}};")
+        prefix.append(f"static const uint{selected[name][2]}_t {name}_blocks[] = {{{values}}};")
     transformed = transformed.replace('#include "dut.h"\n',
         '#include "dut.h"\n' + "\n".join(prefix) + "\n", 1)
-    source = f'''#include <cstdint>
-void {fast}(uint32_t*pg,const uint16_t*data,unsigned scalars) {{
+    source = '#include <cstdint>\n'
+    for width in widths:
+        fast = helper + ("_blocks" if width == 16 else "_blocks32")
+        source += f'''void {fast}(uint32_t*pg,const uint{width}_t*data,unsigned scalars) {{
  unsigned n8=data[0],n4=data[1];data+=2;
  for(unsigned i=0;i<n8;i++) {{uint32_t*p=pg+data[i];p[0]++;p[1]++;p[2]++;p[3]++;p[4]++;p[5]++;p[6]++;p[7]++;}}
  data+=n8;
