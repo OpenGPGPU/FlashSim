@@ -180,6 +180,13 @@ against the original model. The option requires a compiler supporting GNU
 `noinline` attributes. It can preserve header identity with an older model,
 but does not itself cache objects or guarantee faster simulation.
 
+For an older model with an unpartitioned generic commit dispatcher, add
+`--commit-blocks` to apply the current immutable-table specialization without
+re-emitting RTL or changing the input. Unknown or ineligible tables retain the
+generic helper. The option rejects unsupported preprocessor directives and
+already-specialized or already-partitioned commit inputs. The manifest records
+the choice, and `verify` regenerates and checks every derived commit source.
+
 For models with exceptionally large individual methods, pass
 `--optnone-mib 8` to `create` to disable optimization only for methods over
 8 MiB. This derived model requires Clang. Other methods keep the compiler

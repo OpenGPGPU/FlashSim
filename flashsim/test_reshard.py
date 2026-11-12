@@ -104,6 +104,119 @@ def test_rejects_tampering_and_unexpected_top_level_content(tmp_path):
     assert not (tmp_path / "failed").exists()
 
 
+def commit_block_fixture(path: Path) -> None:
+    fixture(path)
+    ids = list(range(65536, 66560)) + [65536, 3, 3]
+    header = path / "dut.h"
+    header.write_text(header.read_text().replace(
+        "struct TinyDut {", "static const uint32_t _inv0[] = {" +
+        ", ".join(map(str, ids)) + "};\nstruct TinyDut {\n  uint32_t _pg[66560] = {};"))
+    (path / "dut_commit_chunks.cpp").write_text(f'''#include "dut.h"
+extern void TinyDut_commit_bump(uint32_t *, const uint32_t *, unsigned);
+static void TinyDut_commit_part0(TinyDut *d, unsigned k) {{
+  TinyDut_commit_bump(d->_pg, _inv0, {len(ids)}u);
+  d->value += k + 2;
+}}
+static void TinyDut_commit_part1(TinyDut *d, unsigned k) {{
+  d->value ^= k + 5;
+}}
+void TinyDut::_commit() {{
+  TinyDut_commit_part0(this, 3);
+  TinyDut_commit_part1(this, 4);
+}}
+''')
+    (path / "dut_commit_helpers.cpp").write_text('''#include <cstdint>
+void TinyDut_commit_bump(uint32_t *pg, const uint32_t *ids, unsigned n) {
+  for (unsigned i = 0; i < n; i++) pg[ids[i]]++;
+}
+''')
+
+
+@pytest.mark.parametrize("commit_parts", [1, 2])
+def test_retrofit_commit_blocks_preserves_counters(tmp_path, monkeypatch, commit_parts):
+    compiler = shutil.which("c++")
+    if not compiler:
+        pytest.skip("C++ compiler unavailable")
+    source, out = tmp_path / "original", tmp_path / "derived"
+    commit_block_fixture(source)
+    original = {p.name: p.read_bytes() for p in source.iterdir()}
+    # The explicit reshard option is independent of the generation-time knob.
+    monkeypatch.setenv("FLASHSIM_COMMIT_BLOCKS", "0")
+    create(source, out, maximum=70, commit_parts=commit_parts, commit_blocks=True)
+    record = json.loads((out / "flashsim-reshard.json").read_text())
+    assert record["commit_blocks"] is True
+    assert "dut_commit_blocks.cpp" in record["commit_outputs"]
+    assert any("TinyDut_commit_bump_blocks32" in p.read_text()
+               for p in out.glob("dut_commit*.cpp"))
+    verify(source, out)
+    assert {p.name: p.read_bytes() for p in source.iterdir()} == original
+    main = tmp_path / "check.cpp"
+    main.write_text('''#include "dut.h"
+int main() {
+  TinyDut d; uint32_t expected[66560];
+  for (unsigned i = 0; i < 66560; i++) d._pg[i] = expected[i] = UINT32_MAX - i;
+  for (unsigned pass = 0; pass < 100; pass++) {
+    d._commit(); for (auto id : _inv0) expected[id]++;
+    for (unsigned i = 0; i < 66560; i++) if (d._pg[i] != expected[i]) return 1;
+  }
+}
+''')
+    for model in (source, out):
+        for opt in ("-O0", "-O2"):
+            binary = tmp_path / (model.name + opt)
+            subprocess.run([compiler, "-std=c++17", opt, "-fsanitize=address,undefined",
+                            "-I", str(model), str(main), *map(str, sorted(model.glob("dut_*.cpp"))),
+                            "-o", str(binary)], check=True)
+            subprocess.run([str(binary)], check=True)
+
+
+def test_retrofit_commit_blocks_verifies_transformation_and_safe_fallback(tmp_path):
+    from flashsim.reshard import digest
+    source, out = tmp_path / "original", tmp_path / "derived"
+    commit_block_fixture(source)
+    create(source, out, maximum=70, commit_parts=2, commit_blocks=True)
+    record_path = out / "flashsim-reshard.json"
+    record = json.loads(record_path.read_text())
+    part = next(p for p in out.glob("dut_commit_part*.cpp") if "_inv0_blocks" in p.read_text())
+    original = part.read_text()
+    changed = original.replace("_inv0_blocks, 3u", "_inv0_blocks, 2u")
+    assert changed != original
+    part.write_text(changed)
+    record["output_sha256"][part.name] = digest(part)
+    record_path.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="do not match the emitter"):
+        verify(source, out)
+
+    plain = tmp_path / "plain"
+    fixture(plain)
+    untouched = tmp_path / "untouched"
+    create(plain, untouched, maximum=70, commit_parts=1, commit_blocks=True)
+    assert not (untouched / "dut_commit_blocks.cpp").exists()
+    assert (untouched / "dut_commit_chunks.cpp").read_bytes() == (plain / "dut_commit_chunks.cpp").read_bytes()
+    verify(plain, untouched)
+
+
+@pytest.mark.parametrize("location", ["header", "source"])
+def test_retrofit_commit_blocks_rejects_unknown_directives(tmp_path, location):
+    source, out = tmp_path / "original", tmp_path / "derived"
+    commit_block_fixture(source)
+    path = source / ("dut.h" if location == "header" else "dut_commit_chunks.cpp")
+    path.write_text("#define UNSAFE(x) x\n" + path.read_text())
+    with pytest.raises(ValueError, match="unsupported directive"):
+        create(source, out, maximum=70, commit_parts=2, commit_blocks=True)
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("name", ["dut_commit_blocks.cpp", "dut_commit_part000.cpp"])
+def test_retrofit_commit_blocks_rejects_already_processed_inputs(tmp_path, name):
+    source, out = tmp_path / "original", tmp_path / "derived"
+    commit_block_fixture(source)
+    (source / name).write_text("// prior derived output\n")
+    with pytest.raises(ValueError, match="already partitioned|unpartitioned generic"):
+        create(source, out, maximum=70, commit_parts=1, commit_blocks=True)
+    assert not out.exists()
+
+
 def test_optnone_marks_only_large_methods_and_preserves_behavior(tmp_path, monkeypatch):
     compiler = shutil.which("clang++")
     if not compiler:

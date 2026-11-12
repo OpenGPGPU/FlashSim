@@ -251,8 +251,32 @@ def _localized_digest(path: Path, stores: _LocalStores) -> str:
     return value.hexdigest()
 
 
+def _commit_outputs(class_name: str, body: str, count: int,
+                    header: str | None = None) -> list[tuple[str, str]]:
+    """Derive commit partitions, optionally specializing immutable tables."""
+    helper = None
+    if header is not None:
+        # A macro can manufacture a table or helper name without spelling it
+        # literally. Restrict specialization to the emitter's known header
+        # directives and its single commit-source include.
+        for directive in re.finditer(r"(?m)^[ \t]*#[^\n]*", header):
+            if not STORE_HEADER_DIRECTIVE.fullmatch(directive[0].encode()):
+                raise ValueError("unsupported directive in commit-block header")
+        for directive in re.finditer(r"(?m)^[ \t]*#[^\n]*", body):
+            if directive[0].strip() != '#include "dut.h"':
+                raise ValueError("unsupported directive in commit-block source")
+        body, helper = emit._outline_static_commit_blocks(
+            header, class_name, body, enabled=True)
+    parts = (emit._partition_commit_chunks(class_name, body, count) if count > 1
+             else [("dut_commit_chunks.cpp", body)])
+    if helper is not None:
+        parts.append(("dut_commit_blocks.cpp", helper))
+    return parts
+
+
 def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
-           optnone_bytes: int = 0, local_store_helpers: bool = False) -> None:
+           optnone_bytes: int = 0, local_store_helpers: bool = False,
+           commit_blocks: bool = False) -> None:
     source, out = source.resolve(), out.resolve()
     if source == out or source in out.parents or out in source.parents:
         raise ValueError("source and output must be separate directories")
@@ -261,10 +285,13 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
     inputs = _files(source)
     if any(p.name.startswith("dut_extra_") for p in inputs):
         raise ValueError("input has already been method-resharded")
-    if commit_parts > 1 and any(re.fullmatch(r"dut_commit_part\d+\.cpp", p.name) for p in inputs):
+    if (commit_parts > 1 or commit_blocks) and any(re.fullmatch(r"dut_commit_part\d+\.cpp", p.name) for p in inputs):
         raise ValueError("input commit helpers are already partitioned")
-    if not isinstance(local_store_helpers, bool):
-        raise ValueError("local_store_helpers must be a boolean")
+    if not isinstance(local_store_helpers, bool) or not isinstance(commit_blocks, bool):
+        raise ValueError("local_store_helpers and commit_blocks must be booleans")
+    if commit_blocks and (not (source / "dut_commit_chunks.cpp").is_file() or
+                          (source / "dut_commit_blocks.cpp").exists()):
+        raise ValueError("commit blocks need an unpartitioned generic commit dispatcher")
     stores = _LocalStores(source) if local_store_helpers else None
     if stores is not None:
         _no_other_store_references(inputs)
@@ -306,8 +333,9 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
                 continue
             if stores is not None and path.name == "dut_mem_stores.cpp":
                 continue
-            if path.name == "dut_commit_chunks.cpp" and commit_parts > 1:
-                for name, text in emit._partition_commit_chunks(class_name, path.read_text(), commit_parts):
+            if path.name == "dut_commit_chunks.cpp" and (commit_parts > 1 or commit_blocks):
+                header = (out / "dut.h").read_text() if commit_blocks else None
+                for name, text in _commit_outputs(class_name, path.read_text(), commit_parts, header):
                     if (out / name).exists():
                         raise ValueError("derived commit shard already exists: " + name)
                     (out / name).write_text(text)
@@ -327,6 +355,8 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
                   "commit_parts": commit_parts, "commit_outputs": commit_outputs}
         if stores is not None:
             record.update(local_store_helpers=True, local_store_count=len(stores.parts))
+        if commit_blocks:
+            record["commit_blocks"] = True
         (out / MANIFEST).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
         verify(source, out)
     except BaseException:
@@ -346,6 +376,13 @@ def verify(source: Path, out: Path) -> None:
     local = record.get("local_store_helpers", False)
     if not isinstance(local, bool):
         raise ValueError("invalid local store helper setting")
+    blocks = record.get("commit_blocks", False)
+    if not isinstance(blocks, bool):
+        raise ValueError("invalid commit block setting")
+    if blocks and (not (source / "dut_commit_chunks.cpp").is_file() or
+                   (source / "dut_commit_blocks.cpp").exists() or
+                   any(re.fullmatch(r"dut_commit_part\d+\.cpp", p.name) for p in inputs)):
+        raise ValueError("invalid input for commit blocks")
     stores = _LocalStores(source, record["class"]) if local else None
     if stores is not None:
         if record.get("local_store_count") != len(stores.parts):
@@ -374,7 +411,7 @@ def verify(source: Path, out: Path) -> None:
             if path.name in expected:
                 raise ValueError("reshard helper collides with a method part")
             expected.add(path.name)
-    commit_names = record["commit_outputs"] if record["commit_parts"] > 1 else (
+    commit_names = record["commit_outputs"] if record["commit_parts"] > 1 or blocks else (
         ["dut_commit_chunks.cpp"] if "dut_commit_chunks.cpp" in record["input_sha256"] else [])
     if len(set(commit_names)) != len(commit_names) or expected.intersection(commit_names):
         raise ValueError("reshard commit outputs collide")
@@ -448,9 +485,10 @@ def verify(source: Path, out: Path) -> None:
             raise ValueError("derived methods do not reconstruct " + name)
         if seen_optnone != unoptimized[name]:
             raise ValueError("derived optnone methods differ from original order")
-    if record["commit_parts"] > 1:
-        parts = emit._partition_commit_chunks(record["class"],
-            (source / "dut_commit_chunks.cpp").read_text(), record["commit_parts"])
+    if record["commit_parts"] > 1 or blocks:
+        header = (out / "dut.h").read_text() if blocks else None
+        parts = _commit_outputs(record["class"],
+            (source / "dut_commit_chunks.cpp").read_text(), record["commit_parts"], header)
         if ([name for name, _ in parts] != record["commit_outputs"] or
                 any(hashlib.sha256(text.encode()).hexdigest() != record["output_sha256"].get(name)
                     for name, text in parts)):
@@ -461,7 +499,7 @@ def verify(source: Path, out: Path) -> None:
                 continue
             if record["output_sha256"].get(path.name) != record["input_sha256"][path.name]:
                 raise ValueError("unchanged helper differs: " + path.name)
-    if record["commit_parts"] == 1 and "dut_commit_chunks.cpp" in record["input_sha256"]:
+    if not blocks and record["commit_parts"] == 1 and "dut_commit_chunks.cpp" in record["input_sha256"]:
         if record["output_sha256"].get("dut_commit_chunks.cpp") != record["input_sha256"]["dut_commit_chunks.cpp"]:
             raise ValueError("unchanged commit helper differs")
 
@@ -477,11 +515,13 @@ def main() -> None:
                         help="compile methods above this size without Clang optimization; 0 disables")
     parser.add_argument("--local-store-helpers", action="store_true",
                         help="localize outlined store helpers while verifying their exact bodies and order")
+    parser.add_argument("--commit-blocks", action="store_true",
+                        help="specialize eligible immutable commit tables in an already generated model")
     args = parser.parse_args()
     if args.operation == "create":
         create(args.source, args.output, maximum=args.max_mib * 1024 * 1024,
                commit_parts=args.commit_parts, optnone_bytes=args.optnone_mib * 1024 * 1024,
-               local_store_helpers=args.local_store_helpers)
+               local_store_helpers=args.local_store_helpers, commit_blocks=args.commit_blocks)
     else:
         verify(args.source, args.output)
     print("reshard", args.operation, "verified", flush=True)

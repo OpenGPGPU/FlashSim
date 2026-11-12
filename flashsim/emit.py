@@ -3891,8 +3891,8 @@ def _invalidation_blocks(ids: list[int], *, max_index: int = 65535) -> tuple[lis
     return [len(blocks8), len(blocks4), *blocks8, *blocks4, *scalars], len(scalars)
 
 
-def _outline_static_commit_blocks(header: str, cls: str,
-                                   body: str) -> tuple[str, str | None]:
+def _outline_static_commit_blocks(header: str, cls: str, body: str,
+                                   *, enabled: bool | None = None) -> tuple[str, str | None]:
     """Specialize only literal immutable tables with no shadow/unknown uses.
 
     This post-split transform leaves the DUT header and unrelated shards
@@ -3901,7 +3901,9 @@ def _outline_static_commit_blocks(header: str, cls: str,
     proves immutable contents. The generic helper remains unchanged.
     """
     helper = f"{cls}_commit_bump"
-    if (os.environ.get("FLASHSIM_COMMIT_BLOCKS", "1") == "0"
+    if enabled is None:
+        enabled = os.environ.get("FLASHSIM_COMMIT_BLOCKS", "1") != "0"
+    if (not enabled
             or helper + "(" not in body or helper + "_blocks" in header
             or helper + "_blocks" in body):
         return body, None
