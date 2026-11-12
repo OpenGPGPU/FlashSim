@@ -29,6 +29,11 @@ STORE_CONTEXT = re.compile(
     rb"__builtin_COLUMN|__builtin_source_location|source_location|_Pragma)\b|"
     rb"(?m:^[ \t]*#)|\bassert\s*\("
 )
+STORE_HEADER_DIRECTIVE = re.compile(
+    rb'^\s*#\s*(?:pragma\s+once|include\s+<(?:cstdint|cstring|stdexcept|string|cstdio)>|'
+    rb'define\s+FLASHSIM_DATA_REGIONS\s+1|'
+    rb'pragma\s+GCC\s+diagnostic\s+(?:push|pop|ignored\s+"-Winvalid-offsetof"))\s*$'
+)
 OPTNONE = (b"#if defined(__clang__)\n"
            b"__attribute__((optnone, noinline))\n"
            b"#else\n"
@@ -92,6 +97,8 @@ class _LocalStores:
     def header_lines(self, stream):
         removed = []
         for line in stream:
+            if line.lstrip().startswith(b"#") and not STORE_HEADER_DIRECTIVE.fullmatch(line):
+                raise ValueError("unsupported preprocessor directive in localized store header")
             match = STORE_DECL.fullmatch(line)
             if match:
                 removed.append(int(match.group(1)))

@@ -255,3 +255,22 @@ def test_local_store_helpers_require_matching_port_guards(tmp_path):
     with pytest.raises(ValueError, match="guards do not match"):
         create(source, out, maximum=4096, commit_parts=1, local_store_helpers=True)
     assert not out.exists()
+
+
+def test_local_store_helpers_restrict_header_macros(tmp_path):
+    source = tmp_path / "original"
+    store_fixture(source, 32)
+    header = source / "dut.h"
+    original = header.read_bytes()
+    header.write_bytes(b"#define FLASHSIM_DATA_REGIONS 1\n" + original +
+                       b'#pragma GCC diagnostic push\n'
+                       b'#pragma GCC diagnostic ignored "-Winvalid-offsetof"\n'
+                       b'#pragma GCC diagnostic pop\n')
+    out = tmp_path / "allowed"
+    create(source, out, maximum=4096, commit_parts=1, local_store_helpers=True)
+    verify(source, out)
+    header.write_bytes(b"#define WHERE __func__\n" + original)
+    rejected = tmp_path / "rejected"
+    with pytest.raises(ValueError, match="preprocessor directive"):
+        create(source, rejected, maximum=4096, commit_parts=1, local_store_helpers=True)
+    assert not rejected.exists()
