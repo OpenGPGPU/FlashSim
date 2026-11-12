@@ -2407,7 +2407,18 @@ def _dirty_tracking_declarations(count: int) -> list[str]:
     ]
 
 
+def _hold_group_size() -> int:
+    try:
+        group = int(os.environ.get("FLASHSIM_HOLD_GROUP", str(_HOLD_GROUP)))
+    except ValueError as exc:
+        raise ValueError("FLASHSIM_HOLD_GROUP must be a positive integer") from exc
+    if group <= 0:
+        raise ValueError("FLASHSIM_HOLD_GROUP must be a positive integer")
+    return group
+
+
 def emit_cpp(mod: Module) -> str:
+    hold_group = _hold_group_size()
     sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
     assigns = assign_map(mod)
     regs = collect_regs(mod)
@@ -2502,11 +2513,11 @@ def emit_cpp(mod: Module) -> str:
             grouped[_stmt_bucket_key(stmt)].append(stmt)
         hold_buckets = []
         for key, stmts in sorted(grouped.items()):
-            if len(stmts) <= _HOLD_GROUP:
+            if len(stmts) <= hold_group:
                 hold_buckets.append((key, stmts))
                 continue
-            for off in range(0, len(stmts), _HOLD_GROUP):
-                hold_buckets.append((f"{key}#{off // _HOLD_GROUP}", stmts[off : off + _HOLD_GROUP]))
+            for off in range(0, len(stmts), hold_group):
+                hold_buckets.append((f"{key}#{off // hold_group}", stmts[off : off + hold_group]))
         holds_map: dict[str, set[int]] = defaultdict(set)
         cut_map: dict[str, set[int]] = defaultdict(set)
         cut = {

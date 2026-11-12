@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import filecmp
+import json
 import os
 import re
 import shutil
@@ -13,6 +14,7 @@ from pathlib import Path
 from flashsim.benches import CIRCT_ONLY, write_benches
 from flashsim.circt_frontend import CirctError, import_verilog_file, verilog_sources
 from flashsim.compile import compile_file, _resolve_frontend
+from flashsim.emit import _hold_group_size
 from flashsim.harness import flashsim_main, verilator_main
 from flashsim.toolchain import repo_root
 
@@ -278,7 +280,9 @@ def run_bench(
         os.environ.get("FLASHSIM_REUSE_EMIT") == "1"
         and _compiled_dut_fresh(vfile, out_h)
     ):
+        _emit_options_file(out_h).unlink(missing_ok=True)
         compile_file(vfile, out_h, frontend=frontend)
+        _record_emit_options(out_h)
 
     fs_check = _compile_flash(work, name, "check", CHECK_CYCLES, harness=harness)
     vl_check = _compile_verilator(
@@ -345,11 +349,22 @@ def run_bench(
     )
 
 
+def _emit_options_file(out_h: Path) -> Path:
+    return out_h.parent / ".flashsim_emit_options.json"
+
+
+def _record_emit_options(out_h: Path) -> None:
+    _emit_options_file(out_h).write_text(json.dumps({"hold_group": _hold_group_size()}))
+
+
 def _compiled_dut_fresh(vfile: Path, out_h: Path) -> bool:
     """Whether a previously emitted DUT can be reused for a benchmark run."""
     if not out_h.is_file():
         return False
+    options = {"hold_group": _hold_group_size()}
     try:
+        if json.loads(_emit_options_file(out_h).read_text()) != options:
+            return False
         shards = list(out_h.parent.glob("dut_*.cpp"))
         outputs = [out_h, *shards]
         stamp = max(path.stat().st_mtime for path in outputs)
@@ -366,7 +381,7 @@ def _compiled_dut_fresh(vfile: Path, out_h: Path) -> bool:
         # A split output must contain at least one source shard.  Monolithic
         # outputs are valid for small designs and need no extra check.
         return not shards or all(shard.is_file() for shard in shards)
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 

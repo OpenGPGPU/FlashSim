@@ -123,8 +123,18 @@ machines with a smaller memory or compiler parallelism budget. Set
 ARTI `build_embedded.sh` path); completed shard objects are reused between the
 correctness and performance builds. Set
 `FLASHSIM_REUSE_EMIT=1` when rerunning a benchmark against an unchanged
-generated DUT to reuse the emitted C++ and skip the Python lowering pass. Set
-`FLASHSIM_SHARD_OPT=-O0`/`-O1` for a quick multi-CU smoke build; the default is
+generated DUT to reuse the emitted C++ and skip the Python lowering pass. The
+reuse check includes the hold-group setting. Set `FLASHSIM_HOLD_GROUP=8` during
+model generation to try finer activity-skipping groups (the default is 24;
+any positive integer is accepted). Smaller groups can reduce unnecessary work
+on some designs while increasing dispatch overhead on others, so measure the
+actual workload. For example:
+
+```sh
+FLASHSIM_HOLD_GROUP=8 python -m flashsim arti-model design.sv -o model --frontend circt
+```
+
+Set `FLASHSIM_SHARD_OPT=-O0`/`-O1` for a quick multi-CU smoke build; the default is
 `-O2`; the generated `dut_commit.cpp` shard is kept at O0 because it is a
 large dirty-list switch with little effect on the normal runtime path.
 For particularly large models, `FLASHSIM_CONSERVATIVE_ALIAS=1` passes

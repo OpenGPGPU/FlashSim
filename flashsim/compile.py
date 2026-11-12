@@ -86,6 +86,9 @@ def compile_file(
     if region_fields < 0:
         raise ValueError("FLASHSIM_DATA_REGION_FIELDS must be >= 0")
     out_h.parent.mkdir(parents=True, exist_ok=True)
+    # A direct compilation can replace a benchmark's DUT. Do not leave its
+    # old generation-options record attached to the replacement.
+    (out_h.parent / ".flashsim_emit_options.json").unlink(missing_ok=True)
     mlir_path = out_h.parent / "hw.mlir" if _resolve_frontend(frontend) == "circt" else None
     mod, cpp = compile_verilog(
         path.read_text(), frontend=frontend, path=path, mlir_path=mlir_path,
