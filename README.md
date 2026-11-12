@@ -273,10 +273,14 @@ byte-identical to the previous optimizer's captured output. This improves model
 generation; generated simulation behavior and runtime code remain unchanged.
 
 Shared combinational leaf cones are computed once for each cached root, with
-a bounded LRU for small intermediate cones. Cycles fall back to the original
-per-root traversal. For an extracted 720p texture assertion module with 342
-checks, one local run produced byte-identical C++ and reduced emitter CPU time
-from 34.7 to 12.0 seconds; this is not a whole-model or simulation-speed result.
+a bounded LRU for small intermediate cones. Larger reusable cones have a
+separate cache limited by their total leaf count, so they cannot evict small
+cones or grow without bound. Cycles fall back to the original per-root
+traversal. With the earlier small-cone cache, an extracted 720p texture
+assertion module with 342 checks produced byte-identical C++ and reduced
+emitter CPU time from 34.7 to 12.0 seconds; this is not a whole-model or
+simulation-speed result. The large-cone cache has not been timed on the full
+product model.
 Run `python3 -m pytest flashsim/test_emit_leaf_cones.py` for the cyclic,
 deep-chain and generated-code comparisons.
 

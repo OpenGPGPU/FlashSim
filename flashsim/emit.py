@@ -59,17 +59,21 @@ def cone_leaves(root: str, assigns: dict[str, Expr], stop: set[str]) -> set[str]
 
 
 def _cone_leaves_many(roots: set[str], assigns: dict[str, Expr], stop: set[str],
-                      temporary_limit: int = 32768) -> dict[str, frozenset[str]]:
-    """Compute exact leaves for shared cones with a bounded temporary cache.
+                      temporary_limit: int = 32768,
+                      large_leaf_budget: int = 1048576) -> dict[str, frozenset[str]]:
+    """Compute exact leaves for shared cones with bounded temporary caches.
 
     Root results are retained for the output; other reusable intermediate
-    results use an LRU and large intermediate sets are not cached. If a cone
-    has a cycle, fall back to the existing per-root traversal so no partially
+    results use an LRU. A separate leaf-count budget retains a few larger
+    shared sets without letting them evict the small-set cache. If a cone has
+    a cycle, fall back to the existing per-root traversal so no partially
     explored strongly connected component can be cached.
     """
     ordered = sorted(roots)
     results: dict[str, frozenset[str]] = {}
     temporary: OrderedDict[str, frozenset[str]] = OrderedDict()
+    large: OrderedDict[str, frozenset[str]] = OrderedDict()
+    large_leaves = 0
     for root in ordered:
         if root in results:
             continue
@@ -93,6 +97,14 @@ def _cone_leaves_many(roots: set[str], assigns: dict[str, Expr], stop: set[str],
                     temporary.move_to_end(name)
                     if len(temporary) > temporary_limit:
                         temporary.popitem(last=False)
+                elif (temporary_limit > 0 and len(value) <= 65536
+                      and len(value) <= large_leaf_budget):
+                    while large and (len(large) >= min(temporary_limit, 1024)
+                                     or large_leaves + len(value) > large_leaf_budget):
+                        _, evicted = large.popitem(last=False)
+                        large_leaves -= len(evicted)
+                    large[name] = value
+                    large_leaves += len(value)
                 if stack:
                     stack[-1][2].update(value)
                 continue
@@ -103,6 +115,9 @@ def _cone_leaves_many(roots: set[str], assigns: dict[str, Expr], stop: set[str],
                 temporary.move_to_end(child)
             elif child in stop or child not in assigns:
                 leaves.add(child)
+            elif (large_value := large.get(child)) is not None:
+                leaves.update(large_value)
+                large.move_to_end(child)
             elif child in active:
                 results[root] = frozenset(cone_leaves(root, assigns, stop))
                 break
