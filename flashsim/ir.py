@@ -72,6 +72,17 @@ class ArrayZeros(Expr):
 
 
 @dataclass(frozen=True, slots=True)
+class ArrayConst(Expr):
+    """Array elements in index order, starting at index zero."""
+    values: tuple[int, ...]
+    width: int
+
+    @property
+    def depth(self) -> int:
+        return len(self.values)
+
+
+@dataclass(frozen=True, slots=True)
 class MemRead(Expr):
     mem: str
     addr: Expr
@@ -220,7 +231,7 @@ def expr_id_counts(expr: Expr) -> dict[str, int]:
         if isinstance(node, Id):
             counts[node.name] = counts.get(node.name, 0) + 1
             continue
-        if isinstance(node, Const) or isinstance(node, ArrayZeros):
+        if isinstance(node, (Const, ArrayZeros, ArrayConst)):
             continue
         if isinstance(node, UnaryOp) or isinstance(node, Extract):
             stack.append(node.a)
@@ -283,7 +294,7 @@ def map_expr(expr: Expr, fn) -> Expr:
         value = map_expr(expr.value, fn)
         unchanged = arr is expr.arr and index is expr.index and value is expr.value
         return fn(expr if unchanged else ArrayInject(arr, index, value))
-    if isinstance(expr, ArrayZeros):
+    if isinstance(expr, (ArrayZeros, ArrayConst)):
         return fn(expr)
     if isinstance(expr, MemRead):
         addr = map_expr(expr.addr, fn)
@@ -326,7 +337,7 @@ def expr_width(expr: Expr, sigs: Mapping[str, Signal]) -> int:
         return expr_width(expr.arr, sigs) if not isinstance(expr.arr, Id) else sigs[expr.arr.name].width
     if isinstance(expr, ArrayInject):
         return expr_width(expr.arr, sigs)
-    if isinstance(expr, ArrayZeros):
+    if isinstance(expr, (ArrayZeros, ArrayConst)):
         return expr.width
     if isinstance(expr, MemRead):
         return sigs[expr.mem].width

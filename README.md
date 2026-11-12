@@ -36,8 +36,11 @@ ports is an error. Cover the three cases with:
 python3 -m pytest flashsim/test_circt_empty_output.py
 ```
 
-The CIRCT frontend also lowers integer `hw.array_create` values and registered
-outputs whose SSA names match their ports. Clock-typed ports and `seq.to_clock`/
+The CIRCT frontend also lowers integer `hw.array_create` and
+`hw.aggregate_constant` arrays in CIRCT index order, including nonzero and
+wide elements; unsupported aggregate shapes or elements are rejected.
+Registered outputs whose SSA names match their ports are retained. Clock-typed
+ports and `seq.to_clock`/
 `seq.from_clock` casts retain their one-bit value, including when used as data.
 For the newer LLHD syntax, unconditionally assigned signal references and
 zero-initialized clocked captures are supported; conditional immediate drives
@@ -60,7 +63,7 @@ and hold-wake tables widen their indices when the design exceeds 65,536
 entries. Exercise these cases with:
 
 ```bash
-python3 -m pytest flashsim/test_circt_array_create.py \
+python3 -m pytest flashsim/test_circt_array_create.py flashsim/test_circt_aggregate_constants.py \
   flashsim/test_circt_output_register.py flashsim/test_circt_hierarchy_reuse.py \
   flashsim/test_flatten_rename.py \
   flashsim/test_ir_structural_sharing.py flashsim/test_opt_deep_literals.py \

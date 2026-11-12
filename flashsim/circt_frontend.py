@@ -8,6 +8,7 @@ from pathlib import Path
 
 from flashsim.ir import (
     AlwaysFF,
+    ArrayConst,
     ArrayGet,
     ArrayInject,
     ArrayZeros,
@@ -75,8 +76,9 @@ _ARRAY_INJECT = re.compile(
     r"%(\S+)\s*=\s*hw\.array_inject\s+%(\S+)\[%(\S+)\],\s*%(\S+)\s*:\s*!hw\.array<(\d+)xi(\d+)>"
 )
 _AGG = re.compile(
-    r"%(\S+)\s*=\s*hw\.aggregate_constant\s+\[.*\]\s*:\s*!hw\.array<(\d+)xi(\d+)>\s*$"
+    r"%(\S+)\s*=\s*hw\.aggregate_constant\s+\[(.*)\]\s*:\s*!hw\.array<\s*(\d+)\s*x\s*i(\d+)\s*>\s*$"
 )
+_AGG_ELEMENT = re.compile(r"(true|false|-?(?:0x[0-9A-Fa-f]+|[0-9]+))(?:\s*:\s*i(\d+))?\s*$")
 _INSTANCE = re.compile(
     r"(?:((?:%\S+\s*,\s*)*%\S+)\s*=\s*)?hw\.instance\s+\"([^\"]+)\"\s+@"
     r"([A-Za-z_][A-Za-z0-9_]*)\((.*)\)\s*->\s*\((.*)\)"
@@ -496,10 +498,37 @@ def _lower_module(raw: _ParsedMod) -> Module:
             continue
         if m := _AGG.match(line):
             ident = ssa_name(m.group(1))
-            depth = int(m.group(2))
-            width = int(m.group(3))
+            depth = int(m.group(3))
+            width = int(m.group(4))
+            elements = m.group(2).split(",")
+            if depth < 1 or width < 1 or len(elements) != depth:
+                raise CirctError("invalid aggregate constant shape: " + line)
+            values = []
+            limit = 1 << width
+            for element in elements:
+                item = _AGG_ELEMENT.fullmatch(element.strip())
+                if not item:
+                    raise CirctError("unsupported aggregate constant element: " + line)
+                token, annotation = item.groups()
+                if token in {"true", "false"}:
+                    if width != 1 or annotation is not None:
+                        raise CirctError("invalid aggregate boolean element: " + line)
+                    value = int(token == "true")
+                else:
+                    if annotation is None or int(annotation) != width:
+                        raise CirctError("invalid aggregate element type: " + line)
+                    try:
+                        value = int(token, 16 if token.lstrip("-").startswith("0x") else 10)
+                    except ValueError as exc:
+                        raise CirctError("invalid aggregate constant element: " + line) from exc
+                    if value < -(limit >> 1) or value >= limit:
+                        raise CirctError("aggregate constant element out of range: " + line)
+                    value &= limit - 1
+                values.append(value)
             signals[ident] = Signal(ident, width, "wire", depth)
-            assigns.append(Assign(ident, ArrayZeros(depth, width)))
+            # As with hw.array_create, the last listed element has index zero.
+            expr = ArrayConst(tuple(reversed(values)), width) if any(values) else ArrayZeros(depth, width)
+            assigns.append(Assign(ident, expr))
             continue
         if m := _INSTANCE.match(line):
             results = [ssa_name(tok) for tok in _SSA.findall(m.group(1) or "")]
@@ -750,7 +779,7 @@ def _rename_expr(expr: Expr, rename: dict[str, str]) -> Expr:
     # map_expr does; memory names are renamed separately from their addresses.
     if isinstance(expr, Id):
         return Id(rename[expr.name]) if expr.name in rename else expr
-    if isinstance(expr, (Const, ArrayZeros)):
+    if isinstance(expr, (Const, ArrayZeros, ArrayConst)):
         return expr
     if isinstance(expr, UnaryOp):
         a = _rename_expr(expr.a, rename)

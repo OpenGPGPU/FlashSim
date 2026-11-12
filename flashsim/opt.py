@@ -21,6 +21,7 @@ from functools import lru_cache
 
 from flashsim.ir import (
     AlwaysFF,
+    ArrayConst,
     ArrayGet,
     ArrayInject,
     ArrayZeros,
@@ -378,7 +379,7 @@ def _fold_expr(expr: Expr) -> Expr:
         return ArrayInject(_fold_expr(expr.arr), _fold_expr(expr.index), _fold_expr(expr.value))
     if isinstance(expr, MemRead):
         return MemRead(expr.mem, _fold_expr(expr.addr))
-    if isinstance(expr, ArrayZeros):
+    if isinstance(expr, (ArrayZeros, ArrayConst)):
         return expr
     return expr
 
@@ -426,7 +427,7 @@ def _bounded_inline_size(expr: Expr) -> int:
         size += 1
         if size > _INLINE_NODE_BUDGET:
             return size
-        if isinstance(node, (Id, Const, ArrayZeros)):
+        if isinstance(node, (Id, Const, ArrayZeros, ArrayConst)):
             continue
         if isinstance(node, (UnaryOp, Extract)):
             stack.append(node.a)
@@ -533,7 +534,7 @@ def _inline_single_use(
             if not ready and isinstance(node, Id) and node.name in substitutions:
                 stack.append((substitutions[node.name], False))
                 continue
-            if isinstance(node, (Id, Const, ArrayZeros)):
+            if isinstance(node, (Id, Const, ArrayZeros, ArrayConst)):
                 values.append(node)
                 continue
             if isinstance(node, (UnaryOp, Extract)):
@@ -630,7 +631,7 @@ def _slice_width(expr: Expr, sigs: dict[str, Signal],
                  cache: dict[int, tuple[Expr, int]]) -> int:
     # Keep the frequently repeated wide subtrees, not every tiny atom in a
     # whole-host netlist. Holding the object prevents identity reuse.
-    if isinstance(expr, (Id, Const, Extract, ArrayZeros, MemRead)):
+    if isinstance(expr, (Id, Const, Extract, ArrayZeros, ArrayConst, MemRead)):
         return expr_width(expr, sigs)
     key = id(expr)
     hit = cache.get(key)
@@ -1081,7 +1082,7 @@ def _expr_eq(a: Expr, b: Expr) -> bool:
 
 
 def _expr_nodes(expr: Expr) -> int:
-    if isinstance(expr, (Id, Const, ArrayZeros)):
+    if isinstance(expr, (Id, Const, ArrayZeros, ArrayConst)):
         return 1
     if isinstance(expr, UnaryOp):
         return 1 + _expr_nodes(expr.a)
@@ -1919,7 +1920,7 @@ def _dedup_assigns(
         sig = sigs.get(lhs)
         if sig is None or sig.kind != "wire" or sig.depth:
             continue
-        if isinstance(rhs, (Id, Const, ArrayZeros)):
+        if isinstance(rhs, (Id, Const, ArrayZeros, ArrayConst)):
             continue
         try:
             if _expr_nodes(rhs) < _DEDUP_MIN_NODES:
@@ -1970,7 +1971,7 @@ def _expr_demands(expr: Expr, demand: int, sigs: dict[str, Signal]) -> dict[str,
             if need > prev:
                 out[node.name] = need
             continue
-        if isinstance(node, Const) or isinstance(node, ArrayZeros):
+        if isinstance(node, (Const, ArrayZeros, ArrayConst)):
             continue
         if isinstance(node, UnaryOp):
             stack.append((node.a, need))
@@ -2306,7 +2307,7 @@ def _lut_eligible(expr: Expr, sigs: dict[str, Signal]) -> list[str] | None:
     stack: list[Expr] = [expr]
     while stack:
         node = stack.pop()
-        if isinstance(node, (MemRead, ArrayGet, ArrayInject, ArrayZeros)):
+        if isinstance(node, (MemRead, ArrayGet, ArrayInject, ArrayZeros, ArrayConst)):
             return None
         if isinstance(node, BinOp) and node.op in {"/", "%", "s/", "s%"}:
             return None

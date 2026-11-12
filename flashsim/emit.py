@@ -10,6 +10,7 @@ from collections.abc import Set as AbstractSet
 from io import StringIO
 
 from flashsim.ir import (
+    ArrayConst,
     ArrayGet,
     ArrayInject,
     ArrayZeros,
@@ -296,7 +297,7 @@ def _expr_node_count(expr: Expr) -> int:
             + _expr_node_count(expr.index)
             + _expr_node_count(expr.value)
         )
-    if isinstance(expr, ArrayZeros):
+    if isinstance(expr, (ArrayZeros, ArrayConst)):
         return 1
     if isinstance(expr, MemRead):
         return 1 + _expr_node_count(expr.addr)
@@ -2396,9 +2397,9 @@ def _expr_width(expr: Expr, sigs: dict[str, Signal]) -> int:
 def _array_depth(expr: Expr, sigs: dict[str, Signal]) -> int:
     if isinstance(expr, Id):
         return sigs[expr.name].depth
-    if isinstance(expr, ArrayInject) or isinstance(expr, ArrayZeros):
-        if isinstance(expr, ArrayZeros):
-            return expr.depth
+    if isinstance(expr, (ArrayZeros, ArrayConst)):
+        return expr.depth
+    if isinstance(expr, ArrayInject):
         return _array_depth(expr.arr, sigs)
     return 0
 
@@ -4424,13 +4425,13 @@ def _emit_assign(
     sp = " " * indent
     if scratch is None:
         scratch = [0]
-    if _expr_width(expr, sigs) > 128:
-        _emit_wide_assign(dest, expr, cached, sigs, lines, indent, scratch)
-        return
-    if isinstance(expr, (ArrayInject, ArrayZeros)) or (
+    if isinstance(expr, (ArrayInject, ArrayZeros, ArrayConst)) or (
         isinstance(expr, Id) and _is_array(sigs, expr.name)
     ):
         _emit_array_assign(dest, expr, cached, sigs, lines, indent)
+        return
+    if _expr_width(expr, sigs) > 128:
+        _emit_wide_assign(dest, expr, cached, sigs, lines, indent, scratch)
         return
     if isinstance(expr, Ternary):
         def arm(d: str, e: Expr, ind: int) -> None:
@@ -5013,6 +5014,19 @@ def _emit_array_assign(
         return
     if isinstance(expr, ArrayZeros):
         lines.append(f"{sp}memset({dest}, 0, sizeof({dest}));")
+        return
+    if isinstance(expr, ArrayConst):
+        lines.append(f"{sp}memset({dest}, 0, sizeof({dest}));")
+        mask = (1 << expr.width) - 1
+        for index, raw in enumerate(expr.values):
+            value = raw & mask
+            if is_wide(expr.width):
+                for limb in range(limb_count(expr.width)):
+                    word = (value >> (64 * limb)) & ((1 << 64) - 1)
+                    if word:
+                        lines.append(f"{sp}{dest}[{index}][{limb}] = {word}ull;")
+            elif value:
+                lines.append(f"{sp}{dest}[{index}] = {_emit_const(value, expr.width)};")
         return
     if isinstance(expr, Id):
         lines.append(f"{sp}memcpy({dest}, {expr.name}, sizeof({dest}));")
