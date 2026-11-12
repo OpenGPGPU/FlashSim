@@ -8,11 +8,12 @@ import re
 def group_primitive_storage(cpp: str, cls: str, target_fields: int = 0) -> str:
     """Keep member names/order while bounding each primitive data subobject.
 
-    Only the initial uninitialized primitive declarations are moved. A bulk
-    constructor already zeroes the entire object and restores nonzero values;
-    the new bases contain neither initializers nor constructors. Cuts at
-    16-byte boundaries leave no base tail padding for a derived member to
-    reuse. Compile-time checks reject incompatible primitive/packed layouts.
+    Only the initial uninitialized primitive declarations are moved. The
+    assertion-count constant emitted before them has no instance storage and
+    remains on the DUT. A bulk constructor already zeroes the entire object
+    and restores nonzero values; the new bases contain neither initializers nor
+    constructors. Cuts at 16-byte boundaries leave no base tail padding for a
+    derived member to reuse. Compile-time checks reject incompatible layouts.
     """
     if target_fields < 0:
         raise ValueError("data region field count must be >= 0")
@@ -25,13 +26,19 @@ def group_primitive_storage(cpp: str, cls: str, target_fields: int = 0) -> str:
 
     lines = cpp.splitlines(keepends=True)
     first = lines.index(declaration)
+    first_field = first + 1
+    # Assertion-enabled models have a static constant immediately before the
+    # fields. It has no effect on object layout and must stay on the DUT.
+    assertion_count = re.compile(r"^  static constexpr uint64_t assertion_count = \d+;\n$")
+    if first_field < len(lines) and assertion_count.fullmatch(lines[first_field]):
+        first_field += 1
     field = re.compile(r"^  (uint(?:8|16|32|64)_t|unsigned __int128)\s+(.+);\n$")
     declarator = re.compile(r"^(\w+)((?:\[\d+\])*)$")
     sizes = {"uint8_t": 1, "uint16_t": 2, "uint32_t": 4,
              "uint64_t": 8, "unsigned __int128": 16}
     records = []
     offset = 0
-    for index in range(first + 1, len(lines)):
+    for index in range(first_field, len(lines)):
         match = field.fullmatch(lines[index])
         if not match:
             break
@@ -97,4 +104,5 @@ def group_primitive_storage(cpp: str, cls: str, target_fields: int = 0) -> str:
     end_line = records[start - 1][0] + 1
     return ("".join(lines[:first]) + "\n#define FLASHSIM_DATA_REGIONS 1\n"
             + "".join(definitions) + "struct " + cls + " : " + ", ".join(bases)
-            + " {\n" + "".join(lines[end_line:]) + "".join(guards))
+            + " {\n" + "".join(lines[first + 1:first_field])
+            + "".join(lines[end_line:]) + "".join(guards))

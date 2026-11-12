@@ -245,6 +245,7 @@ the compiler's type/alias metadata search while retaining member names and
 byte positions. It is off by default. Cuts avoid base tail padding, and
 compile-time size, alignment and position checks reject incompatible layouts.
 Grouping runs after method splitting, so evaluator shard sources stay unchanged.
+It also supports the static assertion count on assertion-enabled models.
 Rebuild every object and wrapper against the same generated header; never mix
 flat-header and grouped-header objects. This is a compile-time experiment,
 not a claimed simulator-runtime improvement.
