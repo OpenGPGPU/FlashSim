@@ -288,17 +288,28 @@ memory-write root. On the full four-CU desktop model, the optimized IR is
 byte-identical to the previous optimizer's captured output. This improves model
 generation; generated simulation behavior and runtime code remain unchanged.
 
-Shared combinational leaf cones are computed once for each cached root, with
-a bounded LRU for small intermediate cones. Larger reusable cones have a
-separate cache limited by their total leaf count, so they cannot evict small
-cones or grow without bound. Cycles fall back to the original per-root
-traversal. With the earlier small-cone cache, an extracted 720p texture
-assertion module with 342 checks produced byte-identical C++ and reduced
-emitter CPU time from 34.7 to 12.0 seconds; this is not a whole-model or
-simulation-speed result. The large-cone cache has not been timed on the full
-product model.
-Run `python3 -m pytest flashsim/test_emit_leaf_cones.py` for the cyclic,
-deep-chain and generated-code comparisons.
+Shared combinational leaf dependencies use one immutable assignment/stop-set
+snapshot after graph rewriting. DFS frames retain names rather than a growing
+leaf set at every depth. The temporary LRU retains at most 32,768 answers and
+1,048,576 total leaf-name references, with no answer above 65,536 names and
+at most 1,024 answers larger than 256 names. This
+budget includes small answers; required final root results retain their full
+capacity outside the temporary memo. Evicted/oversized answers and cycles use
+the original exact traversal. A rewritten graph requires a new epoch. Sorted
+root emission and generated behavior remain unchanged.
+
+Shared chains, diamonds/fanout, stop sets, cycles, tiny/zero budgets and graph
+epoch changes are covered by exact equivalence checks. Existing memory and
+mixed eager/lazy models compare byte-identical C++ against independent walks
+and execute their runtime oracles. This is a generator memory/work improvement,
+not a simulator throughput or whole-product qualification result.
+The Python 3.14 suite passes 331 tests with 18 environment-dependent skips;
+all 28 focused cases also pass with `PYTHONHASHSEED=7` and `73`.
+
+```bash
+python3 -m pytest flashsim
+python3 -m pytest flashsim/test_emit_leaf_cones.py flashsim/test_emit_leaf_dependencies.py
+```
 
 GSIM/arcilator-style used-bits and dedup shrink the busy path. `usedBits`
 propagates low-bit demand backwards from outputs/registers/memory writes

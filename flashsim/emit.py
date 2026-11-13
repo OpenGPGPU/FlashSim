@@ -8,6 +8,7 @@ import zlib
 from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Set as AbstractSet
 from io import StringIO
+from types import MappingProxyType
 
 from flashsim.ir import (
     ArrayConst,
@@ -59,73 +60,122 @@ def cone_leaves(root: str, assigns: dict[str, Expr], stop: set[str]) -> set[str]
     return found
 
 
+class _ConeLeafCache:
+    """Exact leaf queries for one immutable assignment/stop-set epoch.
+
+    Keep only small answers under both an entry and total-name budget. Large
+    cones and evicted dependencies use the original traversal; they never force
+    a transitive leaf set to be retained for every graph node. DFS frames carry
+    names, not partially accumulated leaf sets. Cycles retain the original
+    seen-set semantics instead of assuming that every input graph is a DAG.
+    """
+
+    def __init__(self, assigns: dict[str, Expr], stop: set[str], *,
+                 max_entries: int = 32768, max_names: int = 250000,
+                 max_result_names: int = 4096, max_large_entries: int = 1024):
+        if min(max_entries, max_names, max_result_names, max_large_entries) < 0:
+            raise ValueError("cone cache bounds must be nonnegative")
+        # Expr nodes are frozen dataclasses. Snapshot bindings as well: callers
+        # may rewrite their source graph after this epoch has been constructed.
+        self._assigns = MappingProxyType(dict(assigns))
+        self._stop = frozenset(stop)
+        self._max_entries = max_entries
+        self._max_names = max_names
+        self._max_result_names = max_result_names
+        self._max_large_entries = min(max_entries, max_large_entries)
+        self._large_entries = 0
+        self._cache: OrderedDict[str, frozenset[str]] = OrderedDict()
+        self._names = 0
+
+    def _get(self, name: str) -> frozenset[str] | None:
+        result = self._cache.get(name)
+        if result is not None:
+            self._cache.move_to_end(name)
+        return result
+
+    def _remember(self, name: str, leaves: set[str]) -> None:
+        if (not self._max_entries or len(leaves) > self._max_result_names
+                or len(leaves) > self._max_names
+                or (len(leaves) > 256 and not self._max_large_entries)):
+            return
+        previous = self._cache.pop(name, None)
+        if previous is not None:
+            self._names -= len(previous)
+            self._large_entries -= len(previous) > 256
+        while self._cache and (len(self._cache) >= self._max_entries
+                               or self._names + len(leaves) > self._max_names
+                               or (len(leaves) > 256 and self._large_entries >= self._max_large_entries)):
+            _, evicted = self._cache.popitem(last=False)
+            self._names -= len(evicted)
+            self._large_entries -= len(evicted) > 256
+        self._cache[name] = frozenset(leaves)
+        self._names += len(leaves)
+        self._large_entries += len(leaves) > 256
+
+    def leaves(self, root: str) -> set[str]:
+        hit = self._get(root)
+        if hit is not None:
+            return set(hit)  # A caller must not be able to mutate memo entries.
+        if not self._max_entries:
+            return cone_leaves(root, self._assigns, self._stop)
+        active: set[str] = set()
+        done: set[str] = set()
+        stack = [(root, False)]
+        while stack:
+            name, expanded = stack.pop()
+            if self._get(name) is not None:
+                continue
+            if name in self._stop or name not in self._assigns:
+                found = {name}
+                self._remember(name, found)
+                done.add(name)
+            elif expanded:
+                active.remove(name)
+                found = set()
+                for dep in expr_ids(self._assigns[name]):
+                    hit = self._get(dep)
+                    found.update(hit if hit is not None else
+                                 cone_leaves(dep, self._assigns, self._stop))
+                self._remember(name, found)
+                done.add(name)
+            else:
+                if name in active:
+                    # No incomplete result may escape from a cyclic DFS. The
+                    # old traversal computes the exact SCC-reachable leaves.
+                    self._cache.clear()
+                    self._names = 0
+                    self._large_entries = 0
+                    found = cone_leaves(root, self._assigns, self._stop)
+                    self._remember(root, found)
+                    return found
+                if name in done:
+                    continue
+                active.add(name)
+                stack.append((name, True))
+                for dep in expr_ids(self._assigns[name]):
+                    if dep not in done:
+                        stack.append((dep, False))
+                continue
+            if name == root:
+                return found
+        # A root hit is normally handled above; retain exact semantics even
+        # when a deliberately tiny cache evicts every intermediate answer.
+        return cone_leaves(root, self._assigns, self._stop)
+
+
 def _cone_leaves_many(roots: set[str], assigns: dict[str, Expr], stop: set[str],
                       temporary_limit: int = 32768,
                       large_leaf_budget: int = 1048576) -> dict[str, frozenset[str]]:
-    """Compute exact leaves for shared cones with bounded temporary caches.
+    """Exact, ordered root results using one immutable, bounded graph epoch.
 
-    Root results are retained for the output; other reusable intermediate
-    results use an LRU. A separate leaf-count budget retains a few larger
-    shared sets without letting them evict the small-set cache. If a cone has
-    a cycle, fall back to the existing per-root traversal so no partially
-    explored strongly connected component can be cached.
+    Preserve the existing argument and result interface. The leaf budget now
+    bounds all memoized names, including small answers, rather than only the
+    additional large-answer tier. Output root sets are the required result and
+    are not charged to the temporary memo. DFS frames contain names only.
     """
-    ordered = sorted(roots)
-    results: dict[str, frozenset[str]] = {}
-    temporary: OrderedDict[str, frozenset[str]] = OrderedDict()
-    large: OrderedDict[str, frozenset[str]] = OrderedDict()
-    large_leaves = 0
-    for root in ordered:
-        if root in results:
-            continue
-        if root in stop or root not in assigns:
-            results[root] = frozenset((root,))
-            continue
-        active = {root}
-        stack = [(root, iter(expr_ids(assigns[root])), set())]
-        while stack:
-            name, children, leaves = stack[-1]
-            try:
-                child = next(children)
-            except StopIteration:
-                value = frozenset(leaves)
-                stack.pop()
-                active.remove(name)
-                if name in roots:
-                    results[name] = value
-                elif temporary_limit > 0 and len(value) <= 256:
-                    temporary[name] = value
-                    temporary.move_to_end(name)
-                    if len(temporary) > temporary_limit:
-                        temporary.popitem(last=False)
-                elif (temporary_limit > 0 and len(value) <= 65536
-                      and len(value) <= large_leaf_budget):
-                    while large and (len(large) >= min(temporary_limit, 1024)
-                                     or large_leaves + len(value) > large_leaf_budget):
-                        _, evicted = large.popitem(last=False)
-                        large_leaves -= len(evicted)
-                    large[name] = value
-                    large_leaves += len(value)
-                if stack:
-                    stack[-1][2].update(value)
-                continue
-            if child in results:
-                leaves.update(results[child])
-            elif child in temporary:
-                leaves.update(temporary[child])
-                temporary.move_to_end(child)
-            elif child in stop or child not in assigns:
-                leaves.add(child)
-            elif (large_value := large.get(child)) is not None:
-                leaves.update(large_value)
-                large.move_to_end(child)
-            elif child in active:
-                results[root] = frozenset(cone_leaves(root, assigns, stop))
-                break
-            else:
-                active.add(child)
-                stack.append((child, iter(expr_ids(assigns[child])), set()))
-    return {root: results[root] for root in ordered}
+    cache = _ConeLeafCache(assigns, stop, max_entries=temporary_limit,
+                           max_names=large_leaf_budget, max_result_names=65536)
+    return {root: frozenset(cache.leaves(root)) for root in sorted(roots)}
 
 
 def collect_regs(mod: Module) -> list[str]:
