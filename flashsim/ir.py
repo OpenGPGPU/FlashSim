@@ -265,41 +265,57 @@ def expr_id_counts(expr: Expr) -> dict[str, int]:
     return counts
 
 
-def map_expr(expr: Expr, fn) -> Expr:
+def map_expr(expr: Expr, fn, *, memo: dict[int, tuple[Expr, Expr]] | None = None) -> Expr:
+    """Rewrite each occurrence, or memoize a pure rewrite when explicitly asked.
+
+    The default still invokes the visitor for every occurrence. A supplied
+    memo retains original nodes as well as results to prevent identity reuse.
+    Use one memo only with the same immutable transformation and input graph.
+    """
+    if memo is not None:
+        cached = memo.get(id(expr))
+        if cached is not None:
+            return cached[1]
     if isinstance(expr, Id) or isinstance(expr, Const):
-        return fn(expr)
-    if isinstance(expr, UnaryOp):
-        a = map_expr(expr.a, fn)
-        return fn(expr if a is expr.a else UnaryOp(expr.op, a))
-    if isinstance(expr, BinOp):
-        a, b = map_expr(expr.a, fn), map_expr(expr.b, fn)
-        return fn(expr if a is expr.a and b is expr.b else BinOp(expr.op, a, b))
-    if isinstance(expr, Ternary):
-        cond = map_expr(expr.cond, fn)
-        a, b = map_expr(expr.a, fn), map_expr(expr.b, fn)
+        result = fn(expr)
+    elif isinstance(expr, UnaryOp):
+        a = map_expr(expr.a, fn, memo=memo)
+        result = fn(expr if a is expr.a else UnaryOp(expr.op, a))
+    elif isinstance(expr, BinOp):
+        a, b = map_expr(expr.a, fn, memo=memo), map_expr(expr.b, fn, memo=memo)
+        result = fn(expr if a is expr.a and b is expr.b else BinOp(expr.op, a, b))
+    elif isinstance(expr, Ternary):
+        cond = map_expr(expr.cond, fn, memo=memo)
+        a, b = map_expr(expr.a, fn, memo=memo), map_expr(expr.b, fn, memo=memo)
         unchanged = cond is expr.cond and a is expr.a and b is expr.b
-        return fn(expr if unchanged else Ternary(cond, a, b))
-    if isinstance(expr, Extract):
-        a = map_expr(expr.a, fn)
-        return fn(expr if a is expr.a else Extract(a, expr.low, expr.width))
-    if isinstance(expr, Concat):
-        parts = tuple(map_expr(p, fn) for p in expr.parts)
+        result = fn(expr if unchanged else Ternary(cond, a, b))
+    elif isinstance(expr, Extract):
+        a = map_expr(expr.a, fn, memo=memo)
+        result = fn(expr if a is expr.a else Extract(a, expr.low, expr.width))
+    elif isinstance(expr, Concat):
+        parts = tuple(map_expr(p, fn, memo=memo) for p in expr.parts)
         unchanged = all(a is b for a, b in zip(parts, expr.parts))
-        return fn(expr if unchanged else Concat(parts))
-    if isinstance(expr, ArrayGet):
-        arr, index = map_expr(expr.arr, fn), map_expr(expr.index, fn)
-        return fn(expr if arr is expr.arr and index is expr.index else ArrayGet(arr, index))
-    if isinstance(expr, ArrayInject):
-        arr, index = map_expr(expr.arr, fn), map_expr(expr.index, fn)
-        value = map_expr(expr.value, fn)
+        result = fn(expr if unchanged else Concat(parts))
+    elif isinstance(expr, ArrayGet):
+        arr = map_expr(expr.arr, fn, memo=memo)
+        index = map_expr(expr.index, fn, memo=memo)
+        result = fn(expr if arr is expr.arr and index is expr.index else ArrayGet(arr, index))
+    elif isinstance(expr, ArrayInject):
+        arr = map_expr(expr.arr, fn, memo=memo)
+        index = map_expr(expr.index, fn, memo=memo)
+        value = map_expr(expr.value, fn, memo=memo)
         unchanged = arr is expr.arr and index is expr.index and value is expr.value
-        return fn(expr if unchanged else ArrayInject(arr, index, value))
-    if isinstance(expr, (ArrayZeros, ArrayConst)):
-        return fn(expr)
-    if isinstance(expr, MemRead):
-        addr = map_expr(expr.addr, fn)
-        return fn(expr if addr is expr.addr else MemRead(expr.mem, addr))
-    raise TypeError(type(expr))
+        result = fn(expr if unchanged else ArrayInject(arr, index, value))
+    elif isinstance(expr, (ArrayZeros, ArrayConst)):
+        result = fn(expr)
+    elif isinstance(expr, MemRead):
+        addr = map_expr(expr.addr, fn, memo=memo)
+        result = fn(expr if addr is expr.addr else MemRead(expr.mem, addr))
+    else:
+        raise TypeError(type(expr))
+    if memo is not None:
+        memo[id(expr)] = (expr, result)
+    return result
 
 
 def replace_id(expr: Expr, name: str, repl: Expr) -> Expr:

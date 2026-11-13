@@ -139,6 +139,18 @@ runtime behavior remain covered by `python -B -m pytest flashsim`.
 This lifetime fix alone does not establish full GPU generation memory use,
 generation speed or simulation throughput.
 
+Wire deduplication also preserves shared expression graphs while counting,
+comparing and rewriting them. Node counts retain the original expanded-tree
+values and optimization thresholds; counting memoizes shared children, and
+exact structural IDs replace recursively hashed expression keys. Pure alias
+rewrites use a pass-local memo, while ordinary `map_expr` visitors still run
+once per occurrence. No global graph cache is retained. Run
+`python -B -m pytest flashsim/test_opt_shared_dag.py` for shared graphs with
+40 levels (41 nodes describing over two trillion occurrences), structural
+equality across every expression kind, observer/memory-write aliasing and
+immediate cache release. This does not establish the active full GPU model's
+bottleneck or predict its generation time.
+
 Reproduce the synthetic generation comparison with
 `python -B scripts/bench_compile_gc.py --registers 8192 --repeat 3`. On ARM64
 macOS with Python 3.14.7, median compilation time was 1.363 seconds with normal

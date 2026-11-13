@@ -17,6 +17,7 @@ import re
 import sys
 from collections import ChainMap, Counter, deque
 from collections.abc import Mapping
+from dataclasses import fields
 from functools import lru_cache
 
 # Nested recursive visitors pass themselves explicitly via `_recur`: capturing
@@ -1084,31 +1085,71 @@ def _expr_eq(a: Expr, b: Expr) -> bool:
     return False
 
 
-def _expr_nodes(expr: Expr) -> int:
+def _expr_nodes(expr: Expr, *, memo: dict[int, tuple[Expr, int]] | None = None) -> int:
+    # Count expanded occurrences, as before, but compute shared subtrees once.
+    # A diamond DAG with n physical nodes can describe 2**n occurrences.
+    counts = {} if memo is None else memo
+
+    def count(node: Expr, *, _recur) -> int:
+        key = id(node)
+        cached = counts.get(key)
+        if cached is None:
+            total = 1
+            for child in _expr_children(node):
+                total += _recur(child, _recur=_recur)
+            # Keep originals alive when sharing the cache across roots.
+            counts[key] = (node, total)
+            return total
+        return cached[1]
+
+    return count(expr, _recur=count)
+
+
+def _expr_children(expr: Expr) -> tuple[Expr, ...]:
     if isinstance(expr, (Id, Const, ArrayZeros, ArrayConst)):
-        return 1
+        return ()
     if isinstance(expr, UnaryOp):
-        return 1 + _expr_nodes(expr.a)
+        return (expr.a,)
     if isinstance(expr, BinOp):
-        return 1 + _expr_nodes(expr.a) + _expr_nodes(expr.b)
+        return (expr.a, expr.b)
     if isinstance(expr, Ternary):
-        return 1 + _expr_nodes(expr.cond) + _expr_nodes(expr.a) + _expr_nodes(expr.b)
+        return (expr.cond, expr.a, expr.b)
     if isinstance(expr, Extract):
-        return 1 + _expr_nodes(expr.a)
+        return (expr.a,)
     if isinstance(expr, Concat):
-        return 1 + sum(_expr_nodes(p) for p in expr.parts)
+        return expr.parts
     if isinstance(expr, ArrayGet):
-        return 1 + _expr_nodes(expr.arr) + _expr_nodes(expr.index)
+        return (expr.arr, expr.index)
     if isinstance(expr, ArrayInject):
-        return (
-            1
-            + _expr_nodes(expr.arr)
-            + _expr_nodes(expr.index)
-            + _expr_nodes(expr.value)
-        )
+        return (expr.arr, expr.index, expr.value)
     if isinstance(expr, MemRead):
-        return 1 + _expr_nodes(expr.addr)
-    return 1
+        return (expr.addr,)
+    return ()
+
+
+class _ExprInterner:
+    """Exact structural IDs whose keys never recursively hash an Expr DAG."""
+
+    def __init__(self):
+        self.nodes: dict[int, tuple[Expr, int]] = {}
+        self.keys: dict[tuple, int] = {}
+
+    def value(self, value):
+        if isinstance(value, Expr):
+            return self.key(value)
+        if isinstance(value, tuple):
+            return tuple(self.value(part) for part in value)
+        return value
+
+    def key(self, expr: Expr) -> int:
+        cached = self.nodes.get(id(expr))
+        if cached is not None:
+            return cached[1]
+        key = (type(expr), *(self.value(getattr(expr, f.name)) for f in fields(expr)))
+        canonical = self.keys.setdefault(key, len(self.keys))
+        # Retain originals until this pass ends, so identities cannot be reused.
+        self.nodes[id(expr)] = (expr, canonical)
+        return canonical
 
 
 def _chain_op(op: str, parts: list[Expr]) -> Expr:
@@ -1897,7 +1938,7 @@ def _map_stmts(stmts: list[Stmt], fn) -> list[Stmt]:
     return out
 
 
-def _alias_expr(expr: Expr, alias: dict[str, str]) -> Expr:
+def _alias_expr(expr: Expr, alias: dict[str, str], *, memo=None) -> Expr:
     if not alias:
         return expr
 
@@ -1906,7 +1947,7 @@ def _alias_expr(expr: Expr, alias: dict[str, str]) -> Expr:
             return Id(alias[node.name])
         return node
 
-    return map_expr(expr, fn)
+    return map_expr(expr, fn, memo=memo)
 
 
 def _dedup_assigns(
@@ -1924,7 +1965,9 @@ def _dedup_assigns(
     """
     if _DEDUP_MIN_NODES < 1:
         return assigns, body, reset_epilogue, mem_writes, assertions, clocked_processes
-    groups: dict[Expr, list[str]] = {}
+    groups: dict[int, list[str]] = {}
+    interner = _ExprInterner()
+    node_counts: dict[int, tuple[Expr, int]] = {}
     for lhs, rhs in assigns.items():
         sig = sigs.get(lhs)
         if sig is None or sig.kind != "wire" or sig.depth:
@@ -1932,12 +1975,12 @@ def _dedup_assigns(
         if isinstance(rhs, (Id, Const, ArrayZeros, ArrayConst)):
             continue
         try:
-            if _expr_nodes(rhs) < _DEDUP_MIN_NODES:
+            if _expr_nodes(rhs, memo=node_counts) < _DEDUP_MIN_NODES:
                 continue
-            groups.setdefault(rhs, []).append(lhs)
+            groups.setdefault(interner.key(rhs), []).append(lhs)
         except RecursionError:
-            # Dataclass hashing can overflow the Python/C stack on very deep
-            # expressions. Deduplication is optional; keep that wire intact.
+            # Deep structural walks may still exceed the caller's stack limit.
+            # Deduplication is optional; keep that wire intact.
             continue
     alias: dict[str, str] = {}
     for rhs, names in groups.items():
@@ -1949,17 +1992,20 @@ def _dedup_assigns(
             alias[dup] = canonical
     if not alias:
         return assigns, body, reset_epilogue, mem_writes, assertions, clocked_processes
+    memo: dict[int, tuple[Expr, Expr]] = {}
+    def rewrite(expr: Expr) -> Expr:
+        return _alias_expr(expr, alias, memo=memo)
     try:
-        new_assigns = {n: _alias_expr(e, alias) for n, e in assigns.items() if n not in alias}
-        new_body = _map_stmts(body, lambda e: _alias_expr(e, alias))
-        new_reset = _map_stmts(reset_epilogue, lambda e: _alias_expr(e, alias))
+        new_assigns = {n: rewrite(e) for n, e in assigns.items() if n not in alias}
+        new_body = _map_stmts(body, rewrite)
+        new_reset = _map_stmts(reset_epilogue, rewrite)
         new_mem = [
-            MemWrite(w.mem, _alias_expr(w.addr, alias), _alias_expr(w.data, alias), _alias_expr(w.enable, alias))
+            MemWrite(w.mem, rewrite(w.addr), rewrite(w.data), rewrite(w.enable))
             for w in mem_writes
         ]
-        new_assert = [map_observation(a, lambda expr: _alias_expr(expr, alias))
+        new_assert = [map_observation(a, rewrite)
                       for a in assertions]
-        new_procs = [ClockedProcess(_alias_expr(p.clock, alias), p.scope) for p in clocked_processes]
+        new_procs = [ClockedProcess(rewrite(p.clock), p.scope) for p in clocked_processes]
     except RecursionError:
         # Publishing only part of an alias rewrite would leave dangling wires.
         # Retain the complete original IR if any observer or use is too deep.
