@@ -128,6 +128,17 @@ thresholds. The default `normal` leaves GC behavior unchanged. Use this option
 in an isolated model-generation process because cyclic GC is process-wide;
 retained cyclic garbage can increase peak memory.
 
+Recursive local IR visitors pass recursion explicitly instead of capturing
+their own function. This lets reference counting release their input maps,
+temporary results and partition target mappings when the pass returns or
+raises, including with cyclic GC disabled. It does not force collection or
+change traversal order, optimization limits or the selected GC policy.
+`python -B -m pytest flashsim/test_recursive_lifetime.py` checks immediate
+release on completed, early-return and failed walks; generated-model and
+runtime behavior remain covered by `python -B -m pytest flashsim`.
+This lifetime fix alone does not establish full GPU generation memory use,
+generation speed or simulation throughput.
+
 Reproduce the synthetic generation comparison with
 `python -B scripts/bench_compile_gc.py --registers 8192 --repeat 3`. On ARM64
 macOS with Python 3.14.7, median compilation time was 1.363 seconds with normal
