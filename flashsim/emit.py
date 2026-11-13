@@ -10,6 +10,9 @@ from collections.abc import Set as AbstractSet
 from io import StringIO
 from types import MappingProxyType
 
+# Explicit `_recur` arguments keep nested visitors from capturing themselves
+# and retaining their IR maps in cycles after a pass returns or raises.
+
 from flashsim.ir import (
     ArrayConst,
     ArrayGet,
@@ -410,7 +413,7 @@ def _promote_bulky_gated_cones(
             out.append(n)
         return out
 
-    def walk(stmts: list[Stmt], gated: bool) -> None:
+    def walk(stmts: list[Stmt], gated: bool, *, _recur) -> None:
         for stmt in stmts:
             if isinstance(stmt, If):
                 def note_arm(arm: list[Stmt]) -> None:
@@ -433,9 +436,9 @@ def _promote_bulky_gated_cones(
                 note_arm(stmt.then_body)
                 if stmt.else_body:
                     note_arm(stmt.else_body)
-                walk(stmt.then_body, True)
+                _recur(stmt.then_body, True, _recur=_recur)
                 if stmt.else_body:
-                    walk(stmt.else_body, True)
+                    _recur(stmt.else_body, True, _recur=_recur)
             elif isinstance(stmt, NbAssign):
                 if gated:
                     raw = [
@@ -453,7 +456,7 @@ def _promote_bulky_gated_cones(
             else:
                 raise TypeError(stmt)
 
-    walk(body, False)
+    walk(body, False, _recur=walk)
     # Size desc, then name list, so equal-size regions have a stable order.
     regions.sort(key=lambda rt: (-rt[0], rt[1]))
     added = 0
@@ -504,21 +507,21 @@ def _promote_shared_inlines(
     each promotion shrinks the cones that were counted against the others.
     """
 
-    def stmt_exprs(stmts: list[Stmt], out: list[Expr]) -> None:
+    def stmt_exprs(stmts: list[Stmt], out: list[Expr], *, _recur) -> None:
         for stmt in stmts:
             if isinstance(stmt, NbAssign):
                 out.append(stmt.rhs)
             elif isinstance(stmt, If):
                 out.append(stmt.cond)
-                stmt_exprs(stmt.then_body, out)
-                stmt_exprs(stmt.else_body, out)
+                _recur(stmt.then_body, out, _recur=_recur)
+                _recur(stmt.else_body, out, _recur=_recur)
             else:
                 raise TypeError(stmt)
 
     stmt_roots: list[list[Expr]] = []
     for stmt in body:
         exprs: list[Expr] = []
-        stmt_exprs([stmt], exprs)
+        stmt_exprs([stmt], exprs, _recur=stmt_exprs)
         stmt_roots.append(exprs)
 
     for _ in range(_SHARED_INLINE_ROUNDS):
@@ -706,7 +709,7 @@ def _extract_deep_mux_chunks(
     new_body: list[Stmt] | None = None
     if body is not None:
 
-        def walk(stmts: list[Stmt]) -> list[Stmt]:
+        def walk(stmts: list[Stmt], *, _recur) -> list[Stmt]:
             out: list[Stmt] = []
             for stmt in stmts:
                 if isinstance(stmt, NbAssign):
@@ -734,15 +737,15 @@ def _extract_deep_mux_chunks(
                     out.append(
                         If(
                             stmt.cond,
-                            walk(stmt.then_body),
-                            walk(stmt.else_body),
+                            _recur(stmt.then_body, _recur=_recur),
+                            _recur(stmt.else_body, _recur=_recur),
                         )
                     )
                 else:
                     out.append(stmt)
             return out
 
-        new_body = walk(body)
+        new_body = walk(body, _recur=walk)
     return before - budget[0], new_body
 
 
@@ -1025,17 +1028,17 @@ def _order_ssa_temps(
     ordered: list[str] = []
     seen: set[str] = set()
 
-    def visit(tmp: str) -> None:
+    def visit(tmp: str, *, _recur) -> None:
         if tmp in seen or tmp not in temps:
             return
         for dep in _uncached_needed(assigns[tmp], assigns, cached, stop):
             if dep in temps:
-                visit(dep)
+                _recur(dep, _recur=_recur)
         seen.add(tmp)
         ordered.append(tmp)
 
     for tmp in sorted(temps):
-        visit(tmp)
+        visit(tmp, _recur=visit)
     return ordered
 
 
@@ -1594,18 +1597,18 @@ def _stmt_stop_leaves(
     """
     leaves: set[str] = set()
 
-    def walk(stmts: list[Stmt]) -> None:
+    def walk(stmts: list[Stmt], *, _recur) -> None:
         for s in stmts:
             if isinstance(s, NbAssign):
                 leaves.update(_cond_stop_leaves(s.rhs, assigns, stop, wire_deps))
             elif isinstance(s, If):
                 leaves.update(_cond_stop_leaves(s.cond, assigns, stop, wire_deps))
-                walk(s.then_body)
-                walk(s.else_body)
+                _recur(s.then_body, _recur=_recur)
+                _recur(s.else_body, _recur=_recur)
             else:
                 raise TypeError(s)
 
-    walk([stmt])
+    walk([stmt], _recur=walk)
     return leaves
 
 
@@ -1658,18 +1661,18 @@ def _stmt_cut_leaves(
             leaves.update(a)
             wires.update(b)
 
-    def walk(stmts: list[Stmt]) -> None:
+    def walk(stmts: list[Stmt], *, _recur) -> None:
         for s in stmts:
             if isinstance(s, NbAssign):
                 note(s.rhs)
             elif isinstance(s, If):
                 note(s.cond)
-                walk(s.then_body)
-                walk(s.else_body)
+                _recur(s.then_body, _recur=_recur)
+                _recur(s.else_body, _recur=_recur)
             else:
                 raise TypeError(s)
 
-    walk([stmt])
+    walk([stmt], _recur=walk)
     return leaves, wires
 
 
@@ -2179,21 +2182,21 @@ def _mark_write(name: str, lines: list[str], indent: int) -> None:
 def _stmt_names(stmt: Stmt) -> set[str]:
     acc: list[str] = []
 
-    def walk(ss: list[Stmt]) -> None:
+    def walk(ss: list[Stmt], *, _recur) -> None:
         for s in ss:
             if isinstance(s, NbAssign):
                 acc.append(s.lhs)
             elif isinstance(s, If):
                 acc.extend(expr_ids(s.cond))
-                walk(s.then_body)
-                walk(s.else_body)
+                _recur(s.then_body, _recur=_recur)
+                _recur(s.else_body, _recur=_recur)
 
     if isinstance(stmt, NbAssign):
         acc.append(stmt.lhs)
     elif isinstance(stmt, If):
         acc.extend(expr_ids(stmt.cond))
-        walk(stmt.then_body)
-        walk(stmt.else_body)
+        walk(stmt.then_body, _recur=walk)
+        walk(stmt.else_body, _recur=walk)
     return set(acc)
 
 

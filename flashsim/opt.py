@@ -19,6 +19,9 @@ from collections import ChainMap, Counter, deque
 from collections.abc import Mapping
 from functools import lru_cache
 
+# Nested recursive visitors pass themselves explicitly via `_recur`: capturing
+# their own name creates a cycle that can retain entire IR maps until cyclic GC.
+
 from flashsim.ir import (
     AlwaysFF,
     ArrayConst,
@@ -1209,18 +1212,22 @@ def _cse_sibling_or_prefixes(
     """CSE long shared &/| prefixes among sibling hold/if conditions (L2)."""
     counter = [0]
 
-    def walk(stmts: list[Stmt]) -> list[Stmt]:
+    def walk(stmts: list[Stmt], *, _recur) -> list[Stmt]:
         mapped: list[Stmt] = []
         for stmt in stmts:
             if isinstance(stmt, If):
                 mapped.append(
-                    If(stmt.cond, walk(stmt.then_body), walk(stmt.else_body))
+                    If(
+                        stmt.cond,
+                        _recur(stmt.then_body, _recur=_recur),
+                        _recur(stmt.else_body, _recur=_recur),
+                    )
                 )
             else:
                 mapped.append(stmt)
         return _cse_or_prefix_run(mapped, assigns, counter, sigs)
 
-    return walk(body)
+    return walk(body, _recur=walk)
 
 
 def _hold_next(expr: Expr, lhs: str) -> tuple[str, Expr, Expr] | None:
@@ -1596,10 +1603,10 @@ def _reassoc_and_chains(
 
     flat: dict[str, frozenset[Expr] | None] = {}
 
-    def literals(e: Expr) -> frozenset[Expr] | None:
+    def literals(e: Expr, *, _recur) -> frozenset[Expr] | None:
         if isinstance(e, BinOp) and e.op == "&" and bit(e.a) and bit(e.b):
-            a = literals(e.a)
-            b = literals(e.b) if a is not None else None
+            a = _recur(e.a, _recur=_recur)
+            b = _recur(e.b, _recur=_recur) if a is not None else None
             if a is None or b is None or len(a) + len(b) > _REASSOC_AND_MAX:
                 return None
             return a | b
@@ -1635,7 +1642,7 @@ def _reassoc_and_chains(
         ):
             continue
         try:
-            flat[name] = literals(e)
+            flat[name] = literals(e, _recur=literals)
         except RecursionError:
             # Deep opaque expressions need not be hashed or reassociated.
             # Retaining the original chain is safe and keeps large DUTs
@@ -1657,7 +1664,7 @@ def _reassoc_and_chains(
     out = dict(assigns)
     counter = [0]
 
-    def prefix(lits: list[Expr], stem: str) -> Expr:
+    def prefix(lits: list[Expr], stem: str, *, _recur) -> Expr:
         if len(lits) == 1:
             return lits[0]
         key = frozenset(lits)
@@ -1670,7 +1677,9 @@ def _reassoc_and_chains(
                     break
             sigs[name] = Signal(name, 1, "wire")
             by_set[key] = name
-            out[name] = BinOp("&", prefix(lits[:-1], stem), lits[-1])
+            out[name] = BinOp(
+                "&", _recur(lits[:-1], stem, _recur=_recur), lits[-1]
+            )
         return Id(name)
 
     for n in order:
@@ -1684,7 +1693,7 @@ def _reassoc_and_chains(
             # limit before hashing does. This chain is safe to leave as-is.
             continue
         stem = n[: n.rfind("_t")] if re.search(r"_t\d+$", n) else n
-        out[n] = BinOp("&", prefix(lits[:-1], stem), lits[-1])
+        out[n] = BinOp("&", prefix(lits[:-1], stem, _recur=prefix), lits[-1])
     return out
 
 
@@ -2171,18 +2180,18 @@ def _apply_used_bits(
             used[name] = sig.width
     body_pairs: list[tuple[Expr, int]] = []
 
-    def walk(stmts: list[Stmt]) -> None:
+    def walk(stmts: list[Stmt], *, _recur) -> None:
         for stmt in stmts:
             if isinstance(stmt, NbAssign):
                 target = sigs.get(stmt.lhs)
                 body_pairs.append((stmt.rhs, target.width if target is not None else 32))
             elif isinstance(stmt, If):
                 body_pairs.append((stmt.cond, 1))
-                walk(stmt.then_body)
-                walk(stmt.else_body)
+                _recur(stmt.then_body, _recur=_recur)
+                _recur(stmt.else_body, _recur=_recur)
 
-    walk(body)
-    walk(reset_epilogue)
+    walk(body, _recur=walk)
+    walk(reset_epilogue, _recur=walk)
     for expr in observed_exprs:
         body_pairs.append((expr, expr_width(expr, sigs)))
     for wr in mem_writes:
