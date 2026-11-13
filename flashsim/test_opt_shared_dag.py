@@ -52,6 +52,28 @@ def test_structural_keys_match_dataclass_equality_for_every_expression_kind():
             assert (interner.key(a) == interner.key(b)) == (a == b)
 
 
+def test_dedup_shares_count_cache_across_overlapping_assignment_roots(monkeypatch):
+    calls = 0
+    original = opt._expr_children
+
+    def children(expr):
+        nonlocal calls
+        calls += 1
+        assert calls <= 200, "revisited shared prefixes for each assignment root"
+        return original(expr)
+
+    monkeypatch.setattr(opt, "_expr_children", children)
+    expr = Id("input")
+    assigns = {}
+    for index in range(100):
+        expr = BinOp("&", expr, expr)
+        assigns[f"wire{index}"] = expr
+    sigs = {n: Signal(n, 1, "wire") for n in assigns}
+    result = opt._dedup_assigns(assigns, [], [], [], [], [], sigs)[0]
+    assert len(result) == 100
+    assert calls == 101
+
+
 def test_dedup_shared_dags_never_recursively_hash_expressions(monkeypatch):
     def forbidden_hash(expr):
         raise AssertionError("recursive Expr hashing expands the DAG")

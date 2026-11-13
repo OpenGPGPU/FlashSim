@@ -1085,19 +1085,22 @@ def _expr_eq(a: Expr, b: Expr) -> bool:
     return False
 
 
-def _expr_nodes(expr: Expr) -> int:
+def _expr_nodes(expr: Expr, *, memo: dict[int, tuple[Expr, int]] | None = None) -> int:
     # Count expanded occurrences, as before, but compute shared subtrees once.
     # A diamond DAG with n physical nodes can describe 2**n occurrences.
-    counts: dict[int, int] = {}
+    counts = {} if memo is None else memo
 
     def count(node: Expr, *, _recur) -> int:
         key = id(node)
-        if key not in counts:
+        cached = counts.get(key)
+        if cached is None:
             total = 1
             for child in _expr_children(node):
                 total += _recur(child, _recur=_recur)
-            counts[key] = total
-        return counts[key]
+            # Keep originals alive when sharing the cache across roots.
+            counts[key] = (node, total)
+            return total
+        return cached[1]
 
     return count(expr, _recur=count)
 
@@ -1964,6 +1967,7 @@ def _dedup_assigns(
         return assigns, body, reset_epilogue, mem_writes, assertions, clocked_processes
     groups: dict[int, list[str]] = {}
     interner = _ExprInterner()
+    node_counts: dict[int, tuple[Expr, int]] = {}
     for lhs, rhs in assigns.items():
         sig = sigs.get(lhs)
         if sig is None or sig.kind != "wire" or sig.depth:
@@ -1971,7 +1975,7 @@ def _dedup_assigns(
         if isinstance(rhs, (Id, Const, ArrayZeros, ArrayConst)):
             continue
         try:
-            if _expr_nodes(rhs) < _DEDUP_MIN_NODES:
+            if _expr_nodes(rhs, memo=node_counts) < _DEDUP_MIN_NODES:
                 continue
             groups.setdefault(interner.key(rhs), []).append(lhs)
         except RecursionError:
