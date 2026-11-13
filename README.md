@@ -682,17 +682,25 @@ memory-write root. On the full four-CU desktop model, the optimized IR is
 byte-identical to the previous optimizer's captured output. This improves model
 generation; generated simulation behavior and runtime code remain unchanged.
 
-Shared combinational leaf cones are computed once for each cached root, with
-a bounded LRU for small intermediate cones. Larger reusable cones have a
-separate cache limited by their total leaf count, so they cannot evict small
-cones or grow without bound. Cycles fall back to the original per-root
-traversal. With the earlier small-cone cache, an extracted 720p texture
-assertion module with 342 checks produced byte-identical C++ and reduced
-emitter CPU time from 34.7 to 12.0 seconds; this is not a whole-model or
-simulation-speed result. The large-cone cache has not been timed on the full
-product model.
-Run `python3 -m pytest flashsim/test_emit_leaf_cones.py` for the cyclic,
-deep-chain and generated-code comparisons.
+Shared combinational leaf dependencies reuse immutable answers within each
+emission pass. The temporary cache holds up to 32,768 answers and 1,048,576
+leaf references across small and large answers. A cached answer holds up
+to 65,536 names, and up to 1,024 answers can exceed 256 names. The active
+DFS frontier has its own 1,048,576-reference limit. It releases partial
+frames before using the exact per-root walk for a cycle or an oversized
+frontier. The complete root answers retain their full capacity.
+
+The focused tests compare leaves with independent walks and compare emitted
+C++ bytes and simulation results for memory and mixed eager/lazy models.
+On ARM64 macOS with Python 3.14.7, a synthetic 3,000-level frontier with
+700 shared leaves and one distinct leaf per level used 113.53 MiB in
+`20ee9d9` and 47.47 MiB with the frontier limit, measured with
+`tracemalloc`. Both runs returned the same 3,701 leaves. The measurement
+covers the dependency traversal.
+
+```bash
+PYTHONHASHSEED=73 python3 -m pytest flashsim/test_emit_leaf_cones.py flashsim/test_emit_leaf_dependencies.py
+```
 
 GSIM/arcilator-style used-bits and dedup shrink the busy path. `usedBits`
 propagates low-bit demand backwards from outputs/registers/memory writes

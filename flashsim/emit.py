@@ -97,22 +97,61 @@ class _LeafFrame:
             self.leaves.update(value)
 
 
+class _LeafMemo:
+    """Bound intermediate answers by entries and total leaf references."""
+
+    def __init__(self, entries: int, names: int):
+        if min(entries, names) < 0:
+            raise ValueError("leaf cache bounds must be nonnegative")
+        self.entry_limit = entries
+        self.name_limit = names
+        self.large_limit = min(entries, 1024)
+        self.answers: OrderedDict[str, frozenset[str]] = OrderedDict()
+        self.large: OrderedDict[str, None] = OrderedDict()
+        self.names = 0
+
+    def get(self, name: str) -> frozenset[str] | None:
+        answer = self.answers.get(name)
+        if answer is not None:
+            self.answers.move_to_end(name)
+            if name in self.large:
+                self.large.move_to_end(name)
+        return answer
+
+    def _evict(self, name: str) -> None:
+        self.names -= len(self.answers.pop(name))
+        self.large.pop(name, None)
+
+    def remember(self, name: str, answer: frozenset[str]) -> None:
+        size = len(answer)
+        if not self.entry_limit or size > min(65536, self.name_limit):
+            return
+        if name in self.answers:
+            self._evict(name)
+        if size > 256 and len(self.large) == self.large_limit:
+            self._evict(next(iter(self.large)))
+        while len(self.answers) >= self.entry_limit or self.names + size > self.name_limit:
+            self._evict(next(iter(self.answers)))
+        self.answers[name] = answer
+        self.names += size
+        if size > 256:
+            self.large[name] = None
+
+
 def _cone_leaves_many(roots: set[str], assigns: dict[str, Expr], stop: set[str],
                       temporary_limit: int = 32768,
                       large_leaf_budget: int = 1048576) -> dict[str, frozenset[str]]:
     """Compute exact leaves for shared cones with bounded temporary caches.
 
-    Equal root results share an immutable set. Intermediate results use an
-    LRU with a separate leaf-count budget for large sets. A frame reuses an
-    immutable child result until it needs to add other leaves. Cyclic cones
-    use an independent walk without caching a partial component.
+    Equal root results share an immutable set. Bound both the memo and the
+    active frame sets by leaf references, with the required root answers
+    retained separately. Cycles and over-budget frontiers use an independent
+    walk without retaining partial answers.
     """
     ordered = sorted(roots)
     results: dict[str, frozenset[str]] = {}
     interned: dict[frozenset[str], frozenset[str]] = {}
-    temporary: OrderedDict[str, frozenset[str]] = OrderedDict()
-    large: OrderedDict[str, frozenset[str]] = OrderedDict()
-    large_leaves = 0
+    memo = _LeafMemo(temporary_limit, large_leaf_budget)
     for root in ordered:
         if root in results:
             continue
@@ -122,6 +161,7 @@ def _cone_leaves_many(roots: set[str], assigns: dict[str, Expr], stop: set[str],
             continue
         active = {root}
         stack = [_LeafFrame(root, iter(expr_ids(assigns[root], ordered=False)))]
+        frontier_names = 0
         while stack:
             frame = stack[-1]
             name = frame.name
@@ -129,44 +169,46 @@ def _cone_leaves_many(roots: set[str], assigns: dict[str, Expr], stop: set[str],
                 child = next(frame.children)
             except StopIteration:
                 value = frozenset(frame.leaves)
+                frontier_names -= len(value)
                 stack.pop()
                 active.remove(name)
                 if name in roots:
                     value = interned.setdefault(value, value)
                     results[name] = value
-                elif temporary_limit > 0 and len(value) <= 256:
-                    temporary[name] = value
-                    temporary.move_to_end(name)
-                    if len(temporary) > temporary_limit:
-                        temporary.popitem(last=False)
-                elif (temporary_limit > 0 and len(value) <= 65536
-                      and len(value) <= large_leaf_budget):
-                    while large and (len(large) >= min(temporary_limit, 1024)
-                                     or large_leaves + len(value) > large_leaf_budget):
-                        _, evicted = large.popitem(last=False)
-                        large_leaves -= len(evicted)
-                    large[name] = value
-                    large_leaves += len(value)
-                if stack:
-                    stack[-1].merge(value)
-                continue
-            if child in results:
-                frame.merge(results[child])
-            elif child in temporary:
-                frame.merge(temporary[child])
-                temporary.move_to_end(child)
-            elif child in stop or child not in assigns:
-                frame.add(child)
-            elif (large_value := large.get(child)) is not None:
-                frame.merge(large_value)
-                large.move_to_end(child)
-            elif child in active:
-                value = frozenset(cone_leaves(root, assigns, stop))
-                results[root] = interned.setdefault(value, value)
-                break
+                else:
+                    memo.remember(name, value)
+                if not stack:
+                    continue
+                frame = stack[-1]
             else:
-                active.add(child)
-                stack.append(_LeafFrame(child, iter(expr_ids(assigns[child], ordered=False))))
+                value = results.get(child)
+                if value is None:
+                    value = memo.get(child)
+                if value is None:
+                    if child in stop or child not in assigns:
+                        if child not in frame.leaves:
+                            if frontier_names >= large_leaf_budget:
+                                break
+                            frame.add(child)
+                            frontier_names += 1
+                    elif child in active:
+                        break
+                    else:
+                        active.add(child)
+                        stack.append(_LeafFrame(child, iter(expr_ids(assigns[child], ordered=False))))
+                    continue
+            if value is not frame.leaves:
+                # Reserve space before a union can copy a shared leaf set.
+                if frontier_names + len(value) > large_leaf_budget:
+                    break
+                previous = len(frame.leaves)
+                frame.merge(value)
+                frontier_names += len(frame.leaves) - previous
+        if stack:
+            stack.clear()
+            del frame
+            value = frozenset(cone_leaves(root, assigns, stop))
+            results[root] = interned.setdefault(value, value)
     return {root: results[root] for root in ordered}
 
 
