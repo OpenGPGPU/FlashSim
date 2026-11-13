@@ -324,15 +324,24 @@ def _concat_as_shift(left: Expr, right: Expr, sigs: dict[str, Signal]) -> Expr |
 
 
 def _fold_expr(expr: Expr) -> Expr:
+    # Inlining can share an immutable subtree between multiple operands.
+    # Folding occurrences separately expands that DAG into an exponential
+    # tree, even when no constant changes. Keep the memo local to this root
+    # so a fold does not retain other assignments or previous compilations.
+    return map_expr(expr, _fold_node, memo={})
+
+
+def _fold_node(expr: Expr) -> Expr:
+    """Fold one node after its children have already been rewritten."""
     if isinstance(expr, UnaryOp):
-        a = _fold_expr(expr.a)
+        a = expr.a
         if isinstance(a, Const) and expr.op in {"~", "!"}:
             width = a.width
             mask = (1 << width) - 1
             return Const((~a.value) & mask, width)
-        return UnaryOp(expr.op, a)
+        return expr
     if isinstance(expr, BinOp):
-        a, b = _fold_expr(expr.a), _fold_expr(expr.b)
+        a, b = expr.a, expr.b
         if isinstance(a, Const) and isinstance(b, Const):
             width = max(a.width, b.width)
             mask = (1 << width) - 1
@@ -360,30 +369,20 @@ def _fold_expr(expr: Expr) -> Expr:
                 width = 1 if expr.op in CMP_OPS else width
                 return Const(ops[expr.op](a.value, b.value) & mask, width)
         if expr.op == "&":
-            absorbed = _absorb_and(BinOp("&", a, b))
+            absorbed = _absorb_and(expr)
             if absorbed is not None:
                 return absorbed
-        return BinOp(expr.op, a, b)
+        return expr
     if isinstance(expr, Ternary):
-        cond, a, b = _fold_expr(expr.cond), _fold_expr(expr.a), _fold_expr(expr.b)
+        cond, a, b = expr.cond, expr.a, expr.b
         if isinstance(cond, Const):
             return a if cond.value else b
-        return Ternary(cond, a, b)
+        return expr
     if isinstance(expr, Extract):
-        a = _fold_expr(expr.a)
+        a = expr.a
         if isinstance(a, Const):
             mask = (1 << expr.width) - 1
             return Const((a.value >> expr.low) & mask, expr.width)
-        return Extract(a, expr.low, expr.width)
-    if isinstance(expr, Concat):
-        return Concat(tuple(_fold_expr(p) for p in expr.parts))
-    if isinstance(expr, ArrayGet):
-        return ArrayGet(_fold_expr(expr.arr), _fold_expr(expr.index))
-    if isinstance(expr, ArrayInject):
-        return ArrayInject(_fold_expr(expr.arr), _fold_expr(expr.index), _fold_expr(expr.value))
-    if isinstance(expr, MemRead):
-        return MemRead(expr.mem, _fold_expr(expr.addr))
-    if isinstance(expr, (ArrayZeros, ArrayConst)):
         return expr
     return expr
 
