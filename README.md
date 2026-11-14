@@ -313,6 +313,21 @@ static exhaustive caching beats the boolean tree when the inputs change
 every tick. All three are on by default and opt out with
 `FLASHSIM_USED_BITS=0` / `FLASHSIM_DEDUP=0` / `FLASHSIM_LUT=0` (or
 `FLASHSIM_LUT_MIN_NODES` to retune).
+For a future compilation, `FLASHSIM_PHASE_TIMINGS=1` writes flushed
+`[flashsim-phase]` JSON begin/end records to stderr for frontend, parsing,
+optimization, emission and shard splitting. Optimizer records include DCE,
+SOP merging, reassociation, deduplication, used-bit demand, the following
+folds and LUT conversion. End records contain wall seconds and success/error
+status. Diagnostics retain no IR or caller frames and create no evidence
+files; they do not enable tracing in an already running process. Small native
+and stub-CIRCT tests confirm identical generated model/shard bytes with the
+flag off/on, including unchanged compilation exceptions:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m pytest -q -p no:cacheprovider \
+  flashsim/test_phase_timing.py flashsim/test_compile_incremental.py
+```
+
 Unit GPU benches (Apple M4 Max, alternating baseline/candidate runs) keep
 every `dout` identical to 1-thread Verilator and lift the geomean, with
 `VectorBackend` +14%, `Gpu` +9%/`InstructionCache` +7% from tables alone

@@ -6,6 +6,8 @@ import subprocess
 from collections import Counter
 from pathlib import Path
 
+from flashsim.phase_timing import phase
+
 from flashsim.ir import (
     AlwaysFF,
     ArrayConst,
@@ -223,10 +225,12 @@ def _split_modules(src: str) -> list[_ParsedMod]:
 
 def parse_hw_mlir(src: str, top: str | None = None) -> Module:
     src = re.sub(r"\{sv\.[^}]*\}", "", src)
-    parsed = _split_modules(src)
+    with phase('parse.split_modules'):
+        parsed = _split_modules(src)
     if not parsed:
         raise CirctError("no hw.module found in CIRCT output")
-    by_name = {m.name: _lower_module(m) for m in parsed}
+    with phase('parse.lower_modules'):
+        by_name = {m.name: _lower_module(m) for m in parsed}
     if top and top in by_name:
         chosen = by_name[top]
     else:
@@ -237,7 +241,8 @@ def parse_hw_mlir(src: str, top: str | None = None) -> Module:
     # completed children reduces the peak cost of flattening large hierarchies.
     lib = {name: by_name[name] for name in reachable}
     del by_name
-    return _flatten(chosen, lib, remaining)
+    with phase('parse.flatten'):
+        return _flatten(chosen, lib, remaining)
 
 
 def _lower_module(raw: _ParsedMod) -> Module:
