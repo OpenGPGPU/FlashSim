@@ -151,6 +151,17 @@ equality across every expression kind, observer/memory-write aliasing and
 immediate cache release. This does not establish the active full GPU model's
 bottleneck or predict its generation time.
 
+Bit-slice narrowing memoizes recursive widths and slice results within one
+pass, with bounded caches. Slice results retain the remaining recursion budget
+and active wire set in their keys; creating a shared slice wire invalidates
+previous results. Unknown-width failures and their parents are not retained.
+This preserves shared-wire naming, recursion limits and optimization thresholds
+while avoiding repeated walks of shared operands. Run
+`python -B -m pytest flashsim/test_opt_slice_width_dag.py flashsim/test_opt_slice_context.py flashsim/test_opt_generated_slices.py`
+for shared graphs, cache bounds, unknown widths, stale parent failures after
+wire creation, immediate cache release and executable generated C++.
+These component tests do not establish full GPU generation time or throughput.
+
 Reproduce the synthetic generation comparison with
 `python -B scripts/bench_compile_gc.py --registers 8192 --repeat 3`. On ARM64
 macOS with Python 3.14.7, median compilation time was 1.363 seconds with normal

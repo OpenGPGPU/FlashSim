@@ -63,20 +63,14 @@ def test_slice_width_cache_uses_identity_and_has_a_fixed_bound(monkeypatch):
     equal_but_distinct = BinOp("&", Id("x"), Const(3, 4))
     last = BinOp("|", Id("x"), Const(0, 4))
     cache = {}
-    calls = []
-    original = opt.expr_width
-
-    def count_width(expr, sigs):
-        calls.append(expr)
-        return original(expr, sigs)
-
-    monkeypatch.setattr(opt, "expr_width", count_width)
     monkeypatch.setattr(opt, "_SLICE_WIDTH_CACHE_MAX", 2)
     assert opt._slice_width(first, signals, cache) == 4
+    assert cache[id(first)] == (first, 4)
     assert opt._slice_width(first, signals, cache) == 4
-    assert len(calls) == 1
+    assert len(cache) == 1
     assert opt._slice_width(equal_but_distinct, signals, cache) == 4
-    assert len(calls) == 2 and len(cache) == 2
+    assert len(cache) == 2
+    assert cache[id(equal_but_distinct)][0] is equal_but_distinct
     assert opt._slice_width(last, signals, cache) == 4
     assert len(cache) <= 2
 
