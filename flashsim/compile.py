@@ -15,6 +15,7 @@ from flashsim.circt_frontend import (
 )
 from flashsim.emit import emit_cpp, split_dut_methods
 from flashsim.data_regions import group_primitive_storage
+from flashsim.phase_timing import phase
 from flashsim.ir import Module
 from flashsim.opt import optimize
 from flashsim.parse import parse_verilog
@@ -39,8 +40,9 @@ def compile_verilog(
             and _mlir_matches(mlir_path, path, assertions=assertions)
         ):
             fingerprint = _assertion_sources(path) if assertions else None
-            mlir = (circt_verilog_to_mlir(path, assertions=True) if assertions
-                    else circt_verilog_to_mlir(path))
+            with phase('frontend.circt'):
+                mlir = (circt_verilog_to_mlir(path, assertions=True) if assertions
+                        else circt_verilog_to_mlir(path))
             if assertions and fingerprint != _assertion_sources(path):
                 raise CirctError("assertion inputs changed during CIRCT compilation")
             if mlir_path is not None:
@@ -56,13 +58,18 @@ def compile_verilog(
                 serial_marker.write_text("1" if serial else "0")
         else:
             mlir = mlir_path.read_text()
-        mod = parse_hw_mlir(mlir, top=path.stem)
+        with phase('parse.hw_mlir'):
+            mod = parse_hw_mlir(mlir, top=path.stem)
     else:
         if assertions:
             raise CirctError("bound assertions require the CIRCT frontend")
-        mod = parse_verilog(src)
-    mod = optimize(mod)
-    return mod, emit_cpp(mod)
+        with phase('parse.verilog'):
+            mod = parse_verilog(src)
+    with phase('optimize'):
+        mod = optimize(mod)
+    with phase('emit_cpp'):
+        cpp = emit_cpp(mod)
+    return mod, cpp
 
 
 def compile_file(
@@ -98,7 +105,8 @@ def compile_file(
         split = _auto_split_count(path, len(cpp))
     wanted: set[str] = set()
     if split > 0:
-        header, parts = split_dut_methods(cpp, n_shards=split)
+        with phase('split_dut_methods'):
+            header, parts = split_dut_methods(cpp, n_shards=split)
         _write_generated(out_h, group_primitive_storage(
             header, f"{mod.name}Dut", region_fields))
         for name, body in parts:

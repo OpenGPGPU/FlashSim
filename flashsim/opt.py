@@ -18,6 +18,7 @@ import sys
 from collections import ChainMap, Counter, deque
 from collections.abc import Mapping
 from functools import lru_cache
+from flashsim.phase_timing import phase, timed_phase
 
 from flashsim.ir import (
     AlwaysFF,
@@ -168,22 +169,24 @@ def optimize(mod: Module) -> Module:
         )
         assertion_reads = observer_reads()
         observed = outputs | assertion_reads
-        assigns = {k: _fold_expr(v) for k, v in assigns.items()}
-        body = _map_stmts(body, _fold_expr)
-        reset_epilogue = _map_stmts(reset_epilogue, _fold_expr)
+        with phase('opt.post_dedup_fold'):
+            assigns = {k: _fold_expr(v) for k, v in assigns.items()}
+            body = _map_stmts(body, _fold_expr)
+            reset_epilogue = _map_stmts(reset_epilogue, _fold_expr)
         assigns, body = _dce(assigns, body, observed, mem_writes)
     if _USED_BITS:
         observed_exprs = [expr for a in assertions for expr in observation_exprs(a)]
         observed_exprs.extend(p.clock for p in clocked_processes)
         assigns, sigs = _apply_used_bits(assigns, body, reset_epilogue, mem_writes,
                                         sigs, observed_exprs)
-        assigns = {k: _fold_expr(v) for k, v in assigns.items()}
-        body = _map_stmts(body, _fold_expr)
-        reset_epilogue = _map_stmts(reset_epilogue, _fold_expr)
-        mem_writes = [
-            MemWrite(w.mem, _fold_expr(w.addr), _fold_expr(w.data), _fold_expr(w.enable))
-            for w in mem_writes
-        ]
+        with phase('opt.post_used_bits_fold'):
+            assigns = {k: _fold_expr(v) for k, v in assigns.items()}
+            body = _map_stmts(body, _fold_expr)
+            reset_epilogue = _map_stmts(reset_epilogue, _fold_expr)
+            mem_writes = [
+                MemWrite(w.mem, _fold_expr(w.addr), _fold_expr(w.data), _fold_expr(w.enable))
+                for w in mem_writes
+            ]
         assigns, body = _dce(assigns, body, observed, mem_writes)
     if _LUT:
         assigns = _apply_lut(assigns, sigs)
@@ -453,6 +456,7 @@ def _bounded_inline_size(expr: Expr) -> int:
     return size
 
 
+@timed_phase('opt.inline_single_use')
 def _inline_single_use(
     assigns: dict[str, Expr],
     body: list[Stmt],
@@ -591,6 +595,7 @@ def _inline_single_use(
     return {name: expand(expr) for name, expr in assigns.items()}, body
 
 
+@timed_phase('opt.dce')
 def _dce(
     assigns: dict[str, Expr],
     body: list[Stmt],
@@ -848,6 +853,7 @@ def _narrow_expr(
     return map_expr(expr, fn)
 
 
+@timed_phase('opt.narrow_bit_slices')
 def _narrow_bit_slices(
     assigns: dict[str, Expr],
     body: list[Stmt],
@@ -1324,6 +1330,7 @@ _SOP_LITS_MAX = 64
 _SOP_FALSE = frozenset([("<false>", True)])
 
 
+@timed_phase('opt.merge_sop')
 def _merge_sop_terms(
     assigns: dict[str, Expr], sigs: dict[str, Signal]
 ) -> dict[str, Expr]:
@@ -1579,6 +1586,7 @@ _REASSOC_AND = os.environ.get("FLASHSIM_REASSOC_AND", "1") != "0"
 _REASSOC_AND_MAX = 48
 
 
+@timed_phase('opt.reassoc_and')
 def _reassoc_and_chains(
     assigns: dict[str, Expr], sigs: dict[str, Signal]
 ) -> dict[str, Expr]:
@@ -1905,6 +1913,7 @@ def _alias_expr(expr: Expr, alias: dict[str, str]) -> Expr:
     return map_expr(expr, fn)
 
 
+@timed_phase('opt.dedup')
 def _dedup_assigns(
     assigns: dict[str, Expr],
     body: list[Stmt],
@@ -2161,6 +2170,7 @@ def _truncate_to_used(expr: Expr, need: int, sigs: dict[str, Signal]) -> Expr:
     return expr
 
 
+@timed_phase('opt.used_bits')
 def _apply_used_bits(
     assigns: dict[str, Expr],
     body: list[Stmt],
@@ -2336,6 +2346,7 @@ def _lut_eligible(expr: Expr, sigs: dict[str, Signal]) -> list[str] | None:
     return leaves
 
 
+@timed_phase('opt.lut')
 def _apply_lut(assigns: dict[str, Expr], sigs: dict[str, Signal]) -> dict[str, Expr]:
     out: dict[str, Expr] = {}
     for lhs, rhs in assigns.items():
