@@ -1,5 +1,6 @@
 """Slice cost metadata stays exact and bounded on overlapping expression DAGs."""
 import gc
+import sys
 import weakref
 
 import pytest
@@ -31,7 +32,7 @@ def test_shared_dag_costs_reuse_overlapping_roots_without_expanding_occurrences(
     for depth in reversed(range(1, 41)):
         assert costs.node_count(roots[depth]) == (1 << (depth + 1)) - 1
         assert costs.leaf_set(roots[depth]) == {"a"}
-    assert visits <= 125
+    assert visits <= 170
     # Leaf-set metadata must not change multiplicity for the use counter.
     assert expr_id_counts(roots[10]) == {"a": 1024}
 
@@ -49,6 +50,18 @@ def test_leaf_sets_match_every_expression_contract_including_memory_names():
         assert costs.node_count(expr) == opt._expr_nodes(expr)
     with pytest.raises(TypeError):
         costs.leaf_set(Expr())
+
+
+def test_leaf_sets_keep_the_iterative_reference_walks_depth_tolerance():
+    expr = Id("a")
+    for _ in range(2000):
+        expr = UnaryOp("~", expr)
+    previous = sys.getrecursionlimit()
+    try:
+        sys.setrecursionlimit(1000)
+        assert opt._SliceCosts().leaf_set(expr) == expr_ids(expr) == {"a"}
+    finally:
+        sys.setrecursionlimit(previous)
 
 
 def test_metadata_has_entry_and_aggregate_leaf_name_budgets(monkeypatch):

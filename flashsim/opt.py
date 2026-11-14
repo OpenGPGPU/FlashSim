@@ -701,23 +701,39 @@ class _SliceCosts:
         return _expr_nodes(expr, memo=self.nodes)
 
     def leaf_set(self, expr: Expr) -> frozenset[str]:
-        if isinstance(expr, Id):
-            return frozenset((expr.name,))
-        if isinstance(expr, (Const, ArrayZeros, ArrayConst)):
-            return frozenset()
-        hit = self.leaves.get(id(expr))
-        if hit is not None:
-            return hit[1]
-        if not isinstance(expr, (UnaryOp, BinOp, Ternary, Extract, Concat,
-                                 ArrayGet, ArrayInject, MemRead)):
-            # Preserve expr_ids' unsupported-expression error contract.
-            return frozenset(expr_ids(expr))
-        names = set()
-        if isinstance(expr, MemRead):
-            names.add(expr.mem)
-        for child in _expr_children(expr):
-            names.update(self.leaf_set(child))
-        result = frozenset(names)
+        # expr_id_counts uses an explicit stack. Preserve that depth tolerance
+        # when replacing its set-only queries, without expanding shared DAGs.
+        pending = [(expr, False)]
+        results = []
+        while pending:
+            node, ready = pending.pop()
+            if ready:
+                children = _expr_children(node)
+                names = {node.mem} if isinstance(node, MemRead) else set()
+                if children:
+                    for child_names in results[-len(children):]:
+                        names.update(child_names)
+                    del results[-len(children):]
+                result = frozenset(names)
+                self._retain_leaves(node, result)
+            elif isinstance(node, Id):
+                result = frozenset((node.name,))
+            elif isinstance(node, (Const, ArrayZeros, ArrayConst)):
+                result = frozenset()
+            elif (hit := self.leaves.get(id(node))) is not None:
+                result = hit[1]
+            elif isinstance(node, (UnaryOp, BinOp, Ternary, Extract, Concat,
+                                   ArrayGet, ArrayInject, MemRead)):
+                pending.append((node, True))
+                pending.extend((child, False) for child in reversed(_expr_children(node)))
+                continue
+            else:
+                # Preserve expr_ids' unsupported-expression error contract.
+                result = frozenset(expr_ids(node))
+            results.append(result)
+        return results[0]
+
+    def _retain_leaves(self, expr: Expr, result: frozenset[str]) -> None:
         if len(result) <= min(_SLICE_LEAF_ENTRY_MAX, _SLICE_LEAF_NAMES_MAX):
             if (len(self.leaves) >= _SLICE_COST_CACHE_MAX
                     or self.leaf_names + len(result) > _SLICE_LEAF_NAMES_MAX):
@@ -725,7 +741,6 @@ class _SliceCosts:
                 self.leaf_names = 0
             self.leaves[id(expr)] = (expr, result)
             self.leaf_names += len(result)
-        return result
 
 
 class _SliceMemo:
