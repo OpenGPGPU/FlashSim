@@ -202,6 +202,18 @@ with normal GC and 2.142 seconds with deferred GC; maximum worker peak RSS was
 synthetic result does not establish complete GPU generation speed, memory use
 or simulation throughput.
 
+Slice cost comparisons also reuse pure node counts and leaf-name sets within
+the pass. Counts retain expanded occurrence values; use-count multiplicity is
+unchanged. Each metadata cache has at most 8,192 composite entries. Leaf sets
+retain at most 32,768 name references in total, with at most 1,024 names per
+entry; larger sets are computed without retaining that entry. Cache eviction
+or skipped entries can require repeated work. The budgets bound cached
+metadata, not input size or all temporary working sets. Run
+`python -B -m pytest flashsim/test_opt_slice_costs.py flashsim/test_opt_generated_slices.py`
+for overlapping DAG roots, every expression kind, memory names, retention
+budgets, immediate release and unchanged generated-wire/side-effect results.
+
+
 Multi-CU RTL is detected from the generated source and uses a
 32-way split by default; set `FLASHSIM_DUT_SHARDS` to pin the split count for
 machines with a smaller memory or compiler parallelism budget. Set
