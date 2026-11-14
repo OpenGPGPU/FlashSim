@@ -162,6 +162,17 @@ for shared graphs, cache bounds, unknown widths, stale parent failures after
 wire creation, immediate cache release and executable generated C++.
 These component tests do not establish full GPU generation time or throughput.
 
+Slice cost comparisons also reuse pure node counts and leaf-name sets within
+the pass. Counts retain expanded occurrence values; use-count multiplicity is
+unchanged. Each metadata cache has at most 8,192 composite entries. Leaf sets
+retain at most 32,768 name references in total, with at most 1,024 names per
+entry; larger sets are computed without retaining that entry. Cache eviction
+or skipped entries can require repeated work. The budgets bound cached
+metadata, not input size or all temporary working sets. Run
+`python -B -m pytest flashsim/test_opt_slice_costs.py flashsim/test_opt_generated_slices.py`
+for overlapping DAG roots, every expression kind, memory names, retention
+budgets, immediate release and unchanged generated-wire/side-effect results.
+
 Reproduce the synthetic generation comparison with
 `python -B scripts/bench_compile_gc.py --registers 8192 --repeat 3`. On ARM64
 macOS with Python 3.14.7, median compilation time was 1.363 seconds with normal
