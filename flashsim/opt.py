@@ -670,6 +670,62 @@ def _slice_width(expr: Expr, sigs: dict[str, Signal],
 
 
 _SLICE_RESULT_CACHE_MAX = 8192
+_SLICE_COST_CACHE_MAX = 8192
+_SLICE_LEAF_NAMES_MAX = 32768
+_SLICE_LEAF_ENTRY_MAX = 1024
+
+
+class _SliceNodeCounts(dict):
+    def __setitem__(self, key, value):
+        if isinstance(value[0], (Id, Const, ArrayZeros, ArrayConst)):
+            return
+        if len(self) >= _SLICE_COST_CACHE_MAX:
+            self.clear()
+        super().__setitem__(key, value)
+
+
+class _SliceCosts:
+    """Pure expression metadata, owned by one narrowing pass.
+
+    Counts retain occurrence semantics; leaf sets are only for comparisons,
+    never use counts. Keep source objects alive to prevent identity reuse.
+    Bound both entry counts and aggregate cached leaf-name references.
+    """
+
+    def __init__(self):
+        self.nodes = _SliceNodeCounts()
+        self.leaves = {}
+        self.leaf_names = 0
+
+    def node_count(self, expr: Expr) -> int:
+        return _expr_nodes(expr, memo=self.nodes)
+
+    def leaf_set(self, expr: Expr) -> frozenset[str]:
+        if isinstance(expr, Id):
+            return frozenset((expr.name,))
+        if isinstance(expr, (Const, ArrayZeros, ArrayConst)):
+            return frozenset()
+        hit = self.leaves.get(id(expr))
+        if hit is not None:
+            return hit[1]
+        if not isinstance(expr, (UnaryOp, BinOp, Ternary, Extract, Concat,
+                                 ArrayGet, ArrayInject, MemRead)):
+            # Preserve expr_ids' unsupported-expression error contract.
+            return frozenset(expr_ids(expr))
+        names = set()
+        if isinstance(expr, MemRead):
+            names.add(expr.mem)
+        for child in _expr_children(expr):
+            names.update(self.leaf_set(child))
+        result = frozenset(names)
+        if len(result) <= min(_SLICE_LEAF_ENTRY_MAX, _SLICE_LEAF_NAMES_MAX):
+            if (len(self.leaves) >= _SLICE_COST_CACHE_MAX
+                    or self.leaf_names + len(result) > _SLICE_LEAF_NAMES_MAX):
+                self.leaves.clear()
+                self.leaf_names = 0
+            self.leaves[id(expr)] = (expr, result)
+            self.leaf_names += len(result)
+        return result
 
 
 class _SliceMemo:
@@ -679,6 +735,7 @@ class _SliceMemo:
         self.epoch = -1
         self.entries = {}
         self.unknown_widths = 0
+        self.costs = _SliceCosts()
 
     def sync(self, fresh):
         if self.epoch != len(fresh):
@@ -831,7 +888,7 @@ def _slice_src_uncached(
         inner = _slice_src(
             src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache, memo
         )
-        if inner is not None and _expr_nodes(inner) <= _SLICE_INLINE_NODES:
+        if inner is not None and memo.costs.node_count(inner) <= _SLICE_INLINE_NODES:
             return UnaryOp("~", inner)
         return None
     if isinstance(src, BinOp) and src.op in {"&", "|", "^"}:
@@ -844,7 +901,7 @@ def _slice_src_uncached(
         if (
             left is not None
             and right is not None
-            and _expr_nodes(left) + _expr_nodes(right) <= _SLICE_INLINE_NODES
+            and memo.costs.node_count(left) + memo.costs.node_count(right) <= _SLICE_INLINE_NODES
         ):
             return BinOp(src.op, left, right)
         return None
@@ -858,7 +915,7 @@ def _slice_src_uncached(
         if (
             left is not None
             and right is not None
-            and _expr_nodes(left) + _expr_nodes(right) <= _SLICE_INLINE_NODES
+            and memo.costs.node_count(left) + memo.costs.node_count(right) <= _SLICE_INLINE_NODES
         ):
             return Ternary(src.cond, left, right)
         return None
@@ -893,11 +950,11 @@ def _slice_src_uncached(
         )
         if (
             not cheaper
-            and expr_ids(sliced) == expr_ids(original)
-            and _expr_nodes(sliced) >= _expr_nodes(original)
+            and memo.costs.leaf_set(sliced) == memo.costs.leaf_set(original)
+            and memo.costs.node_count(sliced) >= memo.costs.node_count(original)
         ):
             return None
-        if _expr_nodes(sliced) <= _SLICE_INLINE_NODES or uses.get(src.name, 0) <= 1:
+        if memo.costs.node_count(sliced) <= _SLICE_INLINE_NODES or uses.get(src.name, 0) <= 1:
             return sliced
         name = f"{src.name}__b{low}_{width}"
         suffix = 0
