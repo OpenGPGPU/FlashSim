@@ -965,8 +965,11 @@ python3 -m flashsim compile "$gpu_rtl/draw-fifo/DrawContextFifo.sv" -o /tmp/fifo
 
 Pure expression rewrites use an explicit iterative, identity-memoized visitor.
 Hierarchy renaming shares one memo within each instance; constant folding and
-other pure rewrites preserve shared operands. The ordinary `map_expr` visitor
-still visits every occurrence. Signal queries traverse distinct nodes, while
+other pure rewrites preserve shared operands. Constant folding reuses unchanged
+immutable scalar, array and memory-expression nodes, retaining their sharing
+with other expression roots. A no-op fold of a 41-node shared graph returns the
+original graph. The ordinary `map_expr` visitor still visits every occurrence.
+Signal queries traverse distinct nodes, while
 use counts propagate exact path multiplicities (a shared operand used twice
 still counts twice). Width queries retain their existing operand selection.
 
@@ -985,10 +988,11 @@ share a pass-local memo through the dedicated DAG mapper; ordinary `map_expr`
 visitors retain their per-occurrence behavior. No GC policy change is required.
 
 Validation with Python 3.14.7 and CIRCT, C++, Icarus and Verilator available:
-364 tests passed with normal cyclic GC enabled. Reproduce with:
+369 tests passed with normal cyclic GC enabled. Reproduce with:
 
 ```bash
 python3 -B -m pytest flashsim/test_opt_shared_dag.py flashsim/test_opt_deep_dedup.py -q
+python3 -B -m pytest flashsim/test_opt_fold_shared_dag.py -q
 python3 -B -m pytest flashsim -q
 ```
 
