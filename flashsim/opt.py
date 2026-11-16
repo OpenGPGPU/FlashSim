@@ -645,6 +645,23 @@ def _slice_width(expr: Expr, sigs: dict[str, Signal],
     return width
 
 
+_SLICE_RESULT_CACHE_MAX = 8192
+
+
+class _SliceMemo:
+    """One pass over fixed bindings; fresh shared wires invalidate results."""
+
+    def __init__(self):
+        self.epoch = -1
+        self.entries = {}
+        self.unknown_widths = 0
+
+    def sync(self, fresh):
+        if self.epoch != len(fresh):
+            self.entries.clear()
+            self.epoch = len(fresh)
+
+
 def _slice_src(
     src: Expr,
     low: int,
@@ -657,6 +674,51 @@ def _slice_src(
     seen: set[str],
     fuel: int = 64,
     width_cache: dict[int, tuple[Expr, int]] | None = None,
+    memo: _SliceMemo | None = None,
+) -> Expr | None:
+    if fuel <= 0 or width <= 0 or low < 0:
+        return None
+    if width_cache is None:
+        width_cache = {}
+    if memo is None:
+        memo = _SliceMemo()
+    memo.sync(fresh)
+    # Id bindings are fixed during the pass. Other expressions use identity,
+    # retained in the entry to prevent address reuse. Recursion context and
+    # remaining fuel affect whether a slice is legal, including failures.
+    key = (src.name if isinstance(src, Id) else id(src),
+           isinstance(src, Id), low, width, fuel, frozenset(seen))
+    hit = memo.entries.get(key)
+    if hit is not None:
+        return src if hit[1] is hit[0] else hit[1]
+    epoch, unknown_widths = memo.epoch, memo.unknown_widths
+    result = _slice_src_uncached(
+        src, low, width, assigns, sigs, uses, fresh, cache, seen,
+        fuel, width_cache, memo
+    )
+    memo.sync(fresh)
+    # Unknown widths may become known after new signal declarations. Do not
+    # memoize a failure, or a parent containing one, across that transition.
+    if memo.epoch == epoch and memo.unknown_widths == unknown_widths:
+        if len(memo.entries) >= _SLICE_RESULT_CACHE_MAX:
+            memo.entries.clear()
+        memo.entries[key] = (src, result)
+    return result
+
+
+def _slice_src_uncached(
+    src: Expr,
+    low: int,
+    width: int,
+    assigns: dict[str, Expr],
+    sigs: dict[str, Signal],
+    uses: dict[str, int],
+    fresh: dict[str, Expr],
+    cache: dict[tuple[str, int, int], Expr],
+    seen: set[str],
+    fuel: int,
+    width_cache: dict[int, tuple[Expr, int]],
+    memo: _SliceMemo,
 ) -> Expr | None:
     """Narrow `src[low +: width]` onto the operands that actually feed it.
 
@@ -666,11 +728,10 @@ def _slice_src(
     """
     if fuel <= 0 or width <= 0 or low < 0:
         return None
-    if width_cache is None:
-        width_cache = {}
     try:
         src_w = _slice_width(src, sigs, width_cache)
     except (KeyError, TypeError):
+        memo.unknown_widths += 1
         return None
     if low + width > src_w:
         return None
@@ -683,7 +744,7 @@ def _slice_src(
         if low + width > src.width:
             return None
         inner = _slice_src(
-            src.a, src.low + low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
+            src.a, src.low + low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache, memo
         )
         return inner if inner is not None else Extract(src.a, src.low + low, width)
     if isinstance(src, Concat) and src.parts:
@@ -692,6 +753,7 @@ def _slice_src(
             try:
                 widths.append(_slice_width(part, sigs, width_cache))
             except (KeyError, TypeError):
+                memo.unknown_widths += 1
                 return None
         if any(part_w <= 0 for part_w in widths):
             return None
@@ -715,7 +777,7 @@ def _slice_src(
                 pieces.append(part)
                 continue
             inner = _slice_src(
-                part, take_lo, take_w, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
+                part, take_lo, take_w, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache, memo
             )
             pieces.append(inner if inner is not None else Extract(part, take_lo, take_w))
         if not pieces:
@@ -736,23 +798,24 @@ def _slice_src(
             try:
                 amt_w = _slice_width(src.b, sigs, width_cache)
             except (KeyError, TypeError):
+                memo.unknown_widths += 1
                 return None
             if low.bit_length() > amt_w:
                 return Const(0, 1)
             return BinOp("==", src.b, Const(low, amt_w))
     if isinstance(src, UnaryOp) and src.op == "~":
         inner = _slice_src(
-            src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
+            src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache, memo
         )
         if inner is not None and _expr_nodes(inner) <= _SLICE_INLINE_NODES:
             return UnaryOp("~", inner)
         return None
     if isinstance(src, BinOp) and src.op in {"&", "|", "^"}:
         left = _slice_src(
-            src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
+            src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache, memo
         )
         right = _slice_src(
-            src.b, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
+            src.b, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache, memo
         )
         if (
             left is not None
@@ -763,10 +826,10 @@ def _slice_src(
         return None
     if isinstance(src, Ternary):
         left = _slice_src(
-            src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
+            src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache, memo
         )
         right = _slice_src(
-            src.b, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
+            src.b, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache, memo
         )
         if (
             left is not None
@@ -781,10 +844,13 @@ def _slice_src(
         if hit is not None:
             return hit
         seen.add(src.name)
-        sliced = _slice_src(
-            assigns[src.name], low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache
-        )
-        seen.remove(src.name)
+        try:
+            sliced = _slice_src(
+                assigns[src.name], low, width, assigns, sigs, uses, fresh, cache, seen,
+                fuel - 1, width_cache, memo
+            )
+        finally:
+            seen.remove(src.name)
         if sliced is None:
             return None
         if (
@@ -832,12 +898,13 @@ def _narrow_expr(
     fresh: dict[str, Expr],
     cache: dict[tuple[str, int, int], Expr],
     width_cache: dict[int, tuple[Expr, int]],
+    memo: _SliceMemo | None = None,
 ) -> Expr:
     def fn(node: Expr) -> Expr:
         if not isinstance(node, Extract):
             return node
         sliced = _slice_src(
-            node.a, node.low, node.width, assigns, sigs, uses, fresh, cache, set(), 64, width_cache
+            node.a, node.low, node.width, assigns, sigs, uses, fresh, cache, set(), 64, width_cache, memo
         )
         return sliced if sliced is not None else node
 
@@ -858,9 +925,10 @@ def _narrow_bit_slices(
     fresh: dict[str, Expr] = {}
     cache: dict[tuple[str, int, int], Expr] = {}
     width_cache: dict[int, tuple[Expr, int]] = {}
+    memo = _SliceMemo()
 
     def narrow(expr: Expr) -> Expr:
-        return _narrow_expr(expr, assigns, sigs, uses, fresh, cache, width_cache)
+        return _narrow_expr(expr, assigns, sigs, uses, fresh, cache, width_cache, memo)
 
     narrowed = {name: narrow(expr) for name, expr in assigns.items()}
     body = _map_stmts(body, narrow)
