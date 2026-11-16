@@ -329,13 +329,14 @@ def _fold_expr(expr: Expr) -> Expr:
 
 
 def _fold_node(expr: Expr) -> Expr:
+    """Fold a node after child rewrites, retaining unchanged immutable nodes."""
     if isinstance(expr, UnaryOp):
         a = expr.a
         if isinstance(a, Const) and expr.op in {"~", "!"}:
             width = a.width
             mask = (1 << width) - 1
             return Const((~a.value) & mask, width)
-        return UnaryOp(expr.op, a)
+        return expr
     if isinstance(expr, BinOp):
         a, b = expr.a, expr.b
         if isinstance(a, Const) and isinstance(b, Const):
@@ -365,31 +366,20 @@ def _fold_node(expr: Expr) -> Expr:
                 width = 1 if expr.op in CMP_OPS else width
                 return Const(ops[expr.op](a.value, b.value) & mask, width)
         if expr.op == "&":
-            absorbed = _absorb_and(BinOp("&", a, b))
+            absorbed = _absorb_and(expr)
             if absorbed is not None:
                 return absorbed
-        return BinOp(expr.op, a, b)
+        return expr
     if isinstance(expr, Ternary):
         cond, a, b = expr.cond, expr.a, expr.b
         if isinstance(cond, Const):
             return a if cond.value else b
-        return Ternary(cond, a, b)
+        return expr
     if isinstance(expr, Extract):
         a = expr.a
         if isinstance(a, Const):
             mask = (1 << expr.width) - 1
             return Const((a.value >> expr.low) & mask, expr.width)
-        return Extract(a, expr.low, expr.width)
-    if isinstance(expr, Concat):
-        return Concat(expr.parts)
-    if isinstance(expr, ArrayGet):
-        return ArrayGet(expr.arr, expr.index)
-    if isinstance(expr, ArrayInject):
-        return ArrayInject(expr.arr, expr.index, expr.value)
-    if isinstance(expr, MemRead):
-        return MemRead(expr.mem, expr.addr)
-    if isinstance(expr, (ArrayZeros, ArrayConst)):
-        return expr
     return expr
 
 
