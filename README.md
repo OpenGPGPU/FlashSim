@@ -977,7 +977,6 @@ with `python3 -m pytest flashsim/test_shared_expression_mapping.py -q`; use
 `python3 -m pytest flashsim -q` for the complete suite with CIRCT, C++, Icarus and
 Verilator available. Keep temporary test outputs outside tracked source.
 
-
 Wire deduplication preserves shared expression graphs while counting expanded
 occurrences, finding equal structures and rewriting aliases. It retains exact
 node-count thresholds, smallest-name canonicalization, all expression fields,
@@ -985,7 +984,13 @@ observer and memory effects, and conservative deep-walk fallback. Alias rewrites
 share a pass-local memo through the dedicated DAG mapper; ordinary `map_expr`
 visitors retain their per-occurrence behavior. No GC policy change is required.
 
-Run the focused checks with `python3 -B -m pytest flashsim/test_opt_shared_dag.py
-flashsim/test_opt_deep_dedup.py -q`, and the full suite with
-`python3 -B -m pytest flashsim -q`. These are compiler checks; complete GPU model
-qualification and simulation throughput still require their own runs.
+Validation with Python 3.14.7 and CIRCT, C++, Icarus and Verilator available:
+364 tests passed with normal cyclic GC enabled. Reproduce with:
+
+```bash
+python3 -B -m pytest flashsim/test_opt_shared_dag.py flashsim/test_opt_deep_dedup.py -q
+python3 -B -m pytest flashsim -q
+```
+
+These are compiler checks; complete GPU model qualification and simulation
+throughput still require their own runs.
