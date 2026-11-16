@@ -850,7 +850,10 @@ def _narrow_expr(
         )
         return sliced if sliced is not None else node
 
-    return map_expr(expr, fn)
+    # Slice declarations are append-only and published before a reference is
+    # returned. Reusing that result preserves every referenced definition.
+    # Keep this memo local to one root; later roots can grow the slice context.
+    return map_expr_memoized(expr, fn)
 
 
 @timed_phase('opt.narrow_bit_slices')

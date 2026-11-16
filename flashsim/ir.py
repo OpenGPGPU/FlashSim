@@ -323,10 +323,11 @@ def replace_id(expr: Expr, name: str, repl: Expr) -> Expr:
 def map_expr_memoized(
     expr: Expr, fn, memo: dict[int, tuple[Expr, Expr]] | None = None
 ) -> Expr:
-    """Map an immutable DAG with a pure visitor, once per distinct input node.
+    """Map an immutable DAG, invoking the visitor once per distinct input node.
 
     A supplied memo belongs to one unchanging visitor context. Holding the
     original nodes prevents recycled object IDs from aliasing later roots.
+    Each result must remain valid for every use of its input in that context.
     `map_expr` retains its per-occurrence visitor semantics.
     """
     if memo is None:
