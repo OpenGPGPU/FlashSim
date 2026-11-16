@@ -980,6 +980,13 @@ retryable. The iterative width query retains support for deep expressions. A
 41-node failed-slice diamond takes at most 81 recursive calls; the previous
 implementation exceeds 4096 calls before completing the same query.
 
+Emitter promotion costs count expanded occurrences with an iterative identity
+memo. A 41-node diamond still counts as `2**41 - 1` occurrences, using at most
+80 operand reads; deep counts do not require recursive Python frames.
+`FLASHSIM_PHASE_TIMINGS=1` also reports coarse emitter cache, dependency,
+partition and wake-preparation scopes. Observations contain scalar metadata
+on stderr and preserve generated model bytes.
+
 A 19-node shared sum stays at 19 nodes through renaming and folding, instead of
 expanding into hundreds of thousands of nodes. This does not establish complete
 GPU generation time or simulator throughput. Reproduce the graph regressions
@@ -995,12 +1002,13 @@ share a pass-local memo through the dedicated DAG mapper; ordinary `map_expr`
 visitors retain their per-occurrence behavior. No GC policy change is required.
 
 Validation with Python 3.14.7 and CIRCT, C++, Icarus and Verilator available:
-376 tests passed with normal cyclic GC enabled. Reproduce with:
+381 tests passed with normal cyclic GC enabled. Reproduce with:
 
 ```bash
 python3 -B -m pytest flashsim/test_opt_shared_dag.py flashsim/test_opt_deep_dedup.py -q
 python3 -B -m pytest flashsim/test_opt_fold_shared_dag.py -q
 python3 -B -m pytest flashsim/test_opt_slice_context.py flashsim/test_opt_generated_slices.py flashsim/test_shared_narrowing.py -q
+python3 -B -m pytest flashsim/test_emit_node_counts.py flashsim/test_phase_timing.py -q
 python3 -B -m pytest flashsim -q
 ```
 
