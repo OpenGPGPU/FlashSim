@@ -4,7 +4,7 @@ from collections import Counter
 
 from flashsim.circt_frontend import _flatten, _rename_expr
 from flashsim.ir import (
-    AlwaysFF, ArrayGet, ArrayInject, ArrayZeros, Assign, BinOp, Concat,
+    AlwaysFF, ArrayConst, ArrayGet, ArrayInject, ArrayZeros, Assign, BinOp, Concat,
     Const, Extract, Id, MemRead, Module, NbAssign, Signal, Ternary, UnaryOp,
     expr_id_counts, expr_ids, expr_width, map_expr, map_expr_memoized,
 )
@@ -130,3 +130,13 @@ def test_width_only_resolves_operands_that_determine_result_width():
     assert expr_width(BinOp("<<", Id("value"), Id("unknown")), sigs) == 8
     assert expr_width(Extract(Id("unknown"), 0, 3), sigs) == 3
     assert expr_width(BinOp("==", Id("unknown"), Id("missing")), sigs) == 1
+
+
+def test_aggregate_constants_remain_opaque_to_graph_rewrites_and_queries():
+    values = ArrayConst((1, 2, 255, 0), 8)
+    assert map_expr_memoized(values, lambda node: node) is values
+    assert _rename_expr(values, {"value": "instance_value"}) is values
+    assert _fold_expr(values) is values
+    assert expr_ids(values) == set()
+    assert expr_id_counts(values) == {}
+    assert expr_width(values, {}) == 8
