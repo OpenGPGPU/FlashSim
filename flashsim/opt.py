@@ -60,6 +60,17 @@ from flashsim.ir import (
 
 
 def optimize(mod: Module) -> Module:
+    # Public callers retain their input. The compiler can transfer its sole
+    # reference through the private hand-off instead of pinning the original
+    # frontend graph throughout every optimization pass.
+    return _optimize_owned([mod])
+
+
+def _optimize_owned(owned: list[Module]) -> Module:
+    """Consume one frontend model without mutating any externally held input."""
+    if len(owned) != 1:
+        raise ValueError('one owned frontend model is required')
+    mod = owned.pop()
     # CIRCT's single-use SSA chains become deeply nested mux expressions as
     # they are inlined. C++ emission already allows this depth; optimization
     # must use the same limit before traversing those expressions.
@@ -67,11 +78,16 @@ def optimize(mod: Module) -> Module:
     assigns = {a.lhs: a.rhs for a in mod.assigns}
     sigs = dict(mod.signals)
     body = mod.always.body
+    module_name, clock_name, module_ports = mod.name, mod.always.clock, mod.ports
+    source_assertions = mod.assertions
+    source_processes = mod.clocked_processes
+    source_mem_writes = mod.mem_writes
+    del mod
     outputs = {n for n, s in sigs.items() if s.kind == "output"}
     regs = {n for n, s in sigs.items() if s.kind == "reg"}
     inputs = {n for n, s in sigs.items() if s.kind == "input"}
     mems = {n for n, s in sigs.items() if s.kind == "mem"}
-    keep = outputs | regs | inputs | mems | {mod.always.clock}
+    keep = outputs | regs | inputs | mems | {clock_name}
 
     # CIRCT may materialize a constant as a named wire and then reference that
     # wire directly from an always_ff body. `_subst_consts` removes the named
@@ -91,9 +107,11 @@ def optimize(mod: Module) -> Module:
     assigns = _subst_consts(assigns)
     assigns = {k: _rewrite_expr(v, assigns, sigs) for k, v in assigns.items()}
     body = _map_stmts(body, rewrite)
-    assertions = [map_observation(a, rewrite) for a in mod.assertions]
+    assertions = [map_observation(a, rewrite) for a in source_assertions]
+    del source_assertions
     clocked_processes = [ClockedProcess(rewrite(p.clock), p.scope)
-                         for p in mod.clocked_processes]
+                         for p in source_processes]
+    del source_processes
     def observer_reads():
         return set().union(*(expr_ids(expr) for a in assertions
                              for expr in observation_exprs(a)),
@@ -107,8 +125,9 @@ def optimize(mod: Module) -> Module:
             rewrite(w.data),
             rewrite(w.enable),
         )
-        for w in mod.mem_writes
+        for w in source_mem_writes
     ]
+    del source_mem_writes
     # Array reads index named storage in the emitter.  Inlining an array-valued
     # SSA definition would turn that storage into an unsupported expression.
     array_wires = {n for n, s in sigs.items() if s.kind == "wire" and s.depth}
@@ -233,7 +252,7 @@ def optimize(mod: Module) -> Module:
         if dep not in assigns and dep not in keep:
             raise ValueError(f"dangling wire {dep} used by clocked assertion")
     return Module(
-        mod.name, new_sigs, new_assigns, AlwaysFF(mod.always.clock, body), mod.ports,
+        module_name, new_sigs, new_assigns, AlwaysFF(clock_name, body), module_ports,
         mem_writes, assertions, clocked_processes, reset_epilogue
     )
 

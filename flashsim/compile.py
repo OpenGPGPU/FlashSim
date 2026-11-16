@@ -18,7 +18,7 @@ from flashsim.data_regions import group_primitive_storage
 from flashsim.gc_policy import compilation_gc_policy
 from flashsim.phase_timing import phase
 from flashsim.ir import Module
-from flashsim.opt import optimize
+from flashsim.opt import _optimize_owned as optimize
 from flashsim.parse import parse_verilog
 from flashsim.toolchain import find_bin
 
@@ -62,13 +62,16 @@ def compile_verilog(
             mlir = mlir_path.read_text()
         with phase('parse.hw_mlir'):
             mod = parse_hw_mlir(mlir, top=path.stem)
+        del mlir
     else:
         if assertions:
             raise CirctError("bound assertions require the CIRCT frontend")
         with phase('parse.verilog'):
             mod = parse_verilog(src)
     with phase('optimize'):
-        mod = optimize(mod)
+        owned = [mod]
+        del mod
+        mod = optimize(owned)
     with phase('emit_cpp'):
         cpp = emit_cpp(mod)
     return mod, cpp
