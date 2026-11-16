@@ -61,7 +61,8 @@ def test_observations_preserve_complete_generated_bytes(tmp_path, monkeypatch, c
                 'emit.cached_wires', 'emit.deep_mux_chunks',
                 'emit.leaf_dependencies', 'emit.cached_dependencies',
                 'emit.eager_regions', 'emit.partitions', 'emit.pass_inputs',
-                'emit.hold_wakes', 'emit.pass_wakes'} <= names
+                'emit.hold_wakes', 'emit.pass_wakes', 'emit.wake_tables',
+                'emit.eager_bodies', 'emit.join_text', 'emit.constructor'} <= names
         assert ('split_dut_methods' in names) == bool(split)
         assert ('frontend.circt' in names) == (frontend == 'circt')
         assert ('parse.hw_mlir' if frontend == 'circt' else 'parse.verilog') in names
@@ -118,3 +119,26 @@ def test_emitter_dependency_failure_keeps_its_original_exception(tmp_path, monke
                 if event['phase'] == 'emit.pass_inputs']
     assert [event['event'] for event in observed] == ['begin', 'end']
     assert observed[-1]['status'] == 'error'
+
+
+def test_constructor_failure_is_reported_after_join(tmp_path, monkeypatch, capsys):
+    emitter = importlib.import_module('flashsim.emit')
+    error = ValueError('constructor input failure')
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(emitter, '_bulk_state_constructor', fail)
+    monkeypatch.setenv('FLASHSIM_PHASE_TIMINGS', '1')
+    source = tmp_path / 'Gate.sv'
+    source.write_text(SOURCE)
+    with pytest.raises(ValueError) as caught:
+        compile_file(source, tmp_path / 'dut.h', frontend='native')
+    assert caught.value is error
+    observed = [event for event in events(capsys.readouterr().err)
+                if event['phase'] in {'emit.join_text', 'emit.constructor'}]
+    assert [(event['phase'], event['event']) for event in observed] == [
+        ('emit.join_text', 'begin'), ('emit.join_text', 'end'),
+        ('emit.constructor', 'begin'), ('emit.constructor', 'end')]
+    assert observed[1]['status'] == 'ok'
+    assert observed[3]['status'] == 'error'

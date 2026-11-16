@@ -2606,13 +2606,14 @@ def emit_cpp(mod: Module) -> str:
     _WRITE_INDEX = {n: i for i, n in enumerate(write_flags)} if large else {}
     _WRITE_WIDE = {n for n in write_flags if is_wide(sigs[n].width)} if large else set()
     _LEAF_HOLDS = leaf_holds
-    wake_sets = {**leaf_holds, **region_holds}
-    _HOLD_WAKE_TABLES = _hold_wake_tables(wake_sets)
-    _HOLD_WAKE_SPARSE = _hold_wake_sparse(wake_sets)
-    _WAKE_PACK_WORDS = (len(hold_buckets) + 63) // 64 if hold_buckets else 0
-    _HOLD_WAKE_PACKED = (
-        _hold_wake_packed(wake_sets, _WAKE_PACK_WORDS) if _wake_pack_enabled() else {}
-    )
+    with observe_phase('emit.wake_tables'):
+        wake_sets = {**leaf_holds, **region_holds}
+        _HOLD_WAKE_TABLES = _hold_wake_tables(wake_sets)
+        _HOLD_WAKE_SPARSE = _hold_wake_sparse(wake_sets)
+        _WAKE_PACK_WORDS = (len(hold_buckets) + 63) // 64 if hold_buckets else 0
+        _HOLD_WAKE_PACKED = (
+            _hold_wake_packed(wake_sets, _WAKE_PACK_WORDS) if _wake_pack_enabled() else {}
+        )
     page_index_type = _index_type_for_count(nparts)
     hold_index_type = _index_type_for_count(len(hold_buckets))
     _ARRAY_INDEX = {n: i for i, n in enumerate(array_writes)} if large else {}
@@ -3001,30 +3002,31 @@ def emit_cpp(mod: Module) -> str:
     lines.append("  }")
     lines.append("")
     lines.extend(_force_wake_method(nparts, len(hold_buckets), len(pass_bit), _PAGE_GEN))
-    for name in sorted(cached):
-        if name in eager_of:
-            lines.append(f"  void eval_{name}() {{ {_eval_invoke(name, 0)} }}")
-            continue
-        _emit_eval_method(name, assigns, sigs, stop, cached, lines, wire_part[name])
-    for r, order in enumerate(eager_regions):
-        part = wire_part[order[0]]
-        ready_body = _emit_eager_region(r, order, part, assigns, sigs, stop, cached, cdeps, lines)
-        if r in pass_bit:
-            region = set(order)
-            foreign = {d for w in order for d in cdeps.get(w, ()) if d not in region}
-            # Only this dispatch context has already drained every predecessor.
-            # Lazy/output eager callers retain their complete dependency walk.
-            if r in drained:
-                lines.append(f"  void _pn{r}() {{")
-                lines.append(f"    if (_eg{r} == _pg[{part}]) return;")
-                lines.extend(ready_body)
-                lines.append("  }")
-            else:
-                lines.append(f"  void _pn{r}() {{ {_eval_invoke(order[0], 0)} }}")
-    for name in outputs:
-        if name not in cached:
-            lines.append(f"  void eval_{name}() {{}}")
-            lines.append("")
+    with observe_phase('emit.eager_bodies'):
+        for name in sorted(cached):
+            if name in eager_of:
+                lines.append(f"  void eval_{name}() {{ {_eval_invoke(name, 0)} }}")
+                continue
+            _emit_eval_method(name, assigns, sigs, stop, cached, lines, wire_part[name])
+        for r, order in enumerate(eager_regions):
+            part = wire_part[order[0]]
+            ready_body = _emit_eager_region(r, order, part, assigns, sigs, stop, cached, cdeps, lines)
+            if r in pass_bit:
+                region = set(order)
+                foreign = {d for w in order for d in cdeps.get(w, ()) if d not in region}
+                # Only this dispatch context has already drained every predecessor.
+                # Lazy/output eager callers retain their complete dependency walk.
+                if r in drained:
+                    lines.append(f"  void _pn{r}() {{")
+                    lines.append(f"    if (_eg{r} == _pg[{part}]) return;")
+                    lines.extend(ready_body)
+                    lines.append("  }")
+                else:
+                    lines.append(f"  void _pn{r}() {{ {_eval_invoke(order[0], 0)} }}")
+        for name in outputs:
+            if name not in cached:
+                lines.append(f"  void eval_{name}() {{}}")
+                lines.append("")
     if large:
         # tick_nba drains these passes in dependency order before dispatching
         # holds. NBA evaluation only writes next-state storage, so their
@@ -3604,7 +3606,16 @@ def emit_cpp(mod: Module) -> str:
     _WAKE_PACK_WORDS = 0
     _LARGE = False
     _PAGE_GEN = False
-    return _bulk_state_constructor("\n".join(lines) + "\n", f"{mod.name}Dut")
+    with observe_phase('emit.join_text'):
+        # Preserve the trailing newline without copying the complete joined
+        # model to append it. Constructor rewriting makes its own line view;
+        # drop the original line objects first, including aliases in `sink`
+        # and the large-write helper closure.
+        lines.append("")
+        cpp = "\n".join(lines)
+        lines.clear()
+    with observe_phase('emit.constructor'):
+        return _bulk_state_constructor(cpp, f"{mod.name}Dut")
 
 
 # Methods that stay in the class body even when splitting: tiny helpers called
