@@ -1013,6 +1013,22 @@ def _flatten_op(expr: Expr, op: str) -> list[Expr]:
     return [expr]
 
 
+def _flatten_op_limited(expr: Expr, op: str, limit: int) -> list[Expr] | None:
+    """Keep the recursive walk's order while stopping at its caller's limit."""
+    parts: list[Expr] = []
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, BinOp) and node.op == op:
+            stack.append(node.b)
+            stack.append(node.a)
+        else:
+            if len(parts) >= limit:
+                return None
+            parts.append(node)
+    return parts
+
+
 def _absorb_and(expr: BinOp) -> Expr | None:
     """Simplify `v & (v | …)` / duplicate `v & v` in an and-chain.
 
@@ -1541,8 +1557,8 @@ def _merge_sop_terms(
             continue
         if not (isinstance(e, BinOp) and e.op == "|"):
             continue
-        parts = _flatten_op(e, "|")
-        if len(parts) < 2 or len(parts) > _SOP_TERMS_MAX or not all(bit(p) for p in parts):
+        parts = _flatten_op_limited(e, "|", _SOP_TERMS_MAX)
+        if parts is None or len(parts) < 2 or not all(bit(p) for p in parts):
             continue
         opaque: set[Expr] = set()
         terms: list[frozenset] | None = None
