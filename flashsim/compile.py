@@ -15,6 +15,7 @@ from flashsim.circt_frontend import (
 )
 from flashsim.emit import emit_cpp, split_dut_methods
 from flashsim.data_regions import group_primitive_storage
+from flashsim.gc_policy import compilation_gc_policy
 from flashsim.phase_timing import phase
 from flashsim.ir import Module
 from flashsim.opt import optimize
@@ -22,6 +23,7 @@ from flashsim.parse import parse_verilog
 from flashsim.toolchain import find_bin
 
 
+@compilation_gc_policy
 def compile_verilog(
     src: str,
     frontend: str = "auto",
@@ -72,6 +74,7 @@ def compile_verilog(
     return mod, cpp
 
 
+@compilation_gc_policy
 def compile_file(
     path: Path,
     out_h: Path,
