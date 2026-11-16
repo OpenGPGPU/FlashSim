@@ -128,6 +128,15 @@ thresholds. The default `normal` preserves existing behavior. Use this option
 in an isolated model-generation process because cyclic GC is process-wide;
 retained cycles can increase peak memory.
 
+The compiler releases parsed CIRCT text after lowering and transfers its private
+frontend model into optimization, so obsolete input graphs can be released as
+passes replace them. The public `optimize(Module)` interface continues to retain
+the caller's input unchanged. Weak-reference checks cover both frontends,
+successful and failed optimization, and exception propagation with cyclic GC
+disabled. Reproduce them with
+`python3 -B -m pytest flashsim/test_compile_model_lifetime.py -q`.
+These checks establish input lifetime, not complete GPU generation memory use.
+
 Local recursive visitors in the affected optimizer, emitter and clocked-process
 partitioning passes use explicit `_recur` arguments. Reference counting can
 release their input maps, temporary results and target mappings after a return
