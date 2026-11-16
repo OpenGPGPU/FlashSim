@@ -2,6 +2,7 @@
 
 import random
 import subprocess
+from itertools import permutations
 
 from flashsim.emit import emit_cpp
 from flashsim.ir import AlwaysFF, Assign, BinOp, Const, Id, MemWrite, Module, NbAssign, Signal, Ternary
@@ -56,6 +57,29 @@ def test_register_memory_and_output_roots_are_retained():
     assert {"b", "c", "d"} <= result.keys()
     assert result["b"] == Id("a") and result["c"] == Id("a")
     assert result["d"] == Id("b")
+
+
+def test_dead_fanout_releases_the_remaining_single_use_in_any_order():
+    items = [('wire', Id('i0')), ('alias', Id('wire')),
+             ('dead', BinOp('^', Id('wire'), Id('wire'))),
+             ('out', BinOp('^', Id('alias'), Id('i1')))]
+    for order in permutations(items):
+        result, _ = _inline_single_use(dict(order), [], {'out'})
+        assert result == {'out': BinOp('^', Id('i0'), Id('i1'))}
+
+
+def test_shared_expression_paths_keep_repeated_dependencies_named():
+    shared = BinOp('^', Id('wire'), Id('i2'))
+    items = [('wire', BinOp('&', Id('i0'), Id('i1'))),
+             ('repeated', BinOp('|', shared, shared)), ('dead', Id('wire')),
+             ('out', BinOp('^', Id('repeated'), Id('i3')))]
+    original = dict(items)
+    for order in permutations(items):
+        result, _ = _inline_single_use(dict(order), [], {'out'})
+        assert 'wire' in result
+        for bits in range(16):
+            inputs = {f'i{i}': (bits >> i) & 1 for i in range(4)}
+            assert _value(Id('out'), inputs, result) == _value(Id('out'), inputs, original)
 
 
 def test_alias_cycle_and_long_chain_do_not_recurse_forever():

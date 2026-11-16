@@ -466,25 +466,72 @@ def _bounded_inline_size(expr: Expr) -> int:
     return size
 
 
-@timed_phase('opt.inline_single_use')
-def _inline_single_use(
+def _compact_inline_refs(dependencies: dict[str, int]) -> str | dict[str, int] | None:
+    if not dependencies:
+        return None
+    if len(dependencies) == 1:
+        name = next(iter(dependencies))
+        if dependencies[name] == 1:
+            return name
+    return dependencies
+
+
+def _inline_ref_items(dependencies: str | dict[str, int] | None):
+    if isinstance(dependencies, str):
+        return ((dependencies, 1),)
+    return dependencies.items() if dependencies else ()
+
+
+def _inline_substitutions(
     assigns: dict[str, Expr],
     body: list[Stmt],
     outputs: set[str],
     mem_writes: list[MemWrite] | None = None,
-) -> tuple[dict[str, Expr], list[Stmt]]:
-    # Track the graph as names are removed, then expand substitutions once.
-    # Rebuilding an ever-growing expression after each inlining step is very
-    # expensive for the deep, single-use chains in large CIRCT models.
-    uses = _count_uses(assigns, body, mem_writes or [])
-    refs = {name: expr_id_counts(expr) for name, expr in assigns.items()}
-    users: dict[str, set[str]] = {}
-    for user, dependencies in refs.items():
-        for dep in dependencies:
-            if dep in assigns:
-                users.setdefault(dep, set()).add(user)
-    pending = deque(assigns)
-    queued = set(assigns)
+) -> dict[str, Expr]:
+    # Most SSA wires have one dependency or one user. Keep those names directly
+    # instead of allocating a dictionary and a set for every wire. References
+    # outside this assignment graph cannot become inline candidates.
+    refs: dict[str, str | dict[str, int] | None] = {}
+    users: dict[str, str | set[str]] = {}
+
+    def add_user(dep: str, user: str) -> None:
+        previous = users.get(dep)
+        if previous is None:
+            users[dep] = user
+        elif isinstance(previous, str):
+            if previous != user:
+                users[dep] = {previous, user}
+        else:
+            previous.add(user)
+
+    def remove_user(dep: str, user: str) -> None:
+        previous = users.get(dep)
+        if isinstance(previous, str):
+            if previous == user:
+                del users[dep]
+        elif previous is not None:
+            previous.discard(user)
+            if len(previous) == 1:
+                users[dep] = next(iter(previous))
+            elif not previous:
+                del users[dep]
+
+    with phase('opt.inline_graph'):
+        uses = _count_uses({}, body, mem_writes)
+        for user, expr in assigns.items():
+            if isinstance(expr, Id):
+                dependencies = expr.name if expr.name in assigns else None
+            else:
+                dependencies = _compact_inline_refs({
+                    dep: count for dep, count in expr_id_counts(expr).items()
+                    if dep in assigns
+                })
+            refs[user] = dependencies
+            for dep, count in _inline_ref_items(dependencies):
+                uses[dep] = uses.get(dep, 0) + count
+                add_user(dep, user)
+        pending = deque(assigns)
+        queued = set(assigns)
     substitutions: dict[str, Expr] = {}
     sizes: dict[str, int] = {}
 
@@ -500,48 +547,74 @@ def _inline_single_use(
             pending.append(name)
             queued.add(name)
 
-    while pending:
-        name = pending.popleft()
-        queued.remove(name)
-        if name not in assigns or name in outputs:
-            continue
-        n = uses.get(name, 0)
-        if n == 0:
-            del assigns[name]
+    with phase('opt.inline_worklist'):
+        while pending:
+            name = pending.popleft()
+            queued.remove(name)
+            if name not in assigns or name in outputs:
+                continue
+            n = uses.get(name, 0)
+            if n == 0:
+                del assigns[name]
+                sizes.pop(name, None)
+                for dep, count in _inline_ref_items(refs.pop(name)):
+                    if dep in assigns:
+                        uses[dep] -= count
+                        remove_user(dep, name)
+                        enqueue(dep)
+                continue
+            user = users.get(name)
+            if n != 1 or not isinstance(user, str):
+                continue
+            if user not in assigns or user == name:
+                continue
+            source_size = size(name)
+            user_size = size(user)
+            expanded_size = source_size + user_size - 1
+            if source_size > 1 and expanded_size > _INLINE_NODE_BUDGET:
+                # Keep the named intermediate: a huge inlined tree can overflow
+                # Python hashing/emission or the C++ compiler's nesting limit.
+                continue
+            sizes[user] = min(expanded_size, _INLINE_NODE_BUDGET + 1)
             sizes.pop(name, None)
-            for dep, count in refs.pop(name).items():
+            dependencies = refs.pop(name)
+            destination = refs[user]
+            if isinstance(destination, str):
+                assert destination == name
+                destination = None
+            else:
+                assert destination is not None and destination.pop(name) == 1
+                destination = _compact_inline_refs(destination)
+            for dep, count in _inline_ref_items(dependencies):
+                if destination is None:
+                    destination = dep if count == 1 else {dep: count}
+                elif isinstance(destination, str):
+                    destination = ({dep: count + 1} if destination == dep else
+                                   {destination: 1, dep: count})
+                else:
+                    destination[dep] = destination.get(dep, 0) + count
                 if dep in assigns:
-                    uses[dep] -= count
-                    users.get(dep, set()).discard(name)
+                    remove_user(dep, name)
+                    add_user(dep, user)
                     enqueue(dep)
-            continue
-        if n != 1 or len(users.get(name, ())) != 1:
-            continue
-        user = next(iter(users[name]))
-        if user not in assigns or user == name:
-            continue
-        source_size = size(name)
-        user_size = size(user)
-        expanded_size = source_size + user_size - 1
-        if source_size > 1 and expanded_size > _INLINE_NODE_BUDGET:
-            # Keep the named intermediate: a huge inlined tree can overflow
-            # Python hashing/emission or the C++ compiler's nesting limit.
-            continue
-        sizes[user] = min(expanded_size, _INLINE_NODE_BUDGET + 1)
-        sizes.pop(name, None)
-        dependencies = refs.pop(name)
-        destination = refs[user]
-        assert destination.pop(name) == 1
-        for dep, count in dependencies.items():
-            destination[dep] = destination.get(dep, 0) + count
-            if dep in assigns:
-                users.setdefault(dep, set()).discard(name)
-                users[dep].add(user)
-                enqueue(dep)
-        substitutions[name] = assigns.pop(name)
-        uses[name] -= 1
-        users.pop(name, None)
-        enqueue(user)
+            refs[user] = destination
+            substitutions[name] = assigns.pop(name)
+            uses[name] -= 1
+            users.pop(name, None)
+            enqueue(user)
+    return substitutions
+
+
+@timed_phase('opt.inline_single_use')
+def _inline_single_use(
+    assigns: dict[str, Expr],
+    body: list[Stmt],
+    outputs: set[str],
+    mem_writes: list[MemWrite] | None = None,
+) -> tuple[dict[str, Expr], list[Stmt]]:
+    # Let the graph's entire scope end before expansion allocates rewritten IR,
+    # including when cyclic GC is deferred. Only substitutions are still needed.
+    substitutions = _inline_substitutions(assigns, body, outputs, mem_writes)
 
     def expand(expr: Expr) -> Expr:
         # Explicit traversal avoids Python recursion for long chains of
@@ -602,7 +675,8 @@ def _inline_single_use(
         assert len(values) == 1
         return values[0]
 
-    return {name: expand(expr) for name, expr in assigns.items()}, body
+    with phase('opt.inline_expand'):
+        return {name: expand(expr) for name, expr in assigns.items()}, body
 
 
 @timed_phase('opt.dce')
