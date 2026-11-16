@@ -49,6 +49,7 @@ from flashsim.ir import (
     expr_ids,
     expr_width,
     map_expr,
+    map_expr_memoized,
     map_observation,
     observation_exprs,
     stmt_reads,
@@ -79,7 +80,7 @@ def optimize(mod: Module) -> Module:
     consts = {n: e for n, e in assigns.items() if isinstance(e, Const)}
 
     def rewrite(e: Expr) -> Expr:
-        e = map_expr(e, lambda node: (
+        e = map_expr_memoized(e, lambda node: (
             consts.get(node.name, node)
             if isinstance(node, Id) else node
         ))
@@ -255,7 +256,7 @@ def _subst_consts(assigns: dict[str, Expr]) -> dict[str, Expr]:
             return consts[node.name]
         return node
 
-    out = {n: map_expr(e, fn) for n, e in assigns.items() if n not in consts}
+    out = {n: map_expr_memoized(e, fn) for n, e in assigns.items() if n not in consts}
     return out
 
 
@@ -268,7 +269,7 @@ def _unwrap(expr: Expr, assigns: dict[str, Expr], seen: set[str] | None = None) 
 
 
 def _rewrite_expr(expr: Expr, assigns: dict[str, Expr], sigs: dict[str, Signal]) -> Expr:
-    return map_expr(expr, lambda n: _rewrite_node(n, assigns, sigs))
+    return map_expr_memoized(expr, lambda n: _rewrite_node(n, assigns, sigs))
 
 
 def _rewrite_node(expr: Expr, assigns: dict[str, Expr], sigs: dict[str, Signal]) -> Expr:
@@ -320,15 +321,19 @@ def _concat_as_shift(left: Expr, right: Expr, sigs: dict[str, Signal]) -> Expr |
 
 
 def _fold_expr(expr: Expr) -> Expr:
+    return map_expr_memoized(expr, _fold_node)
+
+
+def _fold_node(expr: Expr) -> Expr:
     if isinstance(expr, UnaryOp):
-        a = _fold_expr(expr.a)
+        a = expr.a
         if isinstance(a, Const) and expr.op in {"~", "!"}:
             width = a.width
             mask = (1 << width) - 1
             return Const((~a.value) & mask, width)
         return UnaryOp(expr.op, a)
     if isinstance(expr, BinOp):
-        a, b = _fold_expr(expr.a), _fold_expr(expr.b)
+        a, b = expr.a, expr.b
         if isinstance(a, Const) and isinstance(b, Const):
             width = max(a.width, b.width)
             mask = (1 << width) - 1
@@ -361,24 +366,24 @@ def _fold_expr(expr: Expr) -> Expr:
                 return absorbed
         return BinOp(expr.op, a, b)
     if isinstance(expr, Ternary):
-        cond, a, b = _fold_expr(expr.cond), _fold_expr(expr.a), _fold_expr(expr.b)
+        cond, a, b = expr.cond, expr.a, expr.b
         if isinstance(cond, Const):
             return a if cond.value else b
         return Ternary(cond, a, b)
     if isinstance(expr, Extract):
-        a = _fold_expr(expr.a)
+        a = expr.a
         if isinstance(a, Const):
             mask = (1 << expr.width) - 1
             return Const((a.value >> expr.low) & mask, expr.width)
         return Extract(a, expr.low, expr.width)
     if isinstance(expr, Concat):
-        return Concat(tuple(_fold_expr(p) for p in expr.parts))
+        return Concat(expr.parts)
     if isinstance(expr, ArrayGet):
-        return ArrayGet(_fold_expr(expr.arr), _fold_expr(expr.index))
+        return ArrayGet(expr.arr, expr.index)
     if isinstance(expr, ArrayInject):
-        return ArrayInject(_fold_expr(expr.arr), _fold_expr(expr.index), _fold_expr(expr.value))
+        return ArrayInject(expr.arr, expr.index, expr.value)
     if isinstance(expr, MemRead):
-        return MemRead(expr.mem, _fold_expr(expr.addr))
+        return MemRead(expr.mem, expr.addr)
     if isinstance(expr, (ArrayZeros, ArrayConst)):
         return expr
     return expr

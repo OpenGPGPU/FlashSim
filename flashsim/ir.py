@@ -219,49 +219,58 @@ class IdSet(set):
         return iter(sorted(set.__iter__(self)))
 
 
+def _expr_children(node: Expr) -> tuple[Expr, ...]:
+    if isinstance(node, (Id, Const, ArrayZeros, ArrayConst)):
+        return ()
+    if isinstance(node, (UnaryOp, Extract)):
+        return (node.a,)
+    if isinstance(node, BinOp):
+        return (node.a, node.b)
+    if isinstance(node, Ternary):
+        return (node.cond, node.a, node.b)
+    if isinstance(node, Concat):
+        return node.parts
+    if isinstance(node, ArrayGet):
+        return (node.arr, node.index)
+    if isinstance(node, ArrayInject):
+        return (node.arr, node.index, node.value)
+    if isinstance(node, MemRead):
+        return (node.addr,)
+    raise TypeError(type(node))
+
+
 def expr_ids(expr: Expr) -> IdSet:
-    return IdSet(expr_id_counts(expr))
+    names = IdSet()
+    seen: set[int] = set()
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, Id):
+            names.add(node.name)
+        elif isinstance(node, MemRead):
+            names.add(node.mem)
+        stack.extend(_expr_children(node))
+    return names
 
 
 def expr_id_counts(expr: Expr) -> dict[str, int]:
+    # Propagate path multiplicities through distinct DAG nodes. Deduplicating
+    # visits alone would undercount a shared input used by both operands.
+    postorder: list[Expr] = []
+    map_expr_memoized(expr, lambda node: postorder.append(node) or node)
+    weights = {id(expr): 1}
     counts: dict[str, int] = {}
-    stack: list[Expr] = [expr]
-    while stack:
-        node = stack.pop()
-        if isinstance(node, Id):
-            counts[node.name] = counts.get(node.name, 0) + 1
-            continue
-        if isinstance(node, (Const, ArrayZeros, ArrayConst)):
-            continue
-        if isinstance(node, UnaryOp) or isinstance(node, Extract):
-            stack.append(node.a)
-            continue
-        if isinstance(node, BinOp):
-            stack.append(node.b)
-            stack.append(node.a)
-            continue
-        if isinstance(node, Ternary):
-            stack.append(node.b)
-            stack.append(node.a)
-            stack.append(node.cond)
-            continue
-        if isinstance(node, Concat):
-            stack.extend(node.parts)
-            continue
-        if isinstance(node, ArrayGet):
-            stack.append(node.index)
-            stack.append(node.arr)
-            continue
-        if isinstance(node, ArrayInject):
-            stack.append(node.value)
-            stack.append(node.index)
-            stack.append(node.arr)
-            continue
-        if isinstance(node, MemRead):
-            counts[node.mem] = counts.get(node.mem, 0) + 1
-            stack.append(node.addr)
-            continue
-        raise TypeError(type(node))
+    for node in reversed(postorder):
+        weight = weights.pop(id(node))
+        if isinstance(node, (Id, MemRead)):
+            name = node.name if isinstance(node, Id) else node.mem
+            counts[name] = counts.get(name, 0) + weight
+        for child in _expr_children(node):
+            key = id(child)
+            weights[key] = weights.get(key, 0) + weight
     return counts
 
 
@@ -311,37 +320,99 @@ def replace_id(expr: Expr, name: str, repl: Expr) -> Expr:
     return map_expr(expr, fn)
 
 
+def map_expr_memoized(
+    expr: Expr, fn, memo: dict[int, tuple[Expr, Expr]] | None = None
+) -> Expr:
+    """Map an immutable DAG with a pure visitor, once per distinct input node.
+
+    A supplied memo belongs to one unchanging visitor context. Holding the
+    original nodes prevents recycled object IDs from aliasing later roots.
+    `map_expr` retains its per-occurrence visitor semantics.
+    """
+    if memo is None:
+        memo = {}
+    active: set[int] = set()
+    stack = [(expr, False)]
+    while stack:
+        node, ready = stack.pop()
+        key = id(node)
+        if key in memo:
+            if memo[key][0] is not node:
+                raise ValueError("expression memo contains a foreign identity")
+            continue
+        children = _expr_children(node)
+        if not ready:
+            if key in active:
+                raise ValueError("cyclic expression graph")
+            active.add(key)
+            stack.append((node, True))
+            stack.extend((child, False) for child in reversed(children))
+            continue
+        active.remove(key)
+        mapped = tuple(memo[id(child)][1] for child in children)
+        rebuilt = node
+        if any(a is not b for a, b in zip(children, mapped)):
+            if isinstance(node, UnaryOp):
+                rebuilt = UnaryOp(node.op, mapped[0])
+            elif isinstance(node, BinOp):
+                rebuilt = BinOp(node.op, *mapped)
+            elif isinstance(node, Ternary):
+                rebuilt = Ternary(*mapped)
+            elif isinstance(node, Extract):
+                rebuilt = Extract(mapped[0], node.low, node.width)
+            elif isinstance(node, Concat):
+                rebuilt = Concat(mapped)
+            elif isinstance(node, ArrayGet):
+                rebuilt = ArrayGet(*mapped)
+            elif isinstance(node, ArrayInject):
+                rebuilt = ArrayInject(*mapped)
+            elif isinstance(node, MemRead):
+                rebuilt = MemRead(node.mem, mapped[0])
+        memo[key] = (node, fn(rebuilt))
+    return memo[id(expr)][1]
+
+
 CMP_OPS = {"==", "!=", "<", "<=", ">", ">=", "s<", "s<=", "s>", "s>="}
 
 
 def expr_width(expr: Expr, sigs: Mapping[str, Signal]) -> int:
-    if isinstance(expr, Const):
-        return expr.width
-    if isinstance(expr, Id):
-        return sigs[expr.name].width
-    if isinstance(expr, Extract):
-        return expr.width
-    if isinstance(expr, Concat):
-        return sum(expr_width(part, sigs) for part in expr.parts)
-    if isinstance(expr, UnaryOp):
-        return expr_width(expr.a, sigs)
-    if isinstance(expr, BinOp):
-        if expr.op in CMP_OPS:
-            return 1
-        if expr.op in {"<<", ">>"}:
-            return expr_width(expr.a, sigs)
-        return max(expr_width(expr.a, sigs), expr_width(expr.b, sigs))
-    if isinstance(expr, Ternary):
-        return expr_width(expr.a, sigs)
-    if isinstance(expr, ArrayGet):
-        return expr_width(expr.arr, sigs) if not isinstance(expr.arr, Id) else sigs[expr.arr.name].width
-    if isinstance(expr, ArrayInject):
-        return expr_width(expr.arr, sigs)
-    if isinstance(expr, (ArrayZeros, ArrayConst)):
-        return expr.width
-    if isinstance(expr, MemRead):
-        return sigs[expr.mem].width
-    raise TypeError(type(expr))
+    widths: dict[int, int] = {}
+    stack = [(expr, False)]
+    while stack:
+        node, ready = stack.pop()
+        key = id(node)
+        if key in widths:
+            continue
+        if isinstance(node, (Const, Extract, ArrayZeros, ArrayConst)):
+            widths[key] = node.width
+            continue
+        if isinstance(node, Id):
+            widths[key] = sigs[node.name].width
+            continue
+        if isinstance(node, MemRead):
+            widths[key] = sigs[node.mem].width
+            continue
+        if isinstance(node, BinOp) and node.op in CMP_OPS:
+            widths[key] = 1
+            continue
+        if isinstance(node, Concat):
+            children = node.parts
+        elif isinstance(node, BinOp):
+            children = (node.a,) if node.op in {"<<", ">>"} else (node.a, node.b)
+        elif isinstance(node, (UnaryOp, Ternary)):
+            children = (node.a,)
+        elif isinstance(node, (ArrayGet, ArrayInject)):
+            children = (node.arr,)
+        else:
+            raise TypeError(type(node))
+        if not ready:
+            stack.append((node, True))
+            stack.extend((child, False) for child in reversed(children))
+        elif isinstance(node, Concat):
+            widths[key] = sum(widths[id(child)] for child in children)
+        else:
+            widths[key] = max(widths[id(child)] for child in children)
+    return widths[id(expr)]
 
 
 def stmt_reads(stmt: Stmt) -> set[str]:
