@@ -764,6 +764,7 @@ def _flatten(mod: Module, lib: dict[str, Module], remaining: Counter[str]) -> Mo
         for process in callee.clocked_processes:
             clocked_processes.append(ClockedProcess(
                 _rename_expr(process.clock,rename,expr_memo),inst+"."+process.scope))
+        del expr_memo
         remaining[callee_name] -= 1
         if remaining[callee_name] == 0:
             del lib[callee_name]
