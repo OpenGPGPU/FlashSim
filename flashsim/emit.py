@@ -9,6 +9,8 @@ from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Set as AbstractSet
 from io import StringIO
 
+from flashsim.phase_timing import phase as observe_phase
+
 from flashsim.ir import (
     ArrayConst,
     ArrayGet,
@@ -2483,19 +2485,26 @@ def emit_cpp(mod: Module) -> str:
         for stmt in mod.reset_epilogue:
             write_names |= stmt_writes(stmt)
         writes = sorted(write_names)
-    cached = cached_wires(mod, assigns)
-    _, always_body = _extract_deep_mux_chunks(
-        assigns, sigs, cached, body=mod.always.body
-    )
+    with observe_phase('emit.cached_wires'):
+        cached = cached_wires(mod, assigns)
+    with observe_phase('emit.deep_mux_chunks'):
+        _, always_body = _extract_deep_mux_chunks(
+            assigns, sigs, cached, body=mod.always.body
+        )
     if always_body is None:
         always_body = mod.always.body
-    wire_deps = _cone_leaves_many(cached, assigns, stop)
-    cdeps = {w: cached_deps(w, assigns, cached, stop) for w in sorted(cached)}
-    eager_of, eager_regions = _eager_regions(cached, cdeps, wire_deps)
-    wire_part, leaf_parts, nparts = _partition_maps(cached, wire_deps, eager_of)
-    pass_direct, pass_consumers = _pass_inputs(
-        eager_regions, eager_of, assigns, cached, stop, wire_deps, cdeps
-    )
+    with observe_phase('emit.leaf_dependencies'):
+        wire_deps = _cone_leaves_many(cached, assigns, stop)
+    with observe_phase('emit.cached_dependencies'):
+        cdeps = {w: cached_deps(w, assigns, cached, stop) for w in sorted(cached)}
+    with observe_phase('emit.eager_regions'):
+        eager_of, eager_regions = _eager_regions(cached, cdeps, wire_deps)
+    with observe_phase('emit.partitions'):
+        wire_part, leaf_parts, nparts = _partition_maps(cached, wire_deps, eager_of)
+    with observe_phase('emit.pass_inputs'):
+        pass_direct, pass_consumers = _pass_inputs(
+            eager_regions, eager_of, assigns, cached, stop, wire_deps, cdeps
+        )
     pass_page = []
     for leaves in pass_direct:
         for leaf in leaves:
@@ -2507,83 +2516,85 @@ def emit_cpp(mod: Module) -> str:
     inv_tables = _invalidation_tables(leaf_parts)
     write_flags = [n for n in writes if not sigs[n].depth]
     large = len(writes) >= _LARGE_WRITES
-    hold_buckets: list[tuple[str, list[Stmt]]] = []
-    live_stmts: list[Stmt] = []
-    leaf_holds: dict[str, list[int]] = {}
-    region_holds: dict[str, list[int]] = {}
-    if large:
-        # Any statement can be skipped, not just holds: if nothing it reads
-        # changed since it last ran, re-running it would recommit the value
-        # already in the register. Statements with an else arm behave the
-        # same way, so they are bucketed too.
-        #
-        # Do NOT also fuse buckets that share a hold-entry *guard* signature.
-        # It looks like a large structural win and is not. On
-        # GpuHostSystemAxi, 4334 hold methods share only 742 guard signatures
-        # and one signature is shared by 1024 methods, so fusing them cut the
-        # method count to 1432 and the wake-edge count 3.3x — and measured
-        # 0.97x geomean over 15 interleaved rounds (Gpu 0.93x, GpuSystem
-        # 1.04x, GpuHostAxi 0.91x, VectorBackend 0.99x). Waking one statement
-        # then re-runs its whole fused bucket, and that coarser granularity
-        # costs more than the saved calls. The mismatch is real and worth
-        # knowing about; it is a dynamic-granularity problem, not a bucketing
-        # one, so a coarser bucket is the wrong lever.
-        grouped: dict[str, list[Stmt]] = defaultdict(list)
-        for stmt in always_body:
-            grouped[_stmt_bucket_key(stmt)].append(stmt)
-        hold_buckets = []
-        for key, stmts in sorted(grouped.items()):
-            if len(stmts) <= hold_group:
-                hold_buckets.append((key, stmts))
-                continue
-            for off in range(0, len(stmts), hold_group):
-                hold_buckets.append((f"{key}#{off // hold_group}", stmts[off : off + hold_group]))
-        holds_map: dict[str, set[int]] = defaultdict(set)
-        cut_map: dict[str, set[int]] = defaultdict(set)
-        cut = {
-            w
-            for w in eager_of
-            if w in sigs and not sigs[w].depth and not is_wide(sigs[w].width)
+    with observe_phase('emit.hold_wakes'):
+        hold_buckets: list[tuple[str, list[Stmt]]] = []
+        live_stmts: list[Stmt] = []
+        leaf_holds: dict[str, list[int]] = {}
+        region_holds: dict[str, list[int]] = {}
+        if large:
+            # Any statement can be skipped, not just holds: if nothing it reads
+            # changed since it last ran, re-running it would recommit the value
+            # already in the register. Statements with an else arm behave the
+            # same way, so they are bucketed too.
+            #
+            # Do NOT also fuse buckets that share a hold-entry *guard* signature.
+            # It looks like a large structural win and is not. On
+            # GpuHostSystemAxi, 4334 hold methods share only 742 guard signatures
+            # and one signature is shared by 1024 methods, so fusing them cut the
+            # method count to 1432 and the wake-edge count 3.3x — and measured
+            # 0.97x geomean over 15 interleaved rounds (Gpu 0.93x, GpuSystem
+            # 1.04x, GpuHostAxi 0.91x, VectorBackend 0.99x). Waking one statement
+            # then re-runs its whole fused bucket, and that coarser granularity
+            # costs more than the saved calls. The mismatch is real and worth
+            # knowing about; it is a dynamic-granularity problem, not a bucketing
+            # one, so a coarser bucket is the wrong lever.
+            grouped: dict[str, list[Stmt]] = defaultdict(list)
+            for stmt in always_body:
+                grouped[_stmt_bucket_key(stmt)].append(stmt)
+            hold_buckets = []
+            for key, stmts in sorted(grouped.items()):
+                if len(stmts) <= hold_group:
+                    hold_buckets.append((key, stmts))
+                    continue
+                for off in range(0, len(stmts), hold_group):
+                    hold_buckets.append((f"{key}#{off // hold_group}", stmts[off : off + hold_group]))
+            holds_map: dict[str, set[int]] = defaultdict(set)
+            cut_map: dict[str, set[int]] = defaultdict(set)
+            cut = {
+                w
+                for w in eager_of
+                if w in sigs and not sigs[w].depth and not is_wide(sigs[w].width)
+            }
+            memo: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
+            for i, (_key, stmts) in enumerate(hold_buckets):
+                for stmt in stmts:
+                    if cut:
+                        leaves, wires = _stmt_cut_leaves(stmt, assigns, stop, cut, memo)
+                        for w in wires:
+                            cut_map[w].add(i)
+                    else:
+                        leaves = _stmt_stop_leaves(stmt, assigns, stop, wire_deps)
+                    for leaf in leaves:
+                        holds_map[leaf].add(i)
+            leaf_holds = {k: sorted(v) for k, v in holds_map.items()}
+            region_holds = {k: sorted(v) for k, v in cut_map.items()}
+            _report_wake_locality(
+                mod.name, hold_buckets, leaf_holds, wire_part, leaf_parts,
+                always_body,
+            )
+    with observe_phase('emit.pass_wakes'):
+        # Passes that can reach a hold-facing wire must run before hold dispatch
+        # even when nothing demands them; wake just those, from their direct
+        # leaves at commit and from upstream passes whose values changed.
+        woken: set[int] = set()
+        for r in range(len(eager_regions) - 1, -1, -1):
+            if any(
+                w in region_holds or any(q in woken for q in pass_consumers.get(w, ()))
+                for w in eager_regions[r]
+            ):
+                woken.add(r)
+        pass_bit = {r: i for i, r in enumerate(sorted(woken))}
+        drained = _drained_regions(eager_regions, eager_of, cdeps, pass_bit)
+        leaf_passes: dict[str, list[int]] = defaultdict(list)
+        for r in sorted(woken):
+            for leaf in pass_direct[r]:
+                leaf_passes[leaf].append(r)
+        used_inputs = {
+            name
+            for name in inputs
+            if name in leaf_parts or name in leaf_holds or name in leaf_passes
         }
-        memo: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
-        for i, (_key, stmts) in enumerate(hold_buckets):
-            for stmt in stmts:
-                if cut:
-                    leaves, wires = _stmt_cut_leaves(stmt, assigns, stop, cut, memo)
-                    for w in wires:
-                        cut_map[w].add(i)
-                else:
-                    leaves = _stmt_stop_leaves(stmt, assigns, stop, wire_deps)
-                for leaf in leaves:
-                    holds_map[leaf].add(i)
-        leaf_holds = {k: sorted(v) for k, v in holds_map.items()}
-        region_holds = {k: sorted(v) for k, v in cut_map.items()}
-        _report_wake_locality(
-            mod.name, hold_buckets, leaf_holds, wire_part, leaf_parts,
-            always_body,
-        )
-    # Passes that can reach a hold-facing wire must run before hold dispatch
-    # even when nothing demands them; wake just those, from their direct
-    # leaves at commit and from upstream passes whose values changed.
-    woken: set[int] = set()
-    for r in range(len(eager_regions) - 1, -1, -1):
-        if any(
-            w in region_holds or any(q in woken for q in pass_consumers.get(w, ()))
-            for w in eager_regions[r]
-        ):
-            woken.add(r)
-    pass_bit = {r: i for i, r in enumerate(sorted(woken))}
-    drained = _drained_regions(eager_regions, eager_of, cdeps, pass_bit)
-    leaf_passes: dict[str, list[int]] = defaultdict(list)
-    for r in sorted(woken):
-        for leaf in pass_direct[r]:
-            leaf_passes[leaf].append(r)
-    used_inputs = {
-        name
-        for name in inputs
-        if name in leaf_parts or name in leaf_holds or name in leaf_passes
-    }
-    array_writes = [n for n in writes if sigs[n].depth]
+        array_writes = [n for n in writes if sigs[n].depth]
     global _WIRE_PART, _EAGER_OF, _REGION_HOLDS, _PASS_CONSUMERS, _PASS_PAGE, _PASS_BIT, _LEAF_PASSES, _WRITE_INDEX, _WRITE_WIDE, _LEAF_HOLDS, _HOLD_WAKE_TABLES, _HOLD_WAKE_PACKED, _HOLD_WAKE_SPARSE, _ARRAY_INDEX, _HOLD_TAKEN, _LARGE, _WAKE_PACK_WORDS, _EAGER_DONE
     _WIRE_PART = wire_part
     _EAGER_OF = eager_of

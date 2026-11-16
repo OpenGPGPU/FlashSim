@@ -57,7 +57,11 @@ def test_observations_preserve_complete_generated_bytes(tmp_path, monkeypatch, c
         assert not stack
         assert {'optimize', 'emit_cpp', 'opt.merge_sop', 'opt.reassoc_and',
                 'opt.dedup', 'opt.used_bits', 'opt.lut', 'opt.dce',
-                'opt.post_dedup_fold', 'opt.post_used_bits_fold'} <= names
+                'opt.post_dedup_fold', 'opt.post_used_bits_fold',
+                'emit.cached_wires', 'emit.deep_mux_chunks',
+                'emit.leaf_dependencies', 'emit.cached_dependencies',
+                'emit.eager_regions', 'emit.partitions', 'emit.pass_inputs',
+                'emit.hold_wakes', 'emit.pass_wakes'} <= names
         assert ('split_dut_methods' in names) == bool(split)
         assert ('frontend.circt' in names) == (frontend == 'circt')
         assert ('parse.hw_mlir' if frontend == 'circt' else 'parse.verilog') in names
@@ -94,3 +98,23 @@ def test_broken_diagnostic_stream_does_not_fail_compile(monkeypatch):
     monkeypatch.setattr(phase_timing.sys, 'stderr', Broken())
     with phase_timing.phase('ignored diagnostic failure'):
         pass
+
+
+def test_emitter_dependency_failure_keeps_its_original_exception(tmp_path, monkeypatch, capsys):
+    emitter = importlib.import_module('flashsim.emit')
+    error = ValueError('dependency input failure')
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(emitter, '_pass_inputs', fail)
+    monkeypatch.setenv('FLASHSIM_PHASE_TIMINGS', '1')
+    source = tmp_path / 'Gate.sv'
+    source.write_text(SOURCE)
+    with pytest.raises(ValueError) as caught:
+        compile_file(source, tmp_path / 'dut.h', frontend='native')
+    assert caught.value is error
+    observed = [event for event in events(capsys.readouterr().err)
+                if event['phase'] == 'emit.pass_inputs']
+    assert [event['event'] for event in observed] == ['begin', 'end']
+    assert observed[-1]['status'] == 'error'
