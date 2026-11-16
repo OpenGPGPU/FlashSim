@@ -273,35 +273,39 @@ _EXTRACT_EXTRA_CAP = int(os.environ.get("FLASHSIM_EXTRACT_EXTRA_CAP", "2048"))
 def _expr_node_count(expr: Expr) -> int:
     if isinstance(expr, (Id, Const)):
         return 1
-    if isinstance(expr, UnaryOp):
-        return 1 + _expr_node_count(expr.a)
-    if isinstance(expr, BinOp):
-        return 1 + _expr_node_count(expr.a) + _expr_node_count(expr.b)
-    if isinstance(expr, Ternary):
-        return (
-            1
-            + _expr_node_count(expr.cond)
-            + _expr_node_count(expr.a)
-            + _expr_node_count(expr.b)
-        )
-    if isinstance(expr, Extract):
-        return 1 + _expr_node_count(expr.a)
-    if isinstance(expr, Concat):
-        return 1 + sum(_expr_node_count(p) for p in expr.parts)
-    if isinstance(expr, ArrayGet):
-        return 1 + _expr_node_count(expr.arr) + _expr_node_count(expr.index)
-    if isinstance(expr, ArrayInject):
-        return (
-            1
-            + _expr_node_count(expr.arr)
-            + _expr_node_count(expr.index)
-            + _expr_node_count(expr.value)
-        )
-    if isinstance(expr, (ArrayZeros, ArrayConst)):
-        return 1
-    if isinstance(expr, MemRead):
-        return 1 + _expr_node_count(expr.addr)
-    return 1
+    # Preserve expanded occurrence counts while computing shared children once.
+    # The input graph keeps every child alive throughout this local query.
+    counts: dict[int, int] = {}
+    pending = [(expr, None)]
+    while pending:
+        node, children = pending.pop()
+        key = id(node)
+        if key in counts:
+            continue
+        if children is not None:
+            counts[key] = 1 + sum(counts[id(child)] for child in children)
+            continue
+        if isinstance(node, (UnaryOp, Extract)):
+            children = (node.a,)
+        elif isinstance(node, BinOp):
+            children = (node.a, node.b)
+        elif isinstance(node, Ternary):
+            children = (node.cond, node.a, node.b)
+        elif isinstance(node, Concat):
+            children = node.parts
+        elif isinstance(node, ArrayGet):
+            children = (node.arr, node.index)
+        elif isinstance(node, ArrayInject):
+            children = (node.arr, node.index, node.value)
+        elif isinstance(node, MemRead):
+            children = (node.addr,)
+        else:
+            counts[key] = 1
+            continue
+        pending.append((node, children))
+        pending.extend((child, None) for child in reversed(children)
+                       if id(child) not in counts)
+    return counts[id(expr)]
 
 
 def _is_gpu_hot_ssa(name: str) -> bool:
