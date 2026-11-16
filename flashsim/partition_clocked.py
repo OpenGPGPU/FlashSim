@@ -232,23 +232,25 @@ def partition_clocked_process(source: str, groups: int = 128, *,
         mapping[target] = group
         heapq.heappush(bins, (total + weight, group))
 
-    def annotate(node):
+    # Pass recursion explicitly so the mapping is released by reference counting,
+    # including when a caller has disabled cyclic GC for a large compilation.
+    def annotate(node, *, _recur):
         if node[0] == "assign":
             mask = 1 << mapping[node[2]]
         elif node[0] == "block":
             mask = 0
             for child in node[1]:
-                mask |= annotate(child)
+                mask |= _recur(child, _recur=_recur)
         else:
-            mask = annotate(node[2])
+            mask = _recur(node[2], _recur=_recur)
             if node[3] is not None:
-                mask |= annotate(node[3])
+                mask |= _recur(node[3], _recur=_recur)
         node[-1] = mask
         return mask
 
-    annotate(root)
+    annotate(root, _recur=annotate)
 
-    def emit(node, mask, out, depth=1):
+    def emit(node, mask, out, depth=1, *, _recur):
         if not node[-1] & mask:
             return
         indent = "  " * depth
@@ -256,13 +258,13 @@ def partition_clocked_process(source: str, groups: int = 128, *,
             out.write(indent + node[1] + "\n")
         elif node[0] == "block":
             for child in node[1]:
-                emit(child, mask, out, depth)
+                _recur(child, mask, out, depth, _recur=_recur)
         else:
             out.write(indent + "if " + node[1] + " begin\n")
-            emit(node[2], mask, out, depth + 1)
+            _recur(node[2], mask, out, depth + 1, _recur=_recur)
             if node[3] is not None and node[3][-1] & mask:
                 out.write(indent + "end else begin\n")
-                emit(node[3], mask, out, depth + 1)
+                _recur(node[3], mask, out, depth + 1, _recur=_recur)
             out.write(indent + "end\n")
 
     out = StringIO()
@@ -270,7 +272,7 @@ def partition_clocked_process(source: str, groups: int = 128, *,
     for group in range(groups):
         if root[-1] & (1 << group):
             out.write("  always @(posedge clock) begin\n")
-            emit(root, 1 << group, out)
+            emit(root, 1 << group, out, _recur=emit)
             out.write("  end\n")
     out.write(suffix)
     return out.getvalue(), {"targets": len(parser.counts),
