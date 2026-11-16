@@ -973,6 +973,13 @@ Signal queries traverse distinct nodes, while
 use counts propagate exact path multiplicities (a shared operand used twice
 still counts twice). Width queries retain their existing operand selection.
 
+Recursive bit-slice attempts share a bounded result memo within one narrowing
+pass. Its keys include the source, slice range, recursion fuel and visited IDs.
+Publishing a shared wire invalidates contextual results; unresolved widths stay
+retryable. The iterative width query retains support for deep expressions. A
+41-node failed-slice diamond takes at most 81 recursive calls; the previous
+implementation exceeds 4096 calls before completing the same query.
+
 A 19-node shared sum stays at 19 nodes through renaming and folding, instead of
 expanding into hundreds of thousands of nodes. This does not establish complete
 GPU generation time or simulator throughput. Reproduce the graph regressions
@@ -988,11 +995,12 @@ share a pass-local memo through the dedicated DAG mapper; ordinary `map_expr`
 visitors retain their per-occurrence behavior. No GC policy change is required.
 
 Validation with Python 3.14.7 and CIRCT, C++, Icarus and Verilator available:
-369 tests passed with normal cyclic GC enabled. Reproduce with:
+376 tests passed with normal cyclic GC enabled. Reproduce with:
 
 ```bash
 python3 -B -m pytest flashsim/test_opt_shared_dag.py flashsim/test_opt_deep_dedup.py -q
 python3 -B -m pytest flashsim/test_opt_fold_shared_dag.py -q
+python3 -B -m pytest flashsim/test_opt_slice_context.py flashsim/test_opt_generated_slices.py flashsim/test_shared_narrowing.py -q
 python3 -B -m pytest flashsim -q
 ```
 
