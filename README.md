@@ -1011,8 +1011,25 @@ Emitter promotion costs count expanded occurrences with an iterative identity
 memo. A 41-node diamond still counts as `2**41 - 1` occurrences, using at most
 80 operand reads; deep counts do not require recursive Python frames.
 `FLASHSIM_PHASE_TIMINGS=1` also reports coarse emitter cache, dependency,
-partition and wake-preparation scopes. Observations contain scalar metadata
+partition, wake-table, eager-body, text-join and constructor scopes. Observations contain scalar metadata
 on stderr and preserve generated model bytes.
+
+After joining the emitted C++, the emitter releases its original line buffer
+before constructor rewriting. It preserves the trailing newlines without
+copying the complete model to append one. In one fresh Python 3.14.7 process
+per revision, a synthetic 150,000-register bank produced identical 78,107,626-byte
+C++ output while peak traced Python allocations fell from 868 to 718 MiB
+(17%). This measures text-emission allocations, not complete GPU generation
+memory or simulator throughput. Compare a baseline checkout at
+`669a36934dde2c738147365c7a7167651f096e71` with the current checkout using:
+
+```bash
+python3 -B scripts/bench_emit_buffers.py --flashsim "$BASELINE_CHECKOUT" --registers 150000
+python3 -B scripts/bench_emit_buffers.py --flashsim "$PWD" --registers 150000
+```
+
+The benchmark writes no model files. Its digest is for immediate byte comparison;
+keep only final results and reproduction commands after the comparison ends.
 
 A 19-node shared sum stays at 19 nodes through renaming and folding, instead of
 expanding into hundreds of thousands of nodes. This does not establish complete
@@ -1029,20 +1046,26 @@ share a pass-local memo through the dedicated DAG mapper; ordinary `map_expr`
 visitors retain their per-occurrence behavior. No GC policy change is required.
 
 Validation with Python 3.14.7 and CIRCT, C++, Icarus and Verilator available:
-409 tests passed under each of the `normal` and `defer` compilation GC policies,
-with no skips (206.16 and 184.89 seconds, respectively). Each complete run had
-a 600-second/6144-MiB sampled aggregate RSS process-group ceiling. The 14 policy
+414 tests passed under each of the `normal` and `defer` compilation GC policies,
+with no skips (202.35 and 181.77 seconds, respectively). Each complete run had
+a 600-second/6144-MiB sampled aggregate process-tree ceiling, charging the larger
+of resident memory and physical footprint per process on macOS, including
+compressed memory. The 14 policy
 cases include nested success/failure state restoration, byte-identical CIRCT
 split/monolithic output and actual reset, pre-NBA and both-instance assertion
 fault checks. Fourteen lifetime cases check immediate release of input maps and
 names on completed, early-return and failed walks with cyclic collection
-disabled and forced collection forbidden. Reproduce with:
+disabled and forced collection forbidden. Four text-buffer cases check release
+before constructor rewriting with cyclic GC disabled, including memory-store
+aliases, large-write helper closures and constructor exceptions. All four fail
+on the baseline above. Reproduce with:
 
 ```bash
 python3 -B -m pytest flashsim/test_opt_shared_dag.py flashsim/test_opt_deep_dedup.py -q
 python3 -B -m pytest flashsim/test_opt_fold_shared_dag.py -q
 python3 -B -m pytest flashsim/test_opt_slice_context.py flashsim/test_opt_generated_slices.py flashsim/test_shared_narrowing.py -q
 python3 -B -m pytest flashsim/test_emit_node_counts.py flashsim/test_phase_timing.py -q
+python3 -B -m pytest flashsim/test_emit_buffer_lifetime.py flashsim/test_emit_bulk_constructor.py -q
 python3 -B -m pytest flashsim/test_gc_policy.py -q
 python3 -B -m pytest flashsim/test_recursive_lifetime.py -q
 FLASHSIM_GC_POLICY=normal python3 -B -m pytest flashsim -q
