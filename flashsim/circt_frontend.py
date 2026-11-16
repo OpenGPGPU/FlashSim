@@ -743,26 +743,27 @@ def _flatten(mod: Module, lib: dict[str, Module], remaining: Counter[str]) -> Mo
             if mapped not in signals:
                 kind = "wire" if sig.kind in {"input", "output"} else sig.kind
                 signals[mapped] = Signal(mapped, sig.width, kind, sig.depth)
+        expr_memo: dict[int, tuple[Expr, Expr]] = {}
         for a in callee.assigns:
-            assigns.append(Assign(rename.get(a.lhs, a.lhs), _rename_expr(a.rhs, rename)))
+            assigns.append(Assign(rename.get(a.lhs, a.lhs), _rename_expr(a.rhs, rename, expr_memo)))
         for stmt in callee.always.body:
-            body.append(_rename_stmt(stmt, rename))
+            body.append(_rename_stmt(stmt, rename, expr_memo))
         for wr in callee.mem_writes:
             mem_writes.append(
                 MemWrite(
                     rename.get(wr.mem, wr.mem),
-                    _rename_expr(wr.addr, rename),
-                    _rename_expr(wr.data, rename),
-                    _rename_expr(wr.enable, rename),
+                    _rename_expr(wr.addr, rename, expr_memo),
+                    _rename_expr(wr.data, rename, expr_memo),
+                    _rename_expr(wr.enable, rename, expr_memo),
                 )
             )
         for assertion in callee.assertions:
-            renamed = map_observation(assertion, lambda expr: _rename_expr(expr, rename))
+            renamed = map_observation(assertion, lambda expr: _rename_expr(expr, rename, expr_memo))
             renamed.scope = inst+"."+assertion.scope
             assertions.append(renamed)
         for process in callee.clocked_processes:
             clocked_processes.append(ClockedProcess(
-                _rename_expr(process.clock,rename),inst+"."+process.scope))
+                _rename_expr(process.clock,rename,expr_memo),inst+"."+process.scope))
         remaining[callee_name] -= 1
         if remaining[callee_name] == 0:
             del lib[callee_name]
@@ -772,54 +773,33 @@ def _flatten(mod: Module, lib: dict[str, Module], remaining: Counter[str]) -> Mo
     )
 
 
-def _rename_expr(expr: Expr, rename: dict[str, str]) -> Expr:
-    # This is a specialized post-order map_expr visitor: hierarchy flattening
-    # applies it to every assignment, so avoid a fresh callback and a second
-    # dynamic type dispatch for each node. Preserve unchanged subtrees just as
-    # map_expr does; memory names are renamed separately from their addresses.
-    if isinstance(expr, Id):
-        return Id(rename[expr.name]) if expr.name in rename else expr
-    if isinstance(expr, (Const, ArrayZeros, ArrayConst)):
-        return expr
-    if isinstance(expr, UnaryOp):
-        a = _rename_expr(expr.a, rename)
-        return expr if a is expr.a else UnaryOp(expr.op, a)
-    if isinstance(expr, BinOp):
-        a, b = _rename_expr(expr.a, rename), _rename_expr(expr.b, rename)
-        return expr if a is expr.a and b is expr.b else BinOp(expr.op, a, b)
-    if isinstance(expr, Ternary):
-        cond = _rename_expr(expr.cond, rename)
-        a, b = _rename_expr(expr.a, rename), _rename_expr(expr.b, rename)
-        return expr if cond is expr.cond and a is expr.a and b is expr.b else Ternary(cond, a, b)
-    if isinstance(expr, Extract):
-        a = _rename_expr(expr.a, rename)
-        return expr if a is expr.a else Extract(a, expr.low, expr.width)
-    if isinstance(expr, Concat):
-        parts = tuple(_rename_expr(p, rename) for p in expr.parts)
-        return expr if all(a is b for a, b in zip(parts, expr.parts)) else Concat(parts)
-    if isinstance(expr, ArrayGet):
-        arr, index = _rename_expr(expr.arr, rename), _rename_expr(expr.index, rename)
-        return expr if arr is expr.arr and index is expr.index else ArrayGet(arr, index)
-    if isinstance(expr, ArrayInject):
-        arr, index = _rename_expr(expr.arr, rename), _rename_expr(expr.index, rename)
-        value = _rename_expr(expr.value, rename)
-        return expr if arr is expr.arr and index is expr.index and value is expr.value else ArrayInject(arr, index, value)
-    if isinstance(expr, MemRead):
-        return MemRead(rename.get(expr.mem, expr.mem), _rename_expr(expr.addr, rename))
-    raise TypeError(type(expr))
+def _rename_expr(expr: Expr, rename: dict[str, str], memo=None) -> Expr:
+    from flashsim.ir import Id as IrId
+    from flashsim.ir import map_expr_memoized
+
+    def fn(node: Expr) -> Expr:
+        if isinstance(node, IrId) and node.name in rename:
+            return IrId(rename[node.name])
+        if isinstance(node, MemRead):
+            return MemRead(rename.get(node.mem, node.mem), node.addr)
+        return node
+
+    return map_expr_memoized(expr, fn, memo)
 
 
-def _rename_stmt(stmt, rename: dict[str, str]):
+def _rename_stmt(stmt, rename: dict[str, str], memo=None):
     from flashsim.ir import If
 
+    if memo is None:
+        memo = {}
     if isinstance(stmt, NbAssign):
         lhs = rename.get(stmt.lhs, stmt.lhs)
-        return NbAssign(lhs, _rename_expr(stmt.rhs, rename))
+        return NbAssign(lhs, _rename_expr(stmt.rhs, rename, memo))
     if isinstance(stmt, If):
         return If(
-            _rename_expr(stmt.cond, rename),
-            [_rename_stmt(s, rename) for s in stmt.then_body],
-            [_rename_stmt(s, rename) for s in stmt.else_body],
+            _rename_expr(stmt.cond, rename, memo),
+            [_rename_stmt(s, rename, memo) for s in stmt.then_body],
+            [_rename_stmt(s, rename, memo) for s in stmt.else_body],
         )
     raise TypeError(stmt)
 

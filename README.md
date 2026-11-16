@@ -947,3 +947,17 @@ same RTL and stimulus on both sides.
 python3 -m flashsim compile build/benches/counter.v -o /tmp/counter.h
 python3 -m flashsim compile "$gpu_rtl/draw-fifo/DrawContextFifo.sv" -o /tmp/fifo.h --frontend circt
 ```
+
+Pure expression rewrites use an explicit iterative, identity-memoized visitor.
+Hierarchy renaming shares one memo within each instance; constant folding and
+other pure rewrites preserve shared operands. The ordinary `map_expr` visitor
+still visits every occurrence. Signal queries traverse distinct nodes, while
+use counts propagate exact path multiplicities (a shared operand used twice
+still counts twice). Width queries retain their existing operand selection.
+
+A 19-node shared sum stays at 19 nodes through renaming and folding, instead of
+expanding into hundreds of thousands of nodes. This does not establish complete
+GPU generation time or simulator throughput. Reproduce the graph regressions
+with `python3 -m pytest flashsim/test_shared_expression_mapping.py -q`; use
+`python3 -m pytest flashsim -q` for the complete suite with CIRCT, C++, Icarus and
+Verilator available. Keep temporary test outputs outside tracked source.
