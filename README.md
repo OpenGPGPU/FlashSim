@@ -118,8 +118,26 @@ an assertion-free FlashSim screen cannot replace that evidence.
 Large `GpuHostSystemAxi` models are emitted as C++ method shards and compiled
 in parallel. Set `FLASHSIM_CIRCT_SERIAL=1` to disable CIRCT's internal
 threading during RTL import when memory is constrained. This setting is part
-of the imported MLIR cache identity and does not disable assertions. Multi-CU
-RTL is detected from the generated source and uses a
+of the imported MLIR cache identity and does not disable assertions.
+
+`FLASHSIM_GC_POLICY=defer` optionally defers automatic Python cyclic garbage
+collection during `compile_verilog` and `compile_file`, including shard emission.
+Reference counting remains active; the caller's enabled/disabled GC state is
+restored on success or failure, without forcing a collection or changing GC
+thresholds. The default `normal` preserves existing behavior. Use this option
+in an isolated model-generation process because cyclic GC is process-wide;
+retained cycles can increase peak memory.
+
+Reproduce the synthetic comparison with
+`python3 -B scripts/bench_compile_gc.py --registers 8192 --repeat 3`. With ARM64
+macOS and Python 3.14.7, median native-frontend generation time was 2.266 seconds
+with normal GC and 2.130 seconds with deferred GC; maximum worker peak RSS was
+162.5 and 184.1 MiB, respectively. All six workers emitted byte-identical
+8,554,441-byte C++. The benchmark writes no model or measurement files. This
+synthetic result does not establish complete GPU generation speed, memory use
+or simulation throughput.
+
+Multi-CU RTL is detected from the generated source and uses a
 32-way split by default; set `FLASHSIM_DUT_SHARDS` to pin the split count for
 machines with a smaller memory or compiler parallelism budget. Set
 `FLASHSIM_COMPILE_JOBS` to limit parallel shard compilation (including the
@@ -1002,14 +1020,21 @@ share a pass-local memo through the dedicated DAG mapper; ordinary `map_expr`
 visitors retain their per-occurrence behavior. No GC policy change is required.
 
 Validation with Python 3.14.7 and CIRCT, C++, Icarus and Verilator available:
-381 tests passed with normal cyclic GC enabled. Reproduce with:
+395 tests passed under each of the `normal` and `defer` compilation GC policies,
+with no skips (204.43 and 183.86 seconds, respectively). Each complete run had
+a 600-second/6144-MiB sampled aggregate RSS process-group ceiling. The 14 policy
+cases include nested success/failure state restoration, byte-identical CIRCT
+split/monolithic output and actual reset, pre-NBA and both-instance assertion
+fault checks. Reproduce with:
 
 ```bash
 python3 -B -m pytest flashsim/test_opt_shared_dag.py flashsim/test_opt_deep_dedup.py -q
 python3 -B -m pytest flashsim/test_opt_fold_shared_dag.py -q
 python3 -B -m pytest flashsim/test_opt_slice_context.py flashsim/test_opt_generated_slices.py flashsim/test_shared_narrowing.py -q
 python3 -B -m pytest flashsim/test_emit_node_counts.py flashsim/test_phase_timing.py -q
-python3 -B -m pytest flashsim -q
+python3 -B -m pytest flashsim/test_gc_policy.py -q
+FLASHSIM_GC_POLICY=normal python3 -B -m pytest flashsim -q
+FLASHSIM_GC_POLICY=defer python3 -B -m pytest flashsim -q
 ```
 
 These are compiler checks; complete GPU model qualification and simulation
