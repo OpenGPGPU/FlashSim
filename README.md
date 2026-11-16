@@ -128,11 +128,20 @@ thresholds. The default `normal` preserves existing behavior. Use this option
 in an isolated model-generation process because cyclic GC is process-wide;
 retained cycles can increase peak memory.
 
+Local recursive visitors in the affected optimizer, emitter and clocked-process
+partitioning passes use explicit `_recur` arguments. Reference counting can
+release their input maps, temporary results and target mappings after a return
+or exception, including with cyclic GC disabled. Traversal order, optimization
+limits and the selected GC policy are preserved. Reproduce the completed,
+early-return and failed-walk lifetime checks with
+`python3 -B -m pytest flashsim/test_recursive_lifetime.py -q`. These checks do
+not establish complete GPU generation memory use or throughput.
+
 Reproduce the synthetic comparison with
 `python3 -B scripts/bench_compile_gc.py --registers 8192 --repeat 3`. With ARM64
-macOS and Python 3.14.7, median native-frontend generation time was 2.266 seconds
-with normal GC and 2.130 seconds with deferred GC; maximum worker peak RSS was
-162.5 and 184.1 MiB, respectively. All six workers emitted byte-identical
+macOS and Python 3.14.7, median native-frontend generation time was 2.222 seconds
+with normal GC and 2.142 seconds with deferred GC; maximum worker peak RSS was
+167.8 and 165.6 MiB, respectively. All six workers emitted byte-identical
 8,554,441-byte C++. The benchmark writes no model or measurement files. This
 synthetic result does not establish complete GPU generation speed, memory use
 or simulation throughput.
@@ -1020,12 +1029,14 @@ share a pass-local memo through the dedicated DAG mapper; ordinary `map_expr`
 visitors retain their per-occurrence behavior. No GC policy change is required.
 
 Validation with Python 3.14.7 and CIRCT, C++, Icarus and Verilator available:
-395 tests passed under each of the `normal` and `defer` compilation GC policies,
-with no skips (204.43 and 183.86 seconds, respectively). Each complete run had
+409 tests passed under each of the `normal` and `defer` compilation GC policies,
+with no skips (206.16 and 184.89 seconds, respectively). Each complete run had
 a 600-second/6144-MiB sampled aggregate RSS process-group ceiling. The 14 policy
 cases include nested success/failure state restoration, byte-identical CIRCT
 split/monolithic output and actual reset, pre-NBA and both-instance assertion
-fault checks. Reproduce with:
+fault checks. Fourteen lifetime cases check immediate release of input maps and
+names on completed, early-return and failed walks with cyclic collection
+disabled and forced collection forbidden. Reproduce with:
 
 ```bash
 python3 -B -m pytest flashsim/test_opt_shared_dag.py flashsim/test_opt_deep_dedup.py -q
@@ -1033,6 +1044,7 @@ python3 -B -m pytest flashsim/test_opt_fold_shared_dag.py -q
 python3 -B -m pytest flashsim/test_opt_slice_context.py flashsim/test_opt_generated_slices.py flashsim/test_shared_narrowing.py -q
 python3 -B -m pytest flashsim/test_emit_node_counts.py flashsim/test_phase_timing.py -q
 python3 -B -m pytest flashsim/test_gc_policy.py -q
+python3 -B -m pytest flashsim/test_recursive_lifetime.py -q
 FLASHSIM_GC_POLICY=normal python3 -B -m pytest flashsim -q
 FLASHSIM_GC_POLICY=defer python3 -B -m pytest flashsim -q
 ```
