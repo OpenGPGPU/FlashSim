@@ -137,6 +137,33 @@ disabled. Reproduce them with
 `python3 -B -m pytest flashsim/test_compile_model_lifetime.py -q`.
 These checks establish input lifetime, not complete GPU generation memory use.
 
+Single-use inlining counts assignment dependencies once and stores singleton
+dependencies and users as names. Only references within the assignment graph
+need bookkeeping; sequential and memory roots still contribute use counts.
+The dependency graph leaves scope before substitution expansion allocates
+rewritten expressions, including with cyclic GC disabled. Expanded occurrence
+counts, worklist order, observed roots and the 512-node inline budget are
+preserved. `FLASHSIM_PHASE_TIMINGS=1` reports graph construction, worklist and
+expansion separately.
+
+With Python 3.14.7 on ARM64 macOS, 100,000 independent alias/output pairs
+produced identical optimized expressions while peak additional traced Python
+allocations fell from 83.6 to 32.0 MiB (62%). Each revision ran in a fresh
+process with automatic cyclic collection disabled. This measures inline
+bookkeeping, not complete GPU memory use or compilation throughput. Compare
+the baseline at `1df7bc33cb0a12e192b074f6cd0575348422467c` with this checkout:
+
+```bash
+python3 -B scripts/bench_inline_graph.py --flashsim "$BASELINE_CHECKOUT" --pairs 100000
+python3 -B scripts/bench_inline_graph.py --flashsim "$PWD" --pairs 100000
+python3 -B -m pytest flashsim/test_inline_graph_lifetime.py flashsim/test_opt_inline_worklist.py flashsim/test_phase_timing.py -q
+```
+
+The benchmark writes no model or result files; its digest is only for immediate
+result comparison. Both pre-expansion lifetime cases fail on the baseline and
+pass after the fix, covering success and original-exception propagation with
+forced collection forbidden.
+
 Local recursive visitors in the affected optimizer, emitter and clocked-process
 partitioning passes use explicit `_recur` arguments. Reference counting can
 release their input maps, temporary results and target mappings after a return
@@ -1055,8 +1082,8 @@ share a pass-local memo through the dedicated DAG mapper; ordinary `map_expr`
 visitors retain their per-occurrence behavior. No GC policy change is required.
 
 Validation with Python 3.14.7 and CIRCT, C++, Icarus and Verilator available:
-414 tests passed under each of the `normal` and `defer` compilation GC policies,
-with no skips (202.35 and 181.77 seconds, respectively). Each complete run had
+423 tests passed under each of the `normal` and `defer` compilation GC policies,
+with no skips (193.80 and 202.51 seconds, respectively). Each complete run had
 a 600-second/6144-MiB sampled aggregate process-tree ceiling, charging the larger
 of resident memory and physical footprint per process on macOS, including
 compressed memory. The 14 policy
@@ -1077,6 +1104,7 @@ python3 -B -m pytest flashsim/test_emit_node_counts.py flashsim/test_phase_timin
 python3 -B -m pytest flashsim/test_emit_buffer_lifetime.py flashsim/test_emit_bulk_constructor.py -q
 python3 -B -m pytest flashsim/test_gc_policy.py -q
 python3 -B -m pytest flashsim/test_recursive_lifetime.py -q
+python3 -B -m pytest flashsim/test_inline_graph_lifetime.py flashsim/test_opt_inline_worklist.py -q
 FLASHSIM_GC_POLICY=normal python3 -B -m pytest flashsim -q
 FLASHSIM_GC_POLICY=defer python3 -B -m pytest flashsim -q
 ```

@@ -57,6 +57,7 @@ def test_observations_preserve_complete_generated_bytes(tmp_path, monkeypatch, c
         assert not stack
         assert {'optimize', 'emit_cpp', 'opt.merge_sop', 'opt.reassoc_and',
                 'opt.dedup', 'opt.used_bits', 'opt.lut', 'opt.dce',
+                'opt.inline_graph', 'opt.inline_worklist', 'opt.inline_expand',
                 'opt.post_dedup_fold', 'opt.post_used_bits_fold',
                 'emit.cached_wires', 'emit.deep_mux_chunks',
                 'emit.leaf_dependencies', 'emit.cached_dependencies',
