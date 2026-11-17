@@ -179,6 +179,49 @@ This benchmark writes no model or result files. It compares emitted C++ rather
 than serialized object identities because equal immutable signal references
 now share more objects.
 
+`FLASHSIM_PREFLATTEN_WIRES=1` optionally removes dead private wires and inlines
+bounded single-use expressions in each reachable CIRCT module before copying
+its instances. The default is off. Ports, register/memory state, arrays,
+instance connections, clocked checks/prints and process clocks remain roots;
+sequential bodies and reset ordering are unchanged. The ordinary optimizer
+still runs after flattening. Changing the option invalidates emitted-model
+reuse, as do changes to the frontend or compaction source.
+
+One off/on pair on the same complete `GpuHostSystemAxi` IR with Python 3.14.7,
+hash seed 73 and automatic GC disabled gives these frontend-only results:
+
+| Mode | Compaction + flatten | Whole benchmark peak RSS | Flattened signals |
+| --- | ---: | ---: | ---: |
+| Off | 823.441 s | 16.453 GB | 19,775,108 |
+| On | 707.671 s | 9.772 GB | 9,147,628 |
+
+The 14.1% stage-time reduction includes 36.718 seconds of compaction. Peak
+aggregate RSS falls 40.6%; total externally bounded process time is
+862.557 → 744.792 seconds. Both runs exit zero under the same 16-GiB/900-second
+guard. Register/memory width/depth signatures, 878961 registers, 2746 memory
+arrays (112756 elements) and all 17278 checks match the original hierarchy.
+This is a single controlled pair, not a repeated median. It does not qualify
+whole-model optimization/emission, C++ compilation or simulation performance.
+
+All 439 available tests pass, with 22 optional checks skipped. Native C++
+ASan/UBSan cases cover independent reused instances, reset/memory behavior and
+failing pre-edge assertions in both modes. Root-only observation/print cones,
+option selection and cache invalidation also have focused checks. Reproduce
+with the same existing IR and an external resource guard:
+
+```sh
+python3 -B -m pytest flashsim -q
+PYTHONHASHSEED=73 python3 -B scripts/bench_hierarchy_rename.py "$OWNER_MLIR" \
+  --module GpuHostSystemAxi --repeat 1 --frontend-only
+PYTHONHASHSEED=73 python3 -B scripts/bench_hierarchy_rename.py "$OWNER_MLIR" \
+  --module GpuHostSystemAxi --repeat 1 --frontend-only --preflatten-wires
+```
+
+The benchmark writes no models or raw results. `--frontend-only` excludes the
+ordinary optimizer and emitter; omit it for a separately bounded complete
+subtree compilation. No full-GPU behavioral equivalence is claimed from state
+counts alone.
+
 Signal-dependency queries collect terminal names and constants directly while
 retaining identity deduplication for composite DAG nodes and canonical name
 ordering. Three repetitions on the original 423033-signal `SharedL2Slice`
