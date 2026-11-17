@@ -52,6 +52,56 @@ def test_leaf_sets_match_every_expression_contract_including_memory_names():
         costs.leaf_set(Expr())
 
 
+def test_inline_threshold_matches_exact_occurrence_counts_with_and_without_cache():
+    a, b = Id("a"), Id("b")
+    roots = [a, Const(1), ArrayZeros(4, 8), ArrayConst((1, 2), 8),
+             UnaryOp("~", a), BinOp("+", a, b), Ternary(Id("c"), a, b),
+             Extract(a, 1, 2), Concat((a, a, b)), Concat(()),
+             ArrayGet(Id("array"), a), ArrayInject(Id("array"), a, b),
+             MemRead("memory", BinOp("+", a, b))]
+    for _ in range(8):
+        roots.append(BinOp("&", roots[-1], roots[-1]))
+    for cached in (False, True):
+        costs = opt._SliceCosts()
+        if cached:
+            for root in roots:
+                costs.node_count(root)
+        for root in roots:
+            for copies in (1, 2, 5, 16, 17):
+                assert costs.fits_inline(*([root] * copies)) == (
+                    copies * opt._expr_nodes(root) <= opt._SLICE_INLINE_NODES)
+
+
+def test_inline_threshold_bounds_wide_and_deep_walks_without_retaining_metadata(monkeypatch):
+    consumed = []
+
+    class LazyParts(tuple):
+        def __iter__(self):
+            for part in super().__iter__():
+                consumed.append(part)
+                assert len(consumed) <= opt._SLICE_INLINE_NODES
+                yield part
+
+    wide = Concat(LazyParts(Id("a") for _ in range(32768)))
+    deep = Id("a")
+    for _ in range(6000):
+        deep = UnaryOp("~", deep)
+    visits = []
+    original = opt._expr_children
+
+    def children(expr):
+        visits.append(expr)
+        assert len(visits) <= opt._SLICE_INLINE_NODES
+        return original(expr)
+
+    monkeypatch.setattr(opt, "_expr_children", children)
+    for expr in (wide, deep):
+        visits.clear()
+        costs = opt._SliceCosts()
+        assert not costs.fits_inline(expr)
+        assert not costs.nodes and not costs.leaves
+
+
 def test_leaf_sets_keep_the_iterative_reference_walks_depth_tolerance():
     expr = Id("a")
     for _ in range(2000):
@@ -120,4 +170,6 @@ def test_metadata_cache_preserves_slice_wires_and_sequential_memory_effects(monk
     cached = run()
     monkeypatch.setattr(opt._SliceCosts, "node_count", lambda self, expr: opt._expr_nodes(expr))
     monkeypatch.setattr(opt._SliceCosts, "leaf_set", lambda self, expr: frozenset(expr_ids(expr)))
+    monkeypatch.setattr(opt._SliceCosts, "fits_inline", lambda self, *exprs:
+                        sum(opt._expr_nodes(expr) for expr in exprs) <= opt._SLICE_INLINE_NODES)
     assert run() == cached
