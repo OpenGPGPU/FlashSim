@@ -143,6 +143,20 @@ disabled. Reproduce them with
 `python3 -B -m pytest flashsim/test_compile_model_lifetime.py -q`.
 These checks establish input lifetime, not complete GPU generation memory use.
 
+Memoized expression mapping visits terminal nodes directly without scheduling
+a second traversal pass. Shared roots retain the same identity memo and visitor
+semantics. On the actual 32850-bit-waiter `L2MshrTable` (328653 flattened signals),
+five isolated flatten repetitions had a median of 2.514 seconds before and
+1.823 seconds after this change. Serialized IR, including sharing, was identical.
+This measures that flatten step, not complete generation or simulation speed;
+no memory reduction is claimed. All 430 tests passed. With the same Python,
+`hw.mlir` and hash seed, run once per selected source checkout:
+
+```sh
+PYTHONHASHSEED=73 python3 -B scripts/bench_flatten_leaves.py "$OWNER_MLIR" \
+  --module L2MshrTable --repeat 5 --flashsim "$FLASH_CHECKOUT"
+```
+
 Single-use inlining counts assignment dependencies once and stores singleton
 dependencies and users as names. Only references within the assignment graph
 need bookkeeping; sequential and memory roots still contribute use counts.
