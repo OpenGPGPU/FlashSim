@@ -342,6 +342,10 @@ def map_expr_memoized(
                 raise ValueError("expression memo contains a foreign identity")
             continue
         children = _expr_children(node)
+        if not children:
+            # Leaves still visit once, without a return pass or rebuild state.
+            memo[key] = (node, fn(node))
+            continue
         if not ready:
             if key in active:
                 raise ValueError("cyclic expression graph")
