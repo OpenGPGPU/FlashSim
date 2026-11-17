@@ -354,14 +354,22 @@ def _emit_options_file(out_h: Path) -> Path:
 
 
 def _record_emit_options(out_h: Path) -> None:
-    _emit_options_file(out_h).write_text(json.dumps({"hold_group": _hold_group_size()}))
+    _emit_options_file(out_h).write_text(json.dumps(_emit_options()))
+
+
+def _emit_options() -> dict:
+    value = os.environ.get('FLASHSIM_PREFLATTEN_WIRES', '0')
+    if value not in {'0', '1'}:
+        raise ValueError('FLASHSIM_PREFLATTEN_WIRES must be 0 or 1')
+    return {"hold_group": _hold_group_size(),
+            "preflatten_wires": value}
 
 
 def _compiled_dut_fresh(vfile: Path, out_h: Path) -> bool:
     """Whether a previously emitted DUT can be reused for a benchmark run."""
     if not out_h.is_file():
         return False
-    options = {"hold_group": _hold_group_size()}
+    options = _emit_options()
     try:
         if json.loads(_emit_options_file(out_h).read_text()) != options:
             return False
@@ -375,6 +383,8 @@ def _compiled_dut_fresh(vfile: Path, out_h: Path) -> bool:
             Path(__file__).with_name("emit.py"),
             Path(__file__).with_name("opt.py"),
             Path(__file__).with_name("ir.py"),
+            Path(__file__).with_name("circt_frontend.py"),
+            Path(__file__).with_name("preflatten.py"),
         ]
         if any(src.stat().st_mtime > stamp for src in tracked):
             return False

@@ -223,7 +223,7 @@ def _split_modules(src: str) -> list[_ParsedMod]:
     return mods
 
 
-def parse_hw_mlir(src: str, top: str | None = None) -> Module:
+def parse_hw_mlir(src: str, top: str | None = None, *, preflatten_wires: bool = False) -> Module:
     src = re.sub(r"\{sv\.[^}]*\}", "", src)
     with phase('parse.split_modules'):
         parsed = _split_modules(src)
@@ -241,6 +241,12 @@ def parse_hw_mlir(src: str, top: str | None = None) -> Module:
     # completed children reduces the peak cost of flattening large hierarchies.
     lib = {name: by_name[name] for name in reachable}
     del by_name
+    if preflatten_wires:
+        from flashsim.preflatten import compact_module_wires
+        with phase('parse.compact_wires'):
+            for name in sorted(lib):
+                lib[name] = compact_module_wires(lib[name])
+            chosen = lib[chosen.name]
     with phase('parse.flatten'):
         return _flatten(chosen, lib, remaining)
 

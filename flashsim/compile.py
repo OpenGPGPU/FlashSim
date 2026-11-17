@@ -32,6 +32,9 @@ def compile_verilog(
     *,
     assertions: bool = False,
 ) -> tuple[Module, str]:
+    preflatten = os.environ.get('FLASHSIM_PREFLATTEN_WIRES', '0')
+    if preflatten not in {'0', '1'}:
+        raise ValueError('FLASHSIM_PREFLATTEN_WIRES must be 0 or 1')
     kind = _resolve_frontend(frontend)
     if kind == "circt":
         if path is None:
@@ -61,7 +64,10 @@ def compile_verilog(
         else:
             mlir = mlir_path.read_text()
         with phase('parse.hw_mlir'):
-            mod = parse_hw_mlir(mlir, top=path.stem)
+            if preflatten == '1':
+                mod = parse_hw_mlir(mlir, top=path.stem, preflatten_wires=True)
+            else:
+                mod = parse_hw_mlir(mlir, top=path.stem)
         del mlir
     else:
         if assertions:
