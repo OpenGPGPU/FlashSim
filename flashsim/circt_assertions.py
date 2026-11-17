@@ -185,6 +185,13 @@ def lower_process(lines, *, globals, formats, scope, lower_pure, normalize,
     if (len(edge.arguments) != 1 or len(edge_operands) != 1
             or resolve(edge_operands[0], env) != clock):
         raise AssertionLoweringError("edge detector must retain the previous clock")
+    # CIRCT can fold every effect of a clocked check yet retain its wait loop.
+    # Accept only the complete, result-free loop: no hidden blocks, operations,
+    # state drivers or persistent wait arguments may disappear with it.
+    if (not result_types and not drives and not blocks[wait_name].arguments
+            and set(blocks) == visited | {edge_name}
+            and edge.lines == ["cf.br ^" + wait_name]):
+        return [], [], []
     env[edge.arguments[0]] = _PreviousClock()
     for line in edge.lines[:-1]:
         pure(line, env)

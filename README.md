@@ -100,6 +100,12 @@ and tick. Split C++ models retain the same behavior. The generated DUT exposes
 of sources and included headers prevent reuse of an assertion-free or stale
 frontend cache.
 
+When CIRCT folds all effects of a check, its residual result-free wait loop
+is accepted only if it contains no state drivers, persistent wait arguments,
+extra operations or hidden blocks. Live checks and pre-NBA updates remain
+checked alongside it. Reproduce with
+`python3 -B -m pytest flashsim/test_circt_empty_process.py flashsim/test_clocked_assertions.py -q`.
+
 Reference-based combinational selectors and zero-initialized clocked capture
 state are retained as well. SSA joins merge conditional updates without
 enumerating combinations of independent register enables; large selectors
