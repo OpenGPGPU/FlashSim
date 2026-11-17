@@ -326,6 +326,27 @@ def replace_id(expr: Expr, name: str, repl: Expr) -> Expr:
     return map_expr(expr, fn)
 
 
+def _rebuild_expr(node: Expr, mapped: tuple[Expr, ...]) -> Expr:
+    """Rebuild a composite with already mapped children."""
+    if isinstance(node, UnaryOp):
+        return UnaryOp(node.op, mapped[0])
+    if isinstance(node, BinOp):
+        return BinOp(node.op, *mapped)
+    if isinstance(node, Ternary):
+        return Ternary(*mapped)
+    if isinstance(node, Extract):
+        return Extract(mapped[0], node.low, node.width)
+    if isinstance(node, Concat):
+        return Concat(mapped)
+    if isinstance(node, ArrayGet):
+        return ArrayGet(*mapped)
+    if isinstance(node, ArrayInject):
+        return ArrayInject(*mapped)
+    if isinstance(node, MemRead):
+        return MemRead(node.mem, mapped[0])
+    raise TypeError(type(node))
+
+
 def map_expr_memoized(
     expr: Expr, fn, memo: dict[int, tuple[Expr, Expr]] | None = None
 ) -> Expr:
@@ -363,22 +384,7 @@ def map_expr_memoized(
         mapped = tuple(memo[id(child)][1] for child in children)
         rebuilt = node
         if any(a is not b for a, b in zip(children, mapped)):
-            if isinstance(node, UnaryOp):
-                rebuilt = UnaryOp(node.op, mapped[0])
-            elif isinstance(node, BinOp):
-                rebuilt = BinOp(node.op, *mapped)
-            elif isinstance(node, Ternary):
-                rebuilt = Ternary(*mapped)
-            elif isinstance(node, Extract):
-                rebuilt = Extract(mapped[0], node.low, node.width)
-            elif isinstance(node, Concat):
-                rebuilt = Concat(mapped)
-            elif isinstance(node, ArrayGet):
-                rebuilt = ArrayGet(*mapped)
-            elif isinstance(node, ArrayInject):
-                rebuilt = ArrayInject(*mapped)
-            elif isinstance(node, MemRead):
-                rebuilt = MemRead(node.mem, mapped[0])
+            rebuilt = _rebuild_expr(node, mapped)
         memo[key] = (node, fn(rebuilt))
     return memo[id(expr)][1]
 
