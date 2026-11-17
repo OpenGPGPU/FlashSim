@@ -174,7 +174,8 @@ def _optimize_owned(owned: list[Module]) -> Module:
         body = _self_gate_const_holds(body, sigs)
         body = _map_stmts(body, _fold_expr)
     body = _cse_sibling_or_prefixes(body, assigns, sigs)
-    reset_epilogue = _self_gate_const_holds(reset_epilogue, sigs)
+    prior_writes = {name for stmt in body for name in stmt_writes(stmt)}
+    reset_epilogue = _self_gate_const_holds(reset_epilogue, sigs, prior_writes)
     reset_epilogue = _map_stmts(reset_epilogue, _fold_expr)
     assigns, body = _dce(assigns, body, observed, mem_writes)
     if _MERGE_SOP:
@@ -1208,6 +1209,9 @@ def _hoist_shared_resets(
     """
     if _RESET_HOIST_MIN < 2:
         return body, []
+    # Moving an override to the epilogue must not reorder it across another
+    # statement that writes the same register (including a later override).
+    writers = Counter(name for stmt in body for name in stmt_writes(stmt))
     classified: list[tuple[Expr, list[Stmt], list[NbAssign]] | None] = []
     for stmt in body:
         if not isinstance(stmt, If) or not _is_reset_pred(stmt.cond):
@@ -1227,6 +1231,9 @@ def _hoist_shared_resets(
             classified.append(None)
             continue
         covered = {assign.lhs for assign in consts}
+        if any(writers[name] != 1 for name in covered):
+            classified.append(None)
+            continue
         written: set[str] = set()
         for item in data:
             written |= stmt_writes(item)
@@ -2160,16 +2167,22 @@ def _value_differs(lhs: str, value: int, sigs: dict[str, Signal]) -> Expr:
     return BinOp("!=", Id(lhs), Const(value, width))
 
 
-def _self_gate_const_holds(body: list[Stmt], sigs: dict[str, Signal]) -> list[Stmt]:
+def _self_gate_const_holds(
+    body: list[Stmt], sigs: dict[str, Signal], earlier_writes: set[str] | None = None,
+) -> list[Stmt]:
     """`if (en) x <= c` is a no-op once x already holds c; skip it while idle."""
     out: list[Stmt] = []
+    written = set(earlier_writes or ())
     for stmt in body:
         if not isinstance(stmt, If):
             out.append(stmt)
+            written |= stmt_writes(stmt)
             continue
-        then = _self_gate_const_holds(stmt.then_body, sigs)
-        els = _self_gate_const_holds(stmt.else_body, sigs)
-        if not els and then and all(_is_scalar_const_nba(s, sigs) for s in then):
+        then = _self_gate_const_holds(stmt.then_body, sigs, written)
+        els = _self_gate_const_holds(stmt.else_body, sigs, written)
+        if (not els and then
+                and all(_is_scalar_const_nba(s, sigs) for s in then)
+                and not any(s.lhs in written for s in then)):
             diffs = [
                 _value_differs(s.lhs, s.rhs.value, sigs)
                 for s in then
@@ -2181,6 +2194,7 @@ def _self_gate_const_holds(body: list[Stmt], sigs: dict[str, Signal]) -> list[St
             out.append(If(BinOp("&", stmt.cond, nz), then, []))
         else:
             out.append(If(stmt.cond, then, els))
+        written |= stmt_writes(stmt)
     return out
 
 
@@ -2210,7 +2224,9 @@ def _differs(lhs: str, rhs: Expr, sigs: dict[str, Signal]) -> Expr:
     return BinOp("!=", Id(lhs), rhs)
 
 
-def _wrap_sticky_nbas(body: list[Stmt], sigs: dict[str, Signal]) -> list[Stmt]:
+def _wrap_sticky_nbas(
+    body: list[Stmt], sigs: dict[str, Signal], earlier_writes: set[str] | None = None,
+) -> list[Stmt]:
     """Turn always-run `x <= y` into `if (x != y) x <= y` so idle copies skip.
 
     Also wraps const/id else-branches so `_flatten_nested_holds` can lift
@@ -2218,11 +2234,15 @@ def _wrap_sticky_nbas(body: list[Stmt], sigs: dict[str, Signal]) -> list[Stmt]:
     counters alone: those fire every cycle and must stay live.
     """
     out: list[Stmt] = []
+    written = set(earlier_writes or ())
     for stmt in body:
         if isinstance(stmt, NbAssign):
-            if isinstance(stmt.rhs, Id) and stmt.rhs.name == stmt.lhs:
+            if stmt.lhs in written:
+                # A value equal to old state can still cancel a pending NBA.
+                out.append(stmt)
+            elif isinstance(stmt.rhs, Id) and stmt.rhs.name == stmt.lhs:
                 continue
-            if _sticky_rhs(stmt.lhs, stmt.rhs, sigs):
+            elif _sticky_rhs(stmt.lhs, stmt.rhs, sigs):
                 out.append(If(_differs(stmt.lhs, stmt.rhs, sigs), [stmt], []))
             else:
                 out.append(stmt)
@@ -2230,12 +2250,13 @@ def _wrap_sticky_nbas(body: list[Stmt], sigs: dict[str, Signal]) -> list[Stmt]:
             out.append(
                 If(
                     stmt.cond,
-                    _wrap_sticky_nbas(stmt.then_body, sigs),
-                    _wrap_sticky_nbas(stmt.else_body, sigs),
+                    _wrap_sticky_nbas(stmt.then_body, sigs, written),
+                    _wrap_sticky_nbas(stmt.else_body, sigs, written),
                 )
             )
         else:
             out.append(stmt)
+        written |= stmt_writes(stmt)
     return out
 
 
