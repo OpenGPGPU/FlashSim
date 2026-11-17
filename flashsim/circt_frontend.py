@@ -748,7 +748,7 @@ def _flatten(mod: Module, lib: dict[str, Module], remaining: Counter[str]) -> Mo
             if mapped not in signals:
                 kind = "wire" if sig.kind in {"input", "output"} else sig.kind
                 signals[mapped] = Signal(mapped, sig.width, kind, sig.depth)
-        expr_memo: dict[int, tuple[Expr, Expr]] = {}
+        expr_memo = _RenameMemo()
         for a in callee.assigns:
             assigns.append(Assign(rename.get(a.lhs, a.lhs), _rename_expr(a.rhs, rename, expr_memo)))
         for stmt in callee.always.body:
@@ -779,25 +779,67 @@ def _flatten(mod: Module, lib: dict[str, Module], remaining: Counter[str]) -> Mo
     )
 
 
-def _rename_expr(expr: Expr, rename: dict[str, str], memo=None) -> Expr:
-    from flashsim.ir import Id as IrId
-    from flashsim.ir import map_expr_memoized
+class _RenameMemo(dict):
+    """One instance's composite identities and renamed immutable names.
 
-    def fn(node: Expr) -> Expr:
-        if isinstance(node, IrId) and node.name in rename:
-            return IrId(rename[node.name])
-        if isinstance(node, MemRead):
-            return MemRead(rename.get(node.mem, node.mem), node.addr)
+    Constant leaves need no mapping. Equal Id leaves may share their renamed
+    value, so a repeated SSA reference needs neither an identity entry nor a
+    second output Id. Composite input identities still preserve DAG sharing.
+    """
+    def __init__(self):
+        super().__init__()
+        self.names = {}
+
+
+def _rename_expr(expr: Expr, rename: dict[str, str], memo=None) -> Expr:
+    from flashsim.ir import _expr_children, _rebuild_expr
+
+    if memo is None:
+        memo = _RenameMemo()
+
+    def leaf(node):
+        if isinstance(node, Id) and node.name in rename:
+            if node.name not in memo.names:
+                memo.names[node.name] = Id(rename[node.name])
+            return memo.names[node.name]
         return node
 
-    return map_expr_memoized(expr, fn, memo)
+    if not _expr_children(expr):
+        return leaf(expr)
+    active = set()
+    stack = [(expr, False)]
+    while stack:
+        node, ready = stack.pop()
+        key = id(node)
+        if key in memo:
+            if memo[key][0] is not node:
+                raise ValueError("expression memo contains a foreign identity")
+            continue
+        children = _expr_children(node)
+        if not ready:
+            if key in active:
+                raise ValueError("cyclic expression graph")
+            active.add(key)
+            stack.append((node, True))
+            stack.extend((child, False) for child in reversed(children)
+                         if _expr_children(child))
+            continue
+        active.remove(key)
+        mapped = tuple(memo[id(child)][1] if _expr_children(child) else leaf(child)
+                       for child in children)
+        rebuilt = (_rebuild_expr(node, mapped)
+                   if any(a is not b for a, b in zip(children, mapped)) else node)
+        if isinstance(rebuilt, MemRead):
+            rebuilt = MemRead(rename.get(rebuilt.mem, rebuilt.mem), rebuilt.addr)
+        memo[key] = (node, rebuilt)
+    return memo[id(expr)][1]
 
 
 def _rename_stmt(stmt, rename: dict[str, str], memo=None):
     from flashsim.ir import If
 
     if memo is None:
-        memo = {}
+        memo = _RenameMemo()
     if isinstance(stmt, NbAssign):
         lhs = rename.get(stmt.lhs, stmt.lhs)
         return NbAssign(lhs, _rename_expr(stmt.rhs, rename, memo))

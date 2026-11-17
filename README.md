@@ -157,6 +157,28 @@ PYTHONHASHSEED=73 python3 -B scripts/bench_flatten_leaves.py "$OWNER_MLIR" \
   --module L2MshrTable --repeat 5 --flashsim "$FLASH_CHECKOUT"
 ```
 
+Hierarchy renaming now memoizes composite identities and reuses immutable
+renamed signal references by name within each instance. Constant leaves need
+no identity entries. Composite sharing, independent instance names/state,
+memories and live checks are preserved. On the original 423033-signal
+`SharedL2Slice` hierarchy, three repetitions reduced median flatten time from
+3.674 to 3.434 seconds (6.5%). All thirteen checks and the complete 17,908,507-byte
+emitted C++ were identical. Externally observed peak aggregate RSS for the whole
+benchmark, including parsing, optimization and emission, fell from 1.645 to
+1.531 GB (7.0%). This establishes that subtree's result; complete-host generation,
+C++ compilation and simulation gains remain unmeasured. All 424 available tests
+passed, with 22 skipped. With Python 3.14.7 and the same existing IR/hash seed,
+run once per selected checkout under the same resource guard:
+
+```sh
+PYTHONHASHSEED=73 python3 -B scripts/bench_hierarchy_rename.py "$OWNER_MLIR" \
+  --module SharedL2Slice --repeat 3 --flashsim "$FLASH_CHECKOUT"
+```
+
+This benchmark writes no model or result files. It compares emitted C++ rather
+than serialized object identities because equal immutable signal references
+now share more objects.
+
 Signal-dependency queries collect terminal names and constants directly while
 retaining identity deduplication for composite DAG nodes and canonical name
 ordering. Three repetitions on the original 423033-signal `SharedL2Slice`
