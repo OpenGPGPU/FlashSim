@@ -731,11 +731,54 @@ def _slice_width(expr: Expr, sigs: dict[str, Signal],
     hit = cache.get(key)
     if hit is not None and hit[0] is expr:
         return hit[1]
-    width = expr_width(expr, sigs)
-    if len(cache) >= _SLICE_WIDTH_CACHE_MAX:
-        cache.clear()
-    cache[key] = (expr, width)
-    return width
+    # Reuse widths of nested operands across overlapping root queries. A
+    # query-local table keeps in-flight children available if the bounded
+    # pass cache clears, and the explicit stack preserves deep-graph support.
+    widths: dict[int, int] = {}
+    pending = [(expr, False)]
+    while pending:
+        node, ready = pending.pop()
+        key = id(node)
+        if key in widths:
+            continue
+        hit = cache.get(key)
+        if hit is not None and hit[0] is node:
+            widths[key] = hit[1]
+            continue
+        cacheable = True
+        if isinstance(node, (Const, Extract, ArrayZeros, ArrayConst)):
+            width, cacheable = node.width, False
+        elif isinstance(node, Id):
+            width, cacheable = sigs[node.name].width, False
+        elif isinstance(node, MemRead):
+            width, cacheable = sigs[node.mem].width, False
+        elif isinstance(node, BinOp) and node.op in CMP_OPS:
+            width = 1
+        else:
+            if isinstance(node, Concat):
+                children = node.parts
+            elif isinstance(node, BinOp):
+                children = (node.a,) if node.op in {"<<", ">>"} else (node.a, node.b)
+            elif isinstance(node, (UnaryOp, Ternary)):
+                children = (node.a,)
+            elif isinstance(node, (ArrayGet, ArrayInject)):
+                children = (node.arr,)
+            else:
+                raise TypeError(type(node))
+            if not ready:
+                pending.append((node, True))
+                pending.extend((child, False) for child in reversed(children))
+                continue
+            if isinstance(node, Concat):
+                width = sum(widths[id(child)] for child in children)
+            else:
+                width = max(widths[id(child)] for child in children)
+        widths[key] = width
+        if cacheable:
+            if len(cache) >= _SLICE_WIDTH_CACHE_MAX:
+                cache.clear()
+            cache[key] = (node, width)
+    return widths[id(expr)]
 
 
 _SLICE_RESULT_CACHE_MAX = 8192
