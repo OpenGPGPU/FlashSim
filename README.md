@@ -1102,6 +1102,27 @@ retryable. The iterative width query retains support for deep expressions. A
 41-node failed-slice diamond takes at most 81 recursive calls; the previous
 implementation exceeds 4096 calls before completing the same query.
 
+Within that pass, width queries also retain nested operand widths in the
+bounded 8192-entry cache. Query-local results survive cache eviction during a
+deep walk. Querying all 1000 overlapping prefixes reads their two input widths
+once, rather than once per prefix; a 10000-level expression still needs no
+recursive Python frames. Operand selection, unknown-width retries and
+concatenation multiplicities match the original width rules. Cache ownership
+ends with the pass, including when cyclic GC is disabled.
+
+Three repetitions on the original 328653-signal `L2MshrTable` produced identical
+complete optimized IR. Median narrowing time was 2.009 / 2.009 seconds and total
+optimization was 16.408 / 16.572 seconds before/after this change. This establishes
+no real-module speed or memory gain; it removes repeated-prefix work. Complete
+host generation, C++ compilation and simulation throughput remain unqualified.
+Reproduce with the same existing `hw.mlir` and Python, selecting each checkout:
+
+```sh
+python3 -B -m pytest -q flashsim/test_opt_slice_width_dag.py
+PYTHONHASHSEED=73 python3 -B scripts/bench_narrow_pass.py "$OWNER_MLIR" \
+  --module L2MshrTable --repeat 3 --flashsim "$FLASH_CHECKOUT"
+```
+
 Emitter promotion costs count expanded occurrences with an iterative identity
 memo. A 41-node diamond still counts as `2**41 - 1` occurrences, using at most
 80 operand reads; deep counts do not require recursive Python frames.
