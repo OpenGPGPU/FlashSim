@@ -87,6 +87,7 @@ def test_all_expression_kinds_match_per_occurrence_mapping_values():
         return node
 
     assert map_expr_memoized(root, visitor) == map_expr(root, visitor)
+    assert list(expr_ids(root)) == ["addr", "enable", "idx", "mem", "value"]
 
 
 def test_flatten_shares_rewrites_across_roots_but_not_between_instances():
@@ -121,6 +122,7 @@ def test_shared_graph_queries_preserve_occurrence_counts_without_expansion():
     assert expr_width(expr, {"value": Signal("value", 64, "input")}) == 64
     read = MemRead("memory", Id("address"))
     expr = Concat((read, read, Id("address")))
+    assert list(expr_ids(expr)) == ["address", "memory"]
     assert expr_id_counts(expr) == {"memory": 2, "address": 3}
 
 

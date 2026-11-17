@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure optimization of one real CIRCT leaf, including bit-slice narrowing.
+"""Measure optimization of one real CIRCT module, including bit-slice narrowing.
 
 Uses an existing hw.mlir and writes no model or result files. Run each source
 checkout in a fresh, externally bounded process with the same Python and seed.
@@ -21,6 +21,8 @@ def main():
     parser.add_argument('mlir', type=Path)
     parser.add_argument('--module', required=True)
     parser.add_argument('--repeat', type=int, default=3)
+    parser.add_argument('--hierarchy', action='store_true',
+                        help='include the selected module\'s original child instances')
     parser.add_argument('--flashsim', type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
     if args.repeat < 1:
@@ -45,15 +47,27 @@ def main():
     gc.disable()
     opt._narrow_bit_slices = measure
     try:
-        modules = frontend._split_modules(args.mlir.read_text())
-        raw = next((module for module in modules if module.name == args.module), None)
-        if raw is None:
+        modules = {module.name: module for module in frontend._split_modules(args.mlir.read_text())}
+        if args.module not in modules:
             parser.error('module not found: ' + args.module)
+        library = {}
+        pending = [args.module]
+        while pending:
+            name = pending.pop()
+            if name in library:
+                continue
+            library[name] = frontend._lower_module(modules[name])
+            if args.hierarchy:
+                pending.extend(child for _, _, child, _ in library[name].instances)
         del modules
-        leaf = frontend._lower_module(raw)
-        del raw
-        if leaf.instances:
-            parser.error('--module must select a leaf without instances')
+        leaf = library[args.module]
+        if args.hierarchy:
+            remaining, reachable = frontend._reachable_instances(leaf, library)
+            library = {name: library[name] for name in reachable}
+            leaf = frontend._flatten(leaf, library, remaining)
+        del library
+        if getattr(leaf, 'instances', []):
+            parser.error('select a leaf module or pass --hierarchy')
         times = []
         for repeat in range(args.repeat):
             started = time.perf_counter()

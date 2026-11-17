@@ -245,12 +245,18 @@ def expr_ids(expr: Expr) -> IdSet:
     stack = [expr]
     while stack:
         node = stack.pop()
-        if id(node) in seen:
-            continue
-        seen.add(id(node))
+        # Terminal values have no children to deduplicate. Signal names are
+        # already unique in the result; retain identity tracking for DAG edges.
         if isinstance(node, Id):
             names.add(node.name)
-        elif isinstance(node, MemRead):
+            continue
+        if isinstance(node, (Const, ArrayZeros, ArrayConst)):
+            continue
+        key = id(node)
+        if key in seen:
+            continue
+        seen.add(key)
+        if isinstance(node, MemRead):
             names.add(node.mem)
         stack.extend(_expr_children(node))
     return names

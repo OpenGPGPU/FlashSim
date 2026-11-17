@@ -157,6 +157,20 @@ PYTHONHASHSEED=73 python3 -B scripts/bench_flatten_leaves.py "$OWNER_MLIR" \
   --module L2MshrTable --repeat 5 --flashsim "$FLASH_CHECKOUT"
 ```
 
+Signal-dependency queries collect terminal names and constants directly while
+retaining identity deduplication for composite DAG nodes and canonical name
+ordering. Three repetitions on the original 423033-signal `SharedL2Slice`
+hierarchy, including its child instances, gave median optimization times of
+22.173 seconds before and 21.660 seconds after this change (about 2.3%). Complete
+optimized IR, including sharing, was identical. This measures that subtree's
+optimization; no memory, complete-host generation, C++ build or simulation
+speed gain is established. With the same Python, `hw.mlir` and hash seed:
+
+```sh
+PYTHONHASHSEED=73 python3 -B scripts/bench_narrow_pass.py "$OWNER_MLIR" \
+  --module SharedL2Slice --hierarchy --repeat 3 --flashsim "$FLASH_CHECKOUT"
+```
+
 Single-use inlining counts assignment dependencies once and stores singleton
 dependencies and users as names. Only references within the assignment graph
 need bookkeeping; sequential and memory roots still contribute use counts.
