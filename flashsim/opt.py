@@ -769,6 +769,26 @@ class _SliceCosts:
     def node_count(self, expr: Expr) -> int:
         return _expr_nodes(expr, memo=self.nodes)
 
+    def fits_inline(self, *expressions: Expr) -> bool:
+        # This is a threshold query, not an exact cost comparison. Walk
+        # expanded occurrences lazily and stop at the first excess node.
+        # Iterators also avoid copying a wide Concat's children onto a stack.
+        remaining = _SLICE_INLINE_NODES
+        pending = [iter(expressions)]
+        while pending:
+            try:
+                expr = next(pending[-1])
+            except StopIteration:
+                pending.pop()
+                continue
+            hit = self.nodes.get(id(expr))
+            remaining -= hit[1] if hit is not None else 1
+            if remaining < 0:
+                return False
+            if hit is None and (children := _expr_children(expr)):
+                pending.append(iter(children))
+        return True
+
     def leaf_set(self, expr: Expr) -> frozenset[str]:
         # expr_id_counts uses an explicit stack. Preserve that depth tolerance
         # when replacing its set-only queries, without expanding shared DAGs.
@@ -972,7 +992,7 @@ def _slice_src_uncached(
         inner = _slice_src(
             src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache, memo
         )
-        if inner is not None and memo.costs.node_count(inner) <= _SLICE_INLINE_NODES:
+        if inner is not None and memo.costs.fits_inline(inner):
             return UnaryOp("~", inner)
         return None
     if isinstance(src, BinOp) and src.op in {"&", "|", "^"}:
@@ -985,7 +1005,7 @@ def _slice_src_uncached(
         if (
             left is not None
             and right is not None
-            and memo.costs.node_count(left) + memo.costs.node_count(right) <= _SLICE_INLINE_NODES
+            and memo.costs.fits_inline(left, right)
         ):
             return BinOp(src.op, left, right)
         return None
@@ -999,7 +1019,7 @@ def _slice_src_uncached(
         if (
             left is not None
             and right is not None
-            and memo.costs.node_count(left) + memo.costs.node_count(right) <= _SLICE_INLINE_NODES
+            and memo.costs.fits_inline(left, right)
         ):
             return Ternary(src.cond, left, right)
         return None
@@ -1038,7 +1058,7 @@ def _slice_src_uncached(
             and memo.costs.node_count(sliced) >= memo.costs.node_count(original)
         ):
             return None
-        if memo.costs.node_count(sliced) <= _SLICE_INLINE_NODES or uses.get(src.name, 0) <= 1:
+        if memo.costs.fits_inline(sliced) or uses.get(src.name, 0) <= 1:
             return sliced
         name = f"{src.name}__b{low}_{width}"
         suffix = 0

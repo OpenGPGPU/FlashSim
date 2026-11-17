@@ -213,6 +213,13 @@ metadata, not input size or all temporary working sets. Run
 for overlapping DAG roots, every expression kind, memory names, retention
 budgets, immediate release and unchanged generated-wire/side-effect results.
 
+The four inline-size decisions only need to know whether their combined
+expanded occurrence count exceeds 16. They reuse available exact counts and
+otherwise visit at most 17 occurrences, with lazy child iterators for wide
+concatenations and deep expressions. They retain no additional metadata;
+exact comparisons between original and sliced costs are unchanged. Tests
+include 32,768-part concatenations, 6,000-level chains and shared DAGs.
+
 Compare one real CIRCT leaf's optimization and narrowing costs with the same
 Python, existing `hw.mlir` and hash seed, once per selected source checkout:
 
@@ -224,6 +231,14 @@ PYTHONHASHSEED=73 python3 -B scripts/bench_narrow_pass.py "$OWNER_MLIR" \
 It reports the complete optimized IR identity and writes no model or result
 files. This measures one leaf; complete-host generation, native compilation
 and simulation throughput require their own checks.
+
+On ARM64 macOS with Python 3.14.7 and seed 73, three repetitions on the real
+328,653-signal `L2MshrTable` produced identical optimized IR before and after
+the inline threshold change. Median optimization times were 16.634 and
+16.292 seconds; narrowing times were 2.039 and 2.008 seconds. This small
+sequential comparison does not establish a reliable speed improvement or
+complete-model performance. The bounded traversal is the demonstrated
+algorithmic improvement.
 
 
 Multi-CU RTL is detected from the generated source and uses a
