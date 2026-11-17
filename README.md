@@ -471,6 +471,23 @@ static exhaustive caching beats the boolean tree when the inputs change
 every tick. All three are on by default and opt out with
 `FLASHSIM_USED_BITS=0` / `FLASHSIM_DEDUP=0` / `FLASHSIM_LUT=0` (or
 `FLASHSIM_LUT_MIN_NODES` to retune).
+
+Idle write gates compare against the state at the start of a clock edge. A
+later nonblocking write that restores that value must still override an
+earlier pending write. Constant-clear and sticky-copy gates therefore retain
+later writes to a previously written register, including across nested
+conditions and the reset epilogue. Reset hoisting also stays within registers
+with one top-level writer. Seven native C++ regressions cover repeated reset,
+conditional clear, reset/write ordering and restoring copies; all seven fail
+on the preceding implementation and pass after this fix. These checks do not
+establish complete GPU qualification or a performance gain. The complete suite
+passes 431 tests with 22 optional checks skipped on Python 3.14.7. Reproduce with:
+
+```sh
+python3 -B -m pytest flashsim/test_pending_nba_priority.py flashsim/test_opt_gsim.py flashsim/test_opt_mux.py -q
+python3 -B -m pytest flashsim -q
+```
+
 For a future compilation, `FLASHSIM_PHASE_TIMINGS=1` writes flushed
 `[flashsim-phase]` JSON begin/end records to stderr for frontend, parsing,
 optimization, emission and shard splitting. Optimizer records include DCE,
