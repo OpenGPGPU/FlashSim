@@ -1289,6 +1289,12 @@ An isolated fold of 500,000 identifier bindings eliminated 22 MiB of transient
 Python allocations for copying the binding table. Whole-host peak memory and
 simulation throughput require separate measurements.
 
+The commit-table transform locates literal prefixes before checking token and
+line boundaries. It also parses the decimal fields once and checks quotes
+without copying the commit body. On a 96 MiB prefix of the generated dual-CU
+header with one added eligible table and call, three alternating pairs took
+1.98 and 0.64 seconds median. Both returned the same rewritten C++ and helper.
+
 Select `GpuComputeUnitCore` or `BankedShaderPayloadStore` as `MODULE` and run
 the same command with baseline `39c920f` and the updated checkout.
 

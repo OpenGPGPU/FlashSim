@@ -52,6 +52,9 @@ def test_unknown_mutable_shadow_and_partial_uses_keep_generic_path(monkeypatch):
     body = '#include "dut.h"\nvoid ProofDut::_commit() { ProofDut_commit_bump(_pg, _inv0, 32u); }\n'
     changed, helper = emit._outline_static_commit_blocks(header, "ProofDut", body)
     assert helper and changed != body
+    # Incidental suffixes in identifiers are not table names.
+    suffixes = "int prefix_inv0, _inv0_other, prefix_inv0_blocks, α_inv0;\n"
+    assert emit._outline_static_commit_blocks(header + suffixes, "ProofDut", body) == (changed, helper)
     # A second transform must not add or duplicate metadata.
     assert emit._outline_static_commit_blocks(header, "ProofDut", changed) == (changed, None)
     cases = [
@@ -65,7 +68,11 @@ def test_unknown_mutable_shadow_and_partial_uses_keep_generic_path(monkeypatch):
         (header + "#define _inv0_blocks 0\n", body),
         (header + "const uint16_t _inv0_blocks[] = {0};\n", body),
         (header + "void ProofDut_commit_bump_blocks();\n", body),
+        (" " + header, body),
+        (header.replace("0,1,2,", "0,1 2,,"), body),
+        (header, body + "void probe() { wrapper_ProofDut_commit_bump(_pg, _inv0, 32u); }\n"),
         (header, body + 'const char *message="_inv0";\n'),
+        (header, body + '#include "other.h"\n'),
     ]
     for h, b in cases:
         assert emit._outline_static_commit_blocks(h, "ProofDut", b) == (b, None)

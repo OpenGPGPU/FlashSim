@@ -4064,39 +4064,68 @@ def _outline_static_commit_blocks(header: str, cls: str, body: str,
             or helper + "(" not in body or helper + "_blocks" in header
             or helper + "_blocks" in body):
         return body, None
-    if '"' in body.replace('#include "dut.h"', '') or "'" in body:
+    if "'" in body:
         return body, None
-    declarations = list(re.finditer(
-        r"^static const uint(?:16|32|64)_t (_inv\d+)\[\] = \{([0-9, ]+)\};$", header, re.M))
+    # Skip exact include strings without copying the generated method bodies.
+    include = '#include "dut.h"'
+    quote = body.find('"')
+    while quote >= 0:
+        start = quote - len('#include ')
+        if start < 0 or not body.startswith(include, start):
+            return body, None
+        quote = body.find('"', start + len(include))
+
+    # Search for literal prefixes first. Starting the regex with a line or
+    # word boundary makes it inspect every position in large unrelated shards.
+    declarations = [
+        match for match in re.finditer(
+            r"static const uint(?:16|32|64)_t (_inv\d+)\[\] = \{([0-9, ]+)\};$", header, re.M)
+        if match.start() == 0 or header[match.start() - 1] == "\n"
+    ]
     definitions = Counter(m[1] for m in declarations)
+
+    def at_word_start(text: str, offset: int) -> bool:
+        return offset == 0 or not (text[offset - 1].isalnum() or text[offset - 1] == "_")
+
     # Count without concatenating the (potentially huge) header and commit
     # body, and parse only one table at a time. A full product model can have
     # tens of millions of page IDs in these declarations.
     uses = Counter()
     reserved = set()
     for text in (header, body):
-        for match in re.finditer(r"\b(_inv\d+)(_blocks)?\b", text):
+        for match in re.finditer(r"(_inv\d+)(_blocks)?\b", text):
+            if not at_word_start(text, match.start()):
+                continue
             if match[2]:
                 reserved.add(match[1])
             else:
                 uses[match[1]] += 1
-    calls = Counter((m[1], int(m[2])) for text in (header, body) for m in re.finditer(
-        rf"\b(?:fs_bump|{re.escape(helper)})\(\s*(?:_pg|d->_pg)\s*,\s*"
-        r"(_inv\d+)\s*,\s*(\d+)u\s*\)", text))
     call_lengths: dict[str, dict[int, int]] = defaultdict(dict)
-    for (name, length), count in calls.items():
-        call_lengths[name][length] = count
+    for name in ("fs_bump", helper):
+        call = re.compile(re.escape(name) + r"\(\s*(?:_pg|d->_pg)\s*,\s*"
+                          r"(_inv\d+)\s*,\s*(\d+)u\s*\)")
+        for text in (header, body):
+            for match in call.finditer(text):
+                if at_word_start(text, match.start()):
+                    lengths = call_lengths[match[1]]
+                    length = int(match[2])
+                    lengths[length] = lengths.get(length, 0) + 1
     selected = {}
     for declaration in declarations:
-        name, values = declaration[1], declaration[2]
+        name = declaration[1]
         lengths = call_lengths.get(name, {})
         if (definitions[name] != 1 or name in reserved or len(lengths) != 1 or
                 next(iter(lengths)) > 0xffffffff or
-                uses[name] != 1 + sum(lengths.values()) or
-                not re.fullmatch(r"\s*\d+(?:\s*,\s*\d+)*\s*", values)):
+                uses[name] != 1 + sum(lengths.values())):
             continue
-        ids = [int(value) for value in values.split(",")]
-        if len(ids) not in lengths:
+        values = declaration[2]
+        if values.count(",") + 1 not in lengths:
+            continue
+        # The declaration only admits digits, spaces and commas. Parsing the
+        # decimal fields also rejects empty fields or spaces within a number.
+        try:
+            ids = list(map(int, values.split(",")))
+        except ValueError:
             continue
         max_id = max(ids)
         # Small wide tables did not improve the product prefix. Leave
