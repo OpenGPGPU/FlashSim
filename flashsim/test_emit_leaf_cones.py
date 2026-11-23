@@ -36,6 +36,19 @@ def test_deep_shared_chain_does_not_recurse():
     }
 
 
+def test_equal_root_leaf_sets_share_storage_without_mutating_their_owners():
+    inputs = {f"input{i}" for i in range(512)}
+    assigns = {"wide": Concat(tuple(Id(name) for name in sorted(inputs)))}
+    aliases = {f"root{i}" for i in range(64)}
+    assigns.update({name: Id("wide") for name in aliases})
+    assigns["extended"] = BinOp("|", Id("wide"), Id("extra"))
+    roots = aliases | {"wide", "extended"}
+    actual = emit._cone_leaves_many(roots, assigns, inputs, temporary_limit=0)
+    assert all(actual[name] is actual["wide"] for name in aliases)
+    assert actual["wide"] == inputs
+    assert actual["extended"] == inputs | {"extra"}
+
+
 @pytest.mark.parametrize("budget", [0, 300, 600, 800, 1048576])
 def test_large_shared_cones_and_cycles_match_independent_walks(budget):
     leaves = [f"input{i}" for i in range(700)]
