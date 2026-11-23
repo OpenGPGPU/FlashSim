@@ -5,6 +5,7 @@ import re
 import subprocess
 from collections import Counter
 from pathlib import Path
+from typing import BinaryIO
 
 from flashsim.phase_timing import phase
 
@@ -986,16 +987,20 @@ def circt_verilog_command(path: Path, *, assertions: bool = False) -> list[str]:
             *("-I"+directory for directory in includes), *srcs, "-o", "-"]
 
 
-def circt_verilog_to_mlir(path: Path, *, assertions: bool = False) -> str:
+def circt_verilog_to_mlir(
+    path: Path, *, assertions: bool = False, output: BinaryIO | None = None,
+) -> str:
+    """Return the MLIR text, or write it to the supplied binary stream."""
     proc = subprocess.run(
         circt_verilog_command(path, assertions=assertions),
         check=False,
         text=True,
-        capture_output=True,
+        stdout=subprocess.PIPE if output is None else output,
+        stderr=subprocess.PIPE,
     )
     if proc.returncode != 0:
         raise CirctError(proc.stderr or proc.stdout or "circt-verilog failed")
-    return proc.stdout
+    return proc.stdout or ""
 
 
 def verilog_include_dirs(path: Path, files: list[Path]) -> list[str]:

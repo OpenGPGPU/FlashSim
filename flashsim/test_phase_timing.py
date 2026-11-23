@@ -31,7 +31,9 @@ def test_observations_preserve_complete_generated_bytes(tmp_path, monkeypatch, c
     compiler = importlib.import_module('flashsim.compile')
     # Exercise the actual parser/optimizer/emitter, but never launch CIRCT or
     # any external model. The frontend transport alone is a fixed unit stub.
-    monkeypatch.setattr(compiler, 'circt_verilog_to_mlir', lambda *a, **kw: MLIR)
+    def transport(path, *, assertions, output):
+        output.write(MLIR.encode())
+    monkeypatch.setattr(compiler, 'circt_verilog_to_mlir', transport)
     source = tmp_path / 'Gate.sv'
     source.write_text(SOURCE)
     output = []
