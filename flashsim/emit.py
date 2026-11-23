@@ -6,8 +6,9 @@ import re
 import sys
 import zlib
 from collections import Counter, OrderedDict, defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
 from io import StringIO
 
 from flashsim.phase_timing import phase as observe_phase
@@ -62,19 +63,42 @@ def cone_leaves(root: str, assigns: dict[str, Expr], stop: set[str]) -> set[str]
     return found
 
 
+@dataclass(slots=True)
+class _LeafFrame:
+    name: str
+    children: Iterator[str]
+    leaves: set[str] | frozenset[str] = frozenset()
+
+    def add(self, leaf: str) -> None:
+        if leaf not in self.leaves:
+            if isinstance(self.leaves, frozenset):
+                self.leaves = set(self.leaves)
+            self.leaves.add(leaf)
+
+    def merge(self, value: frozenset[str]) -> None:
+        if not self.leaves:
+            self.leaves = value
+        elif self.leaves is not value and value:
+            if isinstance(self.leaves, frozenset):
+                if value <= self.leaves:
+                    return
+                self.leaves = set(self.leaves)
+            self.leaves.update(value)
+
+
 def _cone_leaves_many(roots: set[str], assigns: dict[str, Expr], stop: set[str],
                       temporary_limit: int = 32768,
                       large_leaf_budget: int = 1048576) -> dict[str, frozenset[str]]:
     """Compute exact leaves for shared cones with bounded temporary caches.
 
-    Root results are retained for the output; other reusable intermediate
-    results use an LRU. A separate leaf-count budget retains a few larger
-    shared sets without letting them evict the small-set cache. If a cone has
-    a cycle, fall back to the existing per-root traversal so no partially
-    explored strongly connected component can be cached.
+    Equal root results share an immutable set. Intermediate results use an
+    LRU with a separate leaf-count budget for large sets. A frame reuses an
+    immutable child result until it needs to add other leaves. Cyclic cones
+    use an independent walk without caching a partial component.
     """
     ordered = sorted(roots)
     results: dict[str, frozenset[str]] = {}
+    interned: dict[frozenset[str], frozenset[str]] = {}
     temporary: OrderedDict[str, frozenset[str]] = OrderedDict()
     large: OrderedDict[str, frozenset[str]] = OrderedDict()
     large_leaves = 0
@@ -82,19 +106,22 @@ def _cone_leaves_many(roots: set[str], assigns: dict[str, Expr], stop: set[str],
         if root in results:
             continue
         if root in stop or root not in assigns:
-            results[root] = frozenset((root,))
+            value = frozenset((root,))
+            results[root] = interned.setdefault(value, value)
             continue
         active = {root}
-        stack = [(root, iter(expr_ids(assigns[root])), set())]
+        stack = [_LeafFrame(root, iter(expr_ids(assigns[root])))]
         while stack:
-            name, children, leaves = stack[-1]
+            frame = stack[-1]
+            name = frame.name
             try:
-                child = next(children)
+                child = next(frame.children)
             except StopIteration:
-                value = frozenset(leaves)
+                value = frozenset(frame.leaves)
                 stack.pop()
                 active.remove(name)
                 if name in roots:
+                    value = interned.setdefault(value, value)
                     results[name] = value
                 elif temporary_limit > 0 and len(value) <= 256:
                     temporary[name] = value
@@ -110,24 +137,25 @@ def _cone_leaves_many(roots: set[str], assigns: dict[str, Expr], stop: set[str],
                     large[name] = value
                     large_leaves += len(value)
                 if stack:
-                    stack[-1][2].update(value)
+                    stack[-1].merge(value)
                 continue
             if child in results:
-                leaves.update(results[child])
+                frame.merge(results[child])
             elif child in temporary:
-                leaves.update(temporary[child])
+                frame.merge(temporary[child])
                 temporary.move_to_end(child)
             elif child in stop or child not in assigns:
-                leaves.add(child)
+                frame.add(child)
             elif (large_value := large.get(child)) is not None:
-                leaves.update(large_value)
+                frame.merge(large_value)
                 large.move_to_end(child)
             elif child in active:
-                results[root] = frozenset(cone_leaves(root, assigns, stop))
+                value = frozenset(cone_leaves(root, assigns, stop))
+                results[root] = interned.setdefault(value, value)
                 break
             else:
                 active.add(child)
-                stack.append((child, iter(expr_ids(assigns[child])), set()))
+                stack.append(_LeafFrame(child, iter(expr_ids(assigns[child]))))
     return {root: results[root] for root in ordered}
 
 
