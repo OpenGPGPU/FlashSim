@@ -1451,6 +1451,71 @@ print([hashlib.sha256(text.encode()).hexdigest()
 PY
 ```
 
+Explicitly sharded emission packs each block of C++ lines as it is generated.
+The default eager selector starts from one region containing all cached wires
+and skips constructing reverse dependencies for that case. Region traversal
+and final partition order are unchanged.
+
+Two alternating pairs against `c5c40a9` on Python 3.14.7 measured 79.09 to
+56.36 MiB of peak Python allocations while buffering 500,000 generated lines.
+The packed 57,777,780 bytes matched. For 120,000 cached wires with 16 disjoint
+dependency chains, peak Python allocations during eager planning fell from
+33.36 to 11.62 MiB. Median CPU time with allocation tracing disabled fell
+from 0.532 to 0.102 seconds. All 16 plans retained the same ordered wires.
+
+To measure allocations, run the following code from each checkout with
+`PYTHONHASHSEED=73 python3 -B -`. For CPU time, run separately with the
+`tracemalloc` calls removed.
+
+```python
+import hashlib
+import time
+import tracemalloc
+from flashsim import emit
+
+def lines():
+    for index in range(500_000):
+        yield (f"    system_computeUnits_0_core_vectorCoalescer_memoryReturn_orderedPayloadWord{index}"
+               f" = current_payload_word_{index};")
+
+tracemalloc.start()
+if hasattr(emit, "_CppBlocks"):
+    output = emit._CppBlocks()
+    output.extend(lines())
+    blocks = output.finish()
+else:
+    blocks = emit._pack_cpp_blocks(list(lines()))
+print(tracemalloc.get_traced_memory()[1] / 2**20)
+tracemalloc.stop()
+print(hashlib.sha256("".join(blocks).encode()).hexdigest())
+del blocks
+
+names = [f"system_computeUnits_0_core_vectorCoalescer_memoryReturn_t{i}" for i in range(120_000)]
+cached = set(names)
+edges = {name: [names[i - 16]] for i, name in enumerate(names) if i >= 16}
+inputs = [frozenset((f"input_{i}",)) for i in range(16)]
+leaves = {name: inputs[i % 16] for i, name in enumerate(names)}
+tracemalloc.start()
+started = time.process_time()
+_, regions = emit._eager_regions(cached, edges, leaves)
+print(time.process_time() - started, tracemalloc.get_traced_memory()[1] / 2**20)
+tracemalloc.stop()
+print(hashlib.sha256("".join(name + "\n" for region in regions for name in region).encode()).hexdigest())
+```
+
+The assertion-enabled OpenGPU `4d468f439` MLIR produced identical optimized IR
+and C++ shards for `SharedL2Slice` and `GpuComputeUnitCore` in both checkouts.
+Total emission time varied under concurrent host memory pressure. The 497
+FlashSim tests selected below passed. Whole-host generation, native build time
+and simulator throughput require separate measurements.
+
+```sh
+PYTHONHASHSEED=73 FLASHSIM_COMMIT_PARTS=16 FLASHSIM_PHASE_TIMINGS=1 \
+  python3 -B scripts/bench_narrow_pass.py "$OWNER_MLIR" --module "$MODULE" \
+  --hierarchy --preflatten-wires --emit-cpp --shards 64 --repeat 1 --flashsim "$FLASH_CHECKOUT"
+python3 -B -m pytest flashsim -q -k 'not matches_verilator'
+```
+
 SOP simplification follows dependencies reachable from candidate OR
 assignments and reuses bounded width results. Constant folding updates the
 optimizer's private assignment table in place. Final validation reuses the
