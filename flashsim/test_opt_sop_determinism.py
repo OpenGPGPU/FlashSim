@@ -86,3 +86,43 @@ def test_sop_varied_term_sizes_preserve_truth_tables():
         optimized = _merge_sop_terms({'out': original}, signals)['out']
         for bits in range(1 << len(names)):
             assert value(original, bits) == value(optimized, bits)
+
+
+def test_sop_visits_dependencies_through_non_candidates(monkeypatch):
+    from flashsim import opt
+    from flashsim.ir import BinOp, Concat, Id, Signal, UnaryOp
+
+    a, g, h, inner, alias = map(Id, ['a', 'g', 'h', 'inner', 'alias'])
+    unrelated = Concat((a, h))
+    signals = {name: Signal(name, 1, 'wire') for name in ['inner', 'alias', 'out']}
+    signals.update({name: Signal(name, 1, 'input') for name in ['a', 'g', 'h']})
+    signals['unrelated'] = Signal('unrelated', 2, 'wire')
+    assigns = {
+        'unrelated': unrelated,
+        'out': BinOp('|', BinOp('&', alias, h), BinOp('&', a, UnaryOp('!', h))),
+        'alias': inner,
+        'inner': BinOp('|', BinOp('&', a, g), BinOp('&', a, UnaryOp('!', g))),
+    }
+    original = opt.expr_ids
+
+    def expr_ids(expr):
+        assert expr is not unrelated
+        return original(expr)
+
+    monkeypatch.setattr(opt, 'expr_ids', expr_ids)
+    assert opt._merge_sop_terms(assigns, signals)['out'] == a
+
+
+def test_sop_feedback_preserves_the_original_root_order():
+    from flashsim import opt
+    from flashsim.ir import BinOp, Id, Signal, UnaryOp
+
+    a, b, g, h = map(Id, 'abgh')
+    signals = {name: Signal(name, 1, 'wire') for name in ['root', 'a', 'b']}
+    signals.update({name: Signal(name, 1, 'input') for name in ['g', 'h']})
+    assigns = {
+        'root': b,
+        'a': BinOp('|', BinOp('&', b, g), BinOp('&', b, UnaryOp('!', g))),
+        'b': BinOp('|', BinOp('&', a, h), BinOp('&', a, UnaryOp('!', h))),
+    }
+    assert opt._merge_sop_terms(assigns, signals) == {'root': b, 'a': b, 'b': b}
