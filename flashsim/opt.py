@@ -781,8 +781,14 @@ def _slice_width(expr: Expr, sigs: dict[str, Signal],
                  cache: dict[int, tuple[Expr, int]]) -> int:
     # Keep the frequently repeated wide subtrees, not every tiny atom in a
     # whole-host netlist. Holding the object prevents identity reuse.
-    if isinstance(expr, (Id, Const, Extract, ArrayZeros, ArrayConst, MemRead)):
-        return expr_width(expr, sigs)
+    if isinstance(expr, Id):
+        return sigs[expr.name].width
+    if isinstance(expr, (Const, Extract, ArrayZeros, ArrayConst)):
+        return expr.width
+    if isinstance(expr, MemRead):
+        return sigs[expr.mem].width
+    if isinstance(expr, BinOp) and expr.op in CMP_OPS:
+        return 1
     key = id(expr)
     hit = cache.get(key)
     if hit is not None and hit[0] is expr:
@@ -869,23 +875,22 @@ class _SliceCosts:
         return _expr_nodes(expr, memo=self.nodes)
 
     def fits_inline(self, *expressions: Expr) -> bool:
-        # This is a threshold query, not an exact cost comparison. Walk
-        # expanded occurrences lazily and stop at the first excess node.
-        # Iterators also avoid copying a wide Concat's children onto a stack.
+        # Each pending child costs at least one node. Use that lower bound
+        # before adding children, so even a wide Concat needs a small stack.
         remaining = _SLICE_INLINE_NODES
-        pending = [iter(expressions)]
+        if len(expressions) > remaining:
+            return False
+        pending = list(expressions)
         while pending:
-            try:
-                expr = next(pending[-1])
-            except StopIteration:
-                pending.pop()
-                continue
+            expr = pending.pop()
             hit = self.nodes.get(id(expr))
             remaining -= hit[1] if hit is not None else 1
             if remaining < 0:
                 return False
             if hit is None and (children := _expr_children(expr)):
-                pending.append(iter(children))
+                if len(pending) + len(children) > remaining:
+                    return False
+                pending.extend(children)
         return True
 
     def leaf_set(self, expr: Expr) -> frozenset[str]:
@@ -940,10 +945,9 @@ class _SliceMemo:
         self.unknown_widths = 0
         self.costs = _SliceCosts()
 
-    def sync(self, fresh):
-        if self.epoch != len(fresh):
-            self.entries.clear()
-            self.epoch = len(fresh)
+    def reset_entries(self, epoch: int) -> None:
+        self.entries.clear()
+        self.epoch = epoch
 
 
 def _slice_src(
@@ -978,7 +982,9 @@ def _slice_src(
         width_cache = {}
     if memo is None:
         memo = _SliceMemo()
-    memo.sync(fresh)
+    epoch = len(fresh)
+    if memo.epoch != epoch:
+        memo.reset_entries(epoch)
     # Id bindings are fixed during the pass. Other expressions use identity,
     # retained in the entry to prevent address reuse. Recursion context and
     # remaining fuel affect whether a slice is legal, including failures.
@@ -986,15 +992,17 @@ def _slice_src(
     hit = memo.entries.get(key)
     if hit is not None:
         return src if hit[1] is hit[0] else hit[1]
-    epoch, unknown_widths = memo.epoch, memo.unknown_widths
+    unknown_widths = memo.unknown_widths
     result = _slice_src_uncached(
         src, low, width, assigns, sigs, uses, fresh, cache, seen,
         fuel, width_cache, memo
     )
-    memo.sync(fresh)
+    final_epoch = len(fresh)
+    if memo.epoch != final_epoch:
+        memo.reset_entries(final_epoch)
     # Unknown widths may become known after new signal declarations. Do not
     # memoize a failure, or a parent containing one, across that transition.
-    if memo.epoch == epoch and memo.unknown_widths == unknown_widths:
+    if final_epoch == epoch and memo.unknown_widths == unknown_widths:
         if len(memo.entries) >= _SLICE_RESULT_CACHE_MAX:
             memo.entries.clear()
         memo.entries[key] = (src, result)
@@ -1043,32 +1051,26 @@ def _slice_src_uncached(
         )
         return inner if inner is not None else Extract(src.a, src.low + low, width)
     if isinstance(src, Concat) and src.parts:
-        widths = []
-        for part in src.parts:
-            try:
-                widths.append(_slice_width(part, sigs, width_cache))
-            except (KeyError, TypeError):
-                memo.unknown_widths += 1
-                return None
-        if any(part_w <= 0 for part_w in widths):
+        try:
+            widths = [_slice_width(part, sigs, width_cache) for part in src.parts]
+        except (KeyError, TypeError):
+            memo.unknown_widths += 1
             return None
-        bases = [0] * len(src.parts)
-        cursor = 0
-        for index in range(len(src.parts) - 1, -1, -1):
-            bases[index] = cursor
-            cursor += widths[index]
-        if cursor != src_w:
+        if min(widths) <= 0 or sum(widths) != src_w:
             return None
         hi = low + width
         pieces: list[Expr] = []
-        for index, part in enumerate(src.parts):
-            part_lo = bases[index]
-            part_hi = part_lo + widths[index]
-            if part_hi <= low or part_lo >= hi:
+        part_lo = src_w
+        for part, part_width in zip(src.parts, widths):
+            part_hi = part_lo
+            part_lo -= part_width
+            if part_hi <= low:
+                break
+            if part_lo >= hi:
                 continue
             take_lo = max(low, part_lo) - part_lo
             take_w = min(hi, part_hi) - max(low, part_lo)
-            if take_lo == 0 and take_w == widths[index]:
+            if take_lo == 0 and take_w == part_width:
                 pieces.append(part)
                 continue
             inner = _slice_src(
