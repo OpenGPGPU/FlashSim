@@ -10,6 +10,7 @@ from collections.abc import Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from io import StringIO
+from itertools import groupby
 
 from flashsim.phase_timing import phase as observe_phase
 
@@ -1333,12 +1334,18 @@ def _partition_maps(
         keys = sorted({key(w) for w in cached})
         part_of = {k: i for i, k in enumerate(keys)}
         wire_part = {w: part_of[key(w)] for w in sorted(cached)}
-    leaf_parts: dict[str, set[int]] = defaultdict(set)
-    for w, deps in wire_deps.items():
-        p = wire_part[w]
-        for leaf in deps:
-            leaf_parts[leaf].add(p)
-    return wire_part, {k: sorted(v) for k, v in leaf_parts.items()}, max(wire_part.values(), default=-1) + 1
+    leaf_parts: dict[str, list[int]] = defaultdict(list)
+    partition_of = wire_part.__getitem__
+    wires = sorted(wire_part, key=partition_of)
+    for part, group in groupby(wires, key=partition_of):
+        # Eager wires often share the same leaves. Walk each distinct cone
+        # once and append the partition ID only for its first occurrence.
+        for leaves in {frozenset(wire_deps[wire]) for wire in group}:
+            for leaf in leaves:
+                parts = leaf_parts[leaf]
+                if not parts or parts[-1] != part:
+                    parts.append(part)
+    return wire_part, dict(leaf_parts), max(wire_part.values(), default=-1) + 1
 
 
 _EAGER = os.environ.get("FLASHSIM_EAGER", "1") != "0"
