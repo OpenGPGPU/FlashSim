@@ -397,6 +397,16 @@ CMP_OPS = {"==", "!=", "<", "<=", ">", ">=", "s<", "s<=", "s>", "s>="}
 
 
 def expr_width(expr: Expr, sigs: Mapping[str, Signal]) -> int:
+    # Leaf widths and comparison results do not need a worklist.
+    if isinstance(expr, Id):
+        return sigs[expr.name].width
+    if isinstance(expr, (Const, Extract, ArrayZeros, ArrayConst)):
+        return expr.width
+    if isinstance(expr, MemRead):
+        return sigs[expr.mem].width
+    if isinstance(expr, BinOp) and expr.op in CMP_OPS:
+        return 1
+
     widths: dict[int, int] = {}
     stack = [(expr, False)]
     while stack:
