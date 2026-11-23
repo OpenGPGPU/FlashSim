@@ -2580,6 +2580,16 @@ def _emit_cpp_text(mod: Module) -> str:
         eager_of, eager_regions = _eager_regions(cached, cdeps, wire_deps)
     with observe_phase('emit.partitions'):
         wire_part, leaf_parts, nparts = _partition_maps(cached, wire_deps, eager_of)
+    large = len(writes) >= _LARGE_WRITES
+    cut = {
+        w for w in eager_of
+        if w in sigs and not sigs[w].depth and not is_wide(sigs[w].width)
+    } if large else set()
+    # Pass dependencies use the leaf sets of non-eager cached wires.
+    # Direct hold wakes keep the full map when there are no cut points.
+    if eager_of and (cut or not large):
+        wire_deps = {name: leaves for name, leaves in wire_deps.items()
+                     if name not in eager_of}
     with observe_phase('emit.pass_inputs'):
         pass_direct, pass_consumers = _pass_inputs(
             eager_regions, eager_of, assigns, cached, stop, wire_deps, cdeps
@@ -2594,7 +2604,6 @@ def _emit_cpp_text(mod: Module) -> str:
     _PAGE_GEN = nparts > 0
     inv_tables = _invalidation_tables(leaf_parts)
     write_flags = [n for n in writes if not sigs[n].depth]
-    large = len(writes) >= _LARGE_WRITES
     with observe_phase('emit.hold_wakes'):
         hold_buckets: list[tuple[str, list[Stmt]]] = []
         live_stmts: list[Stmt] = []
@@ -2629,11 +2638,6 @@ def _emit_cpp_text(mod: Module) -> str:
                     hold_buckets.append((f"{key}#{off // hold_group}", stmts[off : off + hold_group]))
             holds_map: dict[str, set[int]] = defaultdict(set)
             cut_map: dict[str, set[int]] = defaultdict(set)
-            cut = {
-                w
-                for w in eager_of
-                if w in sigs and not sigs[w].depth and not is_wide(sigs[w].width)
-            }
             memo: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
             for i, (_key, stmts) in enumerate(hold_buckets):
                 for stmt in stmts:
@@ -2647,10 +2651,12 @@ def _emit_cpp_text(mod: Module) -> str:
                         holds_map[leaf].add(i)
             leaf_holds = {k: sorted(v) for k, v in holds_map.items()}
             region_holds = {k: sorted(v) for k, v in cut_map.items()}
+            del memo, holds_map, cut_map
             _report_wake_locality(
                 mod.name, hold_buckets, leaf_holds, wire_part, leaf_parts,
                 always_body,
             )
+    del wire_deps, cut
     with observe_phase('emit.pass_wakes'):
         # Passes that can reach a hold-facing wire must run before hold dispatch
         # even when nothing demands them; wake just those, from their direct
@@ -2674,6 +2680,7 @@ def _emit_cpp_text(mod: Module) -> str:
             if name in leaf_parts or name in leaf_holds or name in leaf_passes
         }
         array_writes = [n for n in writes if sigs[n].depth]
+    del pass_direct
     global _WIRE_PART, _EAGER_OF, _REGION_HOLDS, _PASS_CONSUMERS, _PASS_PAGE, _PASS_BIT, _LEAF_PASSES, _WRITE_INDEX, _WRITE_WIDE, _LEAF_HOLDS, _HOLD_WAKE_TABLES, _HOLD_WAKE_PACKED, _HOLD_WAKE_SPARSE, _ARRAY_INDEX, _HOLD_TAKEN, _LARGE, _WAKE_PACK_WORDS, _EAGER_DONE
     _WIRE_PART = wire_part
     _EAGER_OF = eager_of
@@ -3106,6 +3113,7 @@ def _emit_cpp_text(mod: Module) -> str:
             if name not in cached:
                 lines.append(f"  void eval_{name}() {{}}")
                 lines.append("")
+    del cdeps
     if large:
         # tick_nba drains these passes in dependency order before dispatching
         # holds. NBA evaluation only writes next-state storage, so their
