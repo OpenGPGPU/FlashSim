@@ -6,7 +6,7 @@ import re
 import sys
 import zlib
 from collections import Counter, OrderedDict, defaultdict, deque
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from io import StringIO
@@ -1568,17 +1568,23 @@ def _wake_pack_enabled() -> bool:
     return os.environ.get("FLASHSIM_WAKE_PACK", _WAKE_PACK_DEFAULT) != "0"
 
 
-def _invalidation_tables(leaf_parts: dict[str, list[int]]) -> dict[tuple[int, ...], int]:
+def _freeze_invalidation_tables(
+    pending: dict[str, list[int]],
+) -> tuple[dict[str, tuple[int, ...]], dict[tuple[int, ...], int]]:
     # Sorted, not insertion order: leaf_parts is discovered by walking a set of
     # wire names, so its order follows PYTHONHASHSEED. Numbering the tables by
     # discovery order makes the emitted C++ differ between two runs of the same
     # input, which defeats ccache and makes a binary unreproducible from source.
-    tables: dict[tuple[int, ...], int] = {}
-    for leaf in sorted(leaf_parts):
-        key = tuple(leaf_parts[leaf])
-        if len(key) > _BUMP_INLINE and key not in tables:
-            tables[key] = len(tables)
-    return tables
+    leaf_parts: dict[str, tuple[int, ...]] = {}
+    tables: dict[tuple[int, ...], tuple[int, ...]] = {}
+    for leaf in sorted(pending):
+        # Take ownership of each list individually. Keeping both complete
+        # collections alive would duplicate the page references.
+        pages = tuple(pending.pop(leaf))
+        if len(pages) > _BUMP_INLINE:
+            pages = tables.setdefault(pages, pages)
+        leaf_parts[leaf] = pages
+    return leaf_parts, {pages: index for index, pages in enumerate(tables)}
 
 
 def _cond_stop_leaves(
@@ -1693,7 +1699,7 @@ def _stmt_cut_leaves(
 
 
 def _hold_wake_tables(leaf_holds: dict[str, list[int]]) -> dict[tuple[int, ...], int]:
-    # Sorted for the same reproducibility reason as _invalidation_tables.
+    # Sorted for the same reproducibility reason as _freeze_invalidation_tables.
     tables: dict[tuple[int, ...], int] = {}
     for leaf in sorted(leaf_holds):
         key = tuple(leaf_holds[leaf])
@@ -1745,7 +1751,7 @@ def _hold_wake_sparse(
 
 
 def _bump_sig(
-    leaf: str, leaf_parts: dict[str, list[int]]
+    leaf: str, leaf_parts: Mapping[str, Sequence[int]]
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     """Invalidation + wake signature for a committed leaf."""
     return (tuple(leaf_parts.get(leaf, ())), tuple(_LEAF_HOLDS.get(leaf, ())))
@@ -1816,7 +1822,7 @@ def _report_wake_locality(
     hold_buckets: list[tuple[str, list[Stmt]]],
     leaf_holds: dict[str, list[int]],
     wire_part: dict[str, int],
-    leaf_parts: dict[str, list[int]],
+    leaf_parts: dict[str, tuple[int, ...]],
     always_body: list[Stmt],
 ) -> None:
     """FLASHSIM_WAKE_STATS=1: how much of the wake set is cross-partition.
@@ -1856,7 +1862,7 @@ def _report_wake_locality(
 
 def _bump_parts(
     leaf: str,
-    leaf_parts: dict[str, list[int]],
+    leaf_parts: dict[str, tuple[int, ...]],
     tables: dict[tuple[int, ...], int],
     lines: list[str],
     indent: int,
@@ -2619,7 +2625,7 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
     with observe_phase('emit.eager_regions'):
         eager_of, eager_regions = _eager_regions(cached, cdeps, wire_deps)
     with observe_phase('emit.partitions'):
-        wire_part, leaf_parts, nparts = _partition_maps(cached, wire_deps, eager_of)
+        wire_part, pending_leaf_parts, nparts = _partition_maps(cached, wire_deps, eager_of)
     large = len(writes) >= _LARGE_WRITES
     cut = {
         w for w in eager_of
@@ -2637,12 +2643,13 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
     pass_page = []
     for leaves in pass_direct:
         for leaf in leaves:
-            leaf_parts.setdefault(leaf, []).append(nparts)
+            pending_leaf_parts.setdefault(leaf, []).append(nparts)
         pass_page.append(nparts)
         nparts += 1
     global _PAGE_GEN
     _PAGE_GEN = nparts > 0
-    inv_tables = _invalidation_tables(leaf_parts)
+    leaf_parts, inv_tables = _freeze_invalidation_tables(pending_leaf_parts)
+    del pending_leaf_parts
     write_flags = [n for n in writes if not sigs[n].depth]
     with observe_phase('emit.hold_wakes'):
         hold_buckets: list[tuple[str, list[Stmt]]] = []
