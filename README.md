@@ -154,6 +154,32 @@ Two alternating pairs of fresh Python 3.14.7 processes wrote and verified
 identical bytes. This isolates transfer and file writing from CIRCT lowering,
 MLIR parsing and C++ emission.
 
+Assertion-cache checks hash include-free RTL in bounded blocks. For a source
+with literal includes, header discovery uses the same bytes as the digest.
+On the asserted 640×480 dual-CU OpenGPU owner prepared at `4d468f439`, two
+alternating pairs against FlashSim `59155c1` took a median of 3.16 s before and
+1.42 s after the change. Median Python peak RSS was 261 MiB and 65 MiB on
+ARM64 macOS with Python 3.14.7. These measurements cover a prepared cache hit.
+Reuse the original RTL path, cache directory and four-worker setting.
+
+```sh
+FLASHSIM_CIRCT_THREADS=4 FLASHSIM_CIRCT_LARGEST_FIRST=1 \
+  /usr/bin/time -l python3 -B - "$RTL_TOP" "$OWNER_MLIR" <<'PY'
+from pathlib import Path
+import sys
+from time import monotonic
+from flashsim import compile
+
+def unexpected_import(*args, **kwargs):
+    raise RuntimeError("expected a hit on the existing asserted CIRCT cache")
+
+compile.circt_verilog_to_mlir = unexpected_import
+start = monotonic()
+compile.prepare_circt_mlir(Path(sys.argv[1]), Path(sys.argv[2]), assertions=True)
+print(monotonic() - start)
+PY
+```
+
 `FLASHSIM_GC_POLICY=defer` optionally defers automatic Python cyclic garbage
 collection during `compile_verilog` and `compile_file`, including shard emission.
 Reference counting remains active; the caller's enabled/disabled GC state is
@@ -1443,6 +1469,24 @@ generated C++ shard matched in both pairs.
 An isolated fold of 500,000 identifier bindings eliminated 22 MiB of transient
 Python allocations for copying the binding table. Whole-host peak memory and
 simulation throughput require separate measurements.
+
+Used-bit analysis now seeds demands while walking statements. The LUT pass
+replaces eligible values in the optimizer's private assignment map. Two
+alternating pairs against `59155c1` removed 34.5 MiB and 22.0 MiB of temporary
+Python allocations respectively. Each isolated measurement started
+`tracemalloc` after creating the input. Call `_apply_used_bits` on 500,000
+assignments to one 8-bit register from one 8-bit input and call `_apply_lut`
+on 500,000 8-bit wire bindings to that input. Read
+`tracemalloc.get_traced_memory()[1]` immediately after each pass.
+
+On the `4d468f439` owner MLIR, optimized IR and emitted C++ for
+`GpuComputeUnitCore` and `TexturePairPipeline_1` matched `59155c1` byte for byte.
+Run the benchmark from each checkout with the same cached MLIR and module name.
+
+```sh
+PYTHONHASHSEED=73 python3 -B scripts/bench_narrow_pass.py "$OWNER_MLIR" \
+  --module "$MODULE" --hierarchy --preflatten-wires --emit-cpp --repeat 1
+```
 
 Bit-slice narrowing counts uses of assigned values only up to two. Small
 expressions use a direct walk and larger shared cones retain exact DAG
