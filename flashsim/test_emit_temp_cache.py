@@ -90,5 +90,5 @@ def test_inline_site_count_stops_at_threshold_and_counts_each_statement_once(mon
     monkeypatch.setattr(emit, '_SHARED_INLINE_ROUNDS', 1)
     emit._promote_shared_inlines(body, assigns, cached, {'input', 'stop'})
     assert cached == set(roots) | {'shared', 'leaf', 'twice'}
-    assert shared_walks == emit._SHARED_INLINE_MIN
+    assert shared_walks == 2
     assert fat_cost_queries == 1
