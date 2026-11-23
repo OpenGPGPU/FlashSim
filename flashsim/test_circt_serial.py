@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,31 @@ def test_bounded_workers_preserve_assertions_and_bind_cache(tmp_path, monkeypatc
                              mlir_path=mlir, assertions=True)
     assert len(calls) == 3
     assert all(not flag.startswith("--mlir-threads") for flag in calls[-1])
+
+
+def test_asserted_cache_checks_nested_includes_across_a_read_boundary(tmp_path, monkeypatch):
+    top = tmp_path / "Top.sv"
+    top.write_bytes(b"//" + b"x" * (1024 * 1024 - 6)
+                    + b'\r`include "outer.svh"\rmodule Top; endmodule\r')
+    (tmp_path / "outer.svh").write_text('`include "inner.svh"\n')
+    inner = tmp_path / "inner.svh"
+    inner.write_text("// one\n")
+    mlir = tmp_path / "hw.mlir"
+    calls = []
+
+    def import_rtl(path, *, assertions, output):
+        calls.append(path)
+        assert assertions
+        output.write(b"hw.module @Top() { hw.output }\n")
+
+    monkeypatch.setattr(compiler, "circt_verilog_to_mlir", import_rtl)
+    compiler.prepare_circt_mlir(top, mlir, assertions=True)
+    compiler.prepare_circt_mlir(top, mlir, assertions=True)
+    before = inner.stat()
+    inner.write_text("// two\n")
+    os.utime(inner, ns=(before.st_atime_ns, before.st_mtime_ns))
+    compiler.prepare_circt_mlir(top, mlir, assertions=True)
+    assert calls == [top, top]
 
 
 @pytest.mark.parametrize("failure", ["tool", "empty"])

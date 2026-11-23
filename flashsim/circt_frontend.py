@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
 from collections import Counter
+from io import BytesIO, TextIOWrapper
 from pathlib import Path
 from typing import BinaryIO
 
@@ -1018,8 +1020,34 @@ def verilog_include_dirs(path: Path, files: list[Path]) -> list[str]:
     return sorted(map(str, directories))
 
 
-def verilog_dependencies(path: Path) -> list[Path]:
-    """Conservatively include literal headers in assertion-cache provenance."""
+_VERILOG_INCLUDE = re.compile(r'(?m)^\s*`include\s+"([^"]+)"')
+
+
+def _verilog_includes(source: Path, hashes: dict[str, str] | None) -> list[str]:
+    if hashes is None:
+        return _VERILOG_INCLUDE.findall(source.read_text())
+    digest = hashlib.sha256()
+    marker = b"`include"
+    edge = len(marker) - 1
+    tail = b""
+    with source.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            if marker in block or marker in tail + block[:edge]:
+                # Include-bearing files need the text scan. Hash the very same
+                # bytes so a concurrent edit cannot mix two snapshots here.
+                stream.seek(0)
+                contents = stream.read()
+                hashes[str(source)] = hashlib.sha256(contents).hexdigest()
+                with TextIOWrapper(BytesIO(contents)) as text:
+                    return _VERILOG_INCLUDE.findall(text.read())
+            digest.update(block)
+            tail = block[-edge:]
+    hashes[str(source)] = digest.hexdigest()
+    return []
+
+
+def verilog_dependencies(path: Path, *, hashes: dict[str, str] | None = None) -> list[Path]:
+    """Return sources and literal includes, filling hashes when supplied."""
     sources = verilog_sources(path, assertions=True)
     directories = list(map(Path, verilog_include_dirs(path, sources)))
     pending = list(sources)
@@ -1029,8 +1057,7 @@ def verilog_dependencies(path: Path) -> list[Path]:
         if source in seen:
             continue
         seen.add(source)
-        pattern = r'(?m)^\s*`include\s+"([^"]+)"'
-        for header in re.findall(pattern, source.read_text()):
+        for header in _verilog_includes(source, hashes):
             for directory in [source.parent, *directories]:
                 candidate = (directory / header).resolve()
                 if candidate.is_file():
