@@ -6,7 +6,7 @@ import sys
 import pytest
 
 from flashsim import opt
-from flashsim.ir import BinOp, Const, Extract, Id, Signal, UnaryOp
+from flashsim.ir import BinOp, Const, Extract, Id, Signal, Ternary, UnaryOp
 from flashsim.test_opt_generated_slices import circuit
 
 
@@ -45,6 +45,21 @@ def test_shared_recursive_slice_does_not_expand_a_diamond(monkeypatch):
     if result is not None:
         raise AssertionError("failed slices must retain their original fallback")
     assert calls <= 81
+
+
+@pytest.mark.parametrize("op", ["&", "|", "^", "mux"])
+def test_failed_left_slice_does_not_expand_right_arm(monkeypatch, op):
+    signals = {"reg": Signal("reg", 4, "reg")}
+    left, right = Id("reg"), Const(6, 4)
+    root = Ternary(Const(1, 1), left, right) if op == "mux" else BinOp(op, left, right)
+    original = opt._slice_src_uncached
+
+    def check(src, *args):
+        assert src is not right
+        return original(src, *args)
+
+    monkeypatch.setattr(opt, "_slice_src_uncached", check)
+    assert query(root, signals) is None
 
 
 def test_seen_and_fuel_are_part_of_the_cache_context():
