@@ -86,3 +86,22 @@ def test_bounded_workers_conflict_with_serial(monkeypatch):
     monkeypatch.setenv("FLASHSIM_CIRCT_THREADS", "4")
     with pytest.raises(CirctError, match="conflicts"):
         circt_frontend.circt_import_parallelism()
+
+
+def test_largest_first_preserves_worker_limit_and_assertions(tmp_path, monkeypatch):
+    top = tmp_path / "Top.sv"
+    top.write_text("module Top; endmodule\n")
+    monkeypatch.setattr(circt_frontend, "find_bin", lambda _: Path("/circt-verilog"))
+    monkeypatch.delenv("FLASHSIM_CIRCT_SERIAL", raising=False)
+    monkeypatch.setenv("FLASHSIM_CIRCT_THREADS", "4")
+    monkeypatch.delenv("FLASHSIM_CIRCT_LARGEST_FIRST", raising=False)
+    option = "--mlir-pass-schedule-largest-first"
+    assert option not in circt_frontend.circt_verilog_command(top, assertions=True)
+    monkeypatch.setenv("FLASHSIM_CIRCT_LARGEST_FIRST", "1")
+    command = circt_frontend.circt_verilog_command(top, assertions=True)
+    assert option in command
+    assert "--mlir-threads=4" in command
+    assert "--single-unit" in command
+    monkeypatch.setenv("FLASHSIM_CIRCT_LARGEST_FIRST", "invalid")
+    with pytest.raises(CirctError, match="must be 0 or 1"):
+        circt_frontend.circt_verilog_command(top, assertions=True)

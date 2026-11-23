@@ -969,6 +969,11 @@ def circt_verilog_command(path: Path, *, assertions: bool = False) -> list[str]:
         threading_args.append("--mlir-disable-threading")
     elif workers is not None:
         threading_args.append(f"--mlir-threads={workers}")
+    largest_first = os.environ.get("FLASHSIM_CIRCT_LARGEST_FIRST", "0")
+    if largest_first not in ("0", "1"):
+        raise CirctError("FLASHSIM_CIRCT_LARGEST_FIRST must be 0 or 1")
+    if largest_first == "1":
+        threading_args.append("--mlir-pass-schedule-largest-first")
     # Bind layers recursively include one another. Their generated guards
     # must share a compilation unit rather than instantiate checks twice.
     return [str(tool), *threading_args,
