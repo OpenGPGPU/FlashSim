@@ -104,7 +104,7 @@ def _optimize_owned(owned: list[Module]) -> Module:
         ))
         return _rewrite_expr(e, assigns, sigs)
 
-    assigns = _subst_consts(assigns)
+    assigns = _subst_consts(assigns, consts, outputs)
     assigns = {k: _rewrite_expr(v, assigns, sigs) for k, v in assigns.items()}
     body = _map_stmts(body, rewrite)
     assertions = [map_observation(a, rewrite) for a in source_assertions]
@@ -272,15 +272,16 @@ def _fill_missing_wire_signals(
         new_sigs[name] = Signal(name, width, "wire", depth)
 
 
-def _subst_consts(assigns: dict[str, Expr]) -> dict[str, Expr]:
-    consts = {n: e for n, e in assigns.items() if isinstance(e, Const)}
-
+def _subst_consts(assigns: dict[str, Expr], consts: dict[str, Const],
+                  outputs: set[str]) -> dict[str, Expr]:
     def fn(node: Expr) -> Expr:
         if isinstance(node, Id) and node.name in consts:
             return consts[node.name]
         return node
 
-    out = {n: map_expr_memoized(e, fn) for n, e in assigns.items() if n not in consts}
+    # Output constants still need a driver and storage in the emitted DUT.
+    out = {n: map_expr_memoized(e, fn) for n, e in assigns.items()
+           if n not in consts or n in outputs}
     return out
 
 
