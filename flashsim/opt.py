@@ -901,13 +901,25 @@ def _slice_src(
     uses: dict[str, int],
     fresh: dict[str, Expr],
     cache: dict[tuple[str, int, int], Expr],
-    seen: set[str],
+    seen: set[str] | frozenset[str],
     fuel: int = 64,
     width_cache: dict[int, tuple[Expr, int]] | None = None,
     memo: _SliceMemo | None = None,
 ) -> Expr | None:
     if fuel <= 0 or width <= 0 or low < 0:
         return None
+    is_id = isinstance(src, Id)
+    if is_id and (src.name not in assigns or src.name in seen):
+        # With no assignment to follow, the only successful query is the
+        # entire signal. Parents still record missing signal widths.
+        try:
+            source_width = sigs[src.name].width
+        except (KeyError, TypeError):
+            if memo is not None:
+                memo.unknown_widths += 1
+            return None
+        return src if low == 0 and width == source_width else None
+    seen = frozenset(seen)
     if width_cache is None:
         width_cache = {}
     if memo is None:
@@ -916,8 +928,7 @@ def _slice_src(
     # Id bindings are fixed during the pass. Other expressions use identity,
     # retained in the entry to prevent address reuse. Recursion context and
     # remaining fuel affect whether a slice is legal, including failures.
-    key = (src.name if isinstance(src, Id) else id(src),
-           isinstance(src, Id), low, width, fuel, frozenset(seen))
+    key = (src.name if is_id else id(src), is_id, low, width, fuel, seen)
     hit = memo.entries.get(key)
     if hit is not None:
         return src if hit[1] is hit[0] else hit[1]
@@ -945,7 +956,7 @@ def _slice_src_uncached(
     uses: dict[str, int],
     fresh: dict[str, Expr],
     cache: dict[tuple[str, int, int], Expr],
-    seen: set[str],
+    seen: frozenset[str],
     fuel: int,
     width_cache: dict[int, tuple[Expr, int]],
     memo: _SliceMemo,
@@ -1071,14 +1082,10 @@ def _slice_src_uncached(
         hit = cache.get(key)
         if hit is not None:
             return hit
-        seen.add(src.name)
-        try:
-            sliced = _slice_src(
-                assigns[src.name], low, width, assigns, sigs, uses, fresh, cache, seen,
-                fuel - 1, width_cache, memo
-            )
-        finally:
-            seen.remove(src.name)
+        sliced = _slice_src(
+            assigns[src.name], low, width, assigns, sigs, uses, fresh, cache,
+            seen | {src.name}, fuel - 1, width_cache, memo
+        )
         if sliced is None:
             return None
         if (
