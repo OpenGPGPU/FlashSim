@@ -102,6 +102,26 @@ def test_each_part_digest_is_checked_when_reconstructed_methods_are_unchanged(tm
         verify(source, out)
 
 
+def test_method_comparison_binds_both_files_to_the_original_digest(tmp_path):
+    source, out = tmp_path / "original", tmp_path / "derived"
+    fixture(source)
+    create(source, out, maximum=70, commit_parts=1)
+    method = out / "dut_0.cpp"
+    forged = method.read_bytes().replace(b"value += 1;", b"value += 2;")
+    method.write_bytes(forged)
+    receipt = out / "flashsim-reshard.json"
+    record = json.loads(receipt.read_text())
+    record["output_sha256"][method.name] = hashlib.sha256(forged).hexdigest()
+    receipt.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="derived methods do not reconstruct"):
+        verify(source, out)
+
+    original = source / method.name
+    original.write_bytes(original.read_bytes().replace(b"value += 1;", b"value += 2;"))
+    with pytest.raises(ValueError, match="reshard input differs from its manifest"):
+        verify(source, out)
+
+
 def test_method_verification_carries_scope_across_a_long_generated_line(tmp_path):
     source, out = tmp_path / "original", tmp_path / "derived"
     fixture(source)
