@@ -7,6 +7,7 @@ and ``verify`` command bind every output to the original bytes and transformer.
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 from pathlib import Path
@@ -41,6 +42,8 @@ OPTNONE = (b"#if defined(__clang__)\n"
            b"#endif\n")
 OPTNONE_LINES = OPTNONE.splitlines(keepends=True)
 MANIFEST = "flashsim-reshard.json"
+INVALIDATION_TABLE = re.compile(rb"static const (uint(?:16|32|64)_t) (_inv[0-9]+)\[\] = \{")
+CONDITIONAL_DIRECTIVE = re.compile(rb"^[ \t]*#[ \t]*(if|ifdef|ifndef|endif)\b")
 
 
 class _LocalStores:
@@ -140,6 +143,70 @@ def _files(source: Path) -> list[Path]:
     if any(p.is_symlink() or not p.is_file() for p in [header, *shards]):
         raise ValueError("DUT inputs must be regular files")
     return [header, *shards]
+
+
+def _outline_invalidation_header(lines, class_name: str, maximum: int, open_shard):
+    """Yield the header and stream its immutable page tables to data shards."""
+    namespace = class_name.encode("ascii") + b"_invalidation"
+    opening = b"namespace " + namespace + b" {\n"
+    prefix = b"#include <cstdint>\n\n" + opening
+    end = b"}\n"
+    class_line = b"struct " + class_name.encode("ascii") + b" {\n"
+    inside_class = False
+    conditional_depth = 0
+    names = []
+    closed = False
+    number = 0
+    size = 0
+    write = None
+    with ExitStack() as files:
+        for line in lines:
+            if line == class_line:
+                inside_class = True
+            match = None
+            if not inside_class:
+                if line.startswith(b"static const uint"):
+                    match = INVALIDATION_TABLE.match(line)
+                elif directive := CONDITIONAL_DIRECTIVE.match(line):
+                    conditional_depth += -1 if directive[1] == b"endif" else 1
+            if match is None:
+                if names and not closed:
+                    write(end)
+                    files.close()
+                    yield end
+                    for name in names:
+                        yield b"using " + namespace + b"::" + name + b";\n"
+                    closed = True
+                yield line
+                continue
+            if closed or conditional_depth or not line.endswith(b"};\n"):
+                raise ValueError("unexpected generated invalidation table layout")
+            value_type, name = match.groups()
+            entries = line[match.end():-3]
+            if (not entries or entries.strip(b" ").endswith(b",")
+                    or entries.translate(None, b"0123456789, ")):
+                raise ValueError("unexpected generated invalidation table entries")
+            extent = str(entries.count(b",") + 1).encode("ascii")
+            declaration = b"extern const " + value_type + b" " + name + b"[" + extent + b"]"
+            definition = declaration + b" = {" + entries + b"};\n"
+            if len(prefix) + len(definition) + len(end) > maximum:
+                raise ValueError("one invalidation table exceeds the data shard limit")
+            if not names:
+                yield opening
+            if write is None or size + len(definition) + len(end) > maximum:
+                if write is not None:
+                    write(end)
+                    files.close()
+                write = files.enter_context(open_shard(f"dut_invalidation_part{number:04d}.cpp"))
+                write(prefix)
+                number += 1
+                size = len(prefix)
+            write(definition)
+            size += len(definition)
+            names.append(name)
+            yield declaration + b";\n"
+    if not inside_class:
+        raise ValueError("missing DUT class in the invalidation header")
 
 
 def _large_methods(source: Path, threshold: int) -> list[str]:
@@ -276,7 +343,7 @@ def _commit_outputs(class_name: str, body: str, count: int,
 
 def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
            optnone_bytes: int = 0, local_store_helpers: bool = False,
-           commit_blocks: bool = False) -> None:
+           commit_blocks: bool = False, outline_invalidation_bytes: int = 0) -> None:
     source, out = source.resolve(), out.resolve()
     if source == out or source in out.parents or out in source.parents:
         raise ValueError("source and output must be separate directories")
@@ -289,6 +356,8 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
         raise ValueError("input commit helpers are already partitioned")
     if not isinstance(local_store_helpers, bool) or not isinstance(commit_blocks, bool):
         raise ValueError("local_store_helpers and commit_blocks must be booleans")
+    if type(outline_invalidation_bytes) is not int or outline_invalidation_bytes < 0:
+        raise ValueError("invalidation data shard limit must be a nonnegative integer")
     if commit_blocks and (not (source / "dut_commit_chunks.cpp").is_file() or
                           (source / "dut_commit_blocks.cpp").exists()):
         raise ValueError("commit blocks need an unpartitioned generic commit dispatcher")
@@ -298,18 +367,6 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
     before = {p.name: digest(p) for p in inputs}
     out.mkdir(parents=True, exist_ok=False)
     try:
-        header = source / "dut.h"
-        with header.open("rb") as src, (out / "dut.h").open("xb") as dst:
-            first = src.read(len(GUARD))
-            guard_added = first != GUARD
-            if guard_added:
-                dst.write(GUARD)
-            src.seek(0)
-            if stores is None:
-                shutil.copyfileobj(src, dst, 1024 * 1024)
-            else:
-                for line in stores.header_lines(src):
-                    dst.write(line)
         methods = {}
         unoptimized = {}
         class_name = None
@@ -327,6 +384,27 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
             raise ValueError("numbered DUT shards contain no methods")
         if stores is not None:
             stores.finish()
+        invalidation_outputs = []
+
+        @contextmanager
+        def open_invalidation_shard(name):
+            invalidation_outputs.append(name)
+            with (out / name).open("xb") as stream:
+                yield stream.write
+
+        with (source / "dut.h").open("rb") as src, (out / "dut.h").open("xb") as dst:
+            guard_added = src.read(len(GUARD)) != GUARD
+            if guard_added:
+                dst.write(GUARD)
+            src.seek(0)
+            if stores is None and not outline_invalidation_bytes:
+                shutil.copyfileobj(src, dst, 1024 * 1024)
+            else:
+                lines = stores.header_lines(src) if stores is not None else src
+                if outline_invalidation_bytes:
+                    lines = _outline_invalidation_header(
+                        lines, class_name, outline_invalidation_bytes, open_invalidation_shard)
+                dst.writelines(lines)
         commit_outputs = []
         for path in inputs[1:]:
             if NUMBERED.fullmatch(path.name):
@@ -334,7 +412,8 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
             if stores is not None and path.name == "dut_mem_stores.cpp":
                 continue
             if path.name == "dut_commit_chunks.cpp" and (commit_parts > 1 or commit_blocks):
-                header = (out / "dut.h").read_text() if commit_blocks else None
+                header_dir = source if outline_invalidation_bytes else out
+                header = (header_dir / "dut.h").read_text() if commit_blocks else None
                 for name, text in _commit_outputs(class_name, path.read_text(), commit_parts, header):
                     if (out / name).exists():
                         raise ValueError("derived commit shard already exists: " + name)
@@ -357,6 +436,9 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
             record.update(local_store_helpers=True, local_store_count=len(stores.parts))
         if commit_blocks:
             record["commit_blocks"] = True
+        if outline_invalidation_bytes:
+            record.update(outline_invalidation_bytes=outline_invalidation_bytes,
+                          invalidation_outputs=invalidation_outputs)
         (out / MANIFEST).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
         verify(source, out)
     except BaseException:
@@ -383,6 +465,14 @@ def verify(source: Path, out: Path) -> None:
                    (source / "dut_commit_blocks.cpp").exists() or
                    any(re.fullmatch(r"dut_commit_part\d+\.cpp", p.name) for p in inputs)):
         raise ValueError("invalid input for commit blocks")
+    outline = record.get("outline_invalidation_bytes", 0)
+    if type(outline) is not int or outline < 0:
+        raise ValueError("invalid invalidation data shard limit")
+    invalidation_outputs = record.get("invalidation_outputs", [])
+    if (type(invalidation_outputs) is not list or invalidation_outputs !=
+            [f"dut_invalidation_part{index:04d}.cpp" for index in range(len(invalidation_outputs))]
+            or (invalidation_outputs and not outline)):
+        raise ValueError("invalid invalidation data shard paths")
     stores = _LocalStores(source, record["class"]) if local else None
     if stores is not None:
         if record.get("local_store_count") != len(stores.parts):
@@ -416,6 +506,9 @@ def verify(source: Path, out: Path) -> None:
     if len(set(commit_names)) != len(commit_names) or expected.intersection(commit_names):
         raise ValueError("reshard commit outputs collide")
     expected.update(commit_names)
+    if expected.intersection(invalidation_outputs):
+        raise ValueError("invalidation data shards collide with existing outputs")
+    expected.update(invalidation_outputs)
     if set(record["output_sha256"]) != expected:
         raise ValueError("reshard manifest does not describe exactly the derived files")
     outputs = [p for p in out.iterdir() if p.name != MANIFEST]
@@ -426,13 +519,29 @@ def verify(source: Path, out: Path) -> None:
     header = hashlib.sha256()
     if record["guard_added"]:
         header.update(GUARD)
+    verified_invalidation = []
+
+    @contextmanager
+    def verify_invalidation_shard(name):
+        verified_invalidation.append(name)
+        contents = hashlib.sha256()
+        yield contents.update
+        if contents.hexdigest() != record["output_sha256"].get(name):
+            raise ValueError("derived invalidation data differs from its original table definitions")
+
     with (source / "dut.h").open("rb") as stream:
-        if stores is None:
+        if stores is None and not outline:
             for block in iter(lambda: stream.read(1024 * 1024), b""):
                 header.update(block)
         else:
-            for line in stores.header_lines(stream):
+            lines = stores.header_lines(stream) if stores is not None else stream
+            if outline:
+                lines = _outline_invalidation_header(
+                    lines, record["class"], outline, verify_invalidation_shard)
+            for line in lines:
                 header.update(line)
+    if verified_invalidation != invalidation_outputs:
+        raise ValueError("invalidation data shard sequence differs")
     if header.hexdigest() != record["output_sha256"]["dut.h"]:
         raise ValueError("derived header does not match the verified transformation")
     localized = {}
@@ -486,7 +595,8 @@ def verify(source: Path, out: Path) -> None:
         if seen_optnone != unoptimized[name]:
             raise ValueError("derived optnone methods differ from original order")
     if record["commit_parts"] > 1 or blocks:
-        header = (out / "dut.h").read_text() if blocks else None
+        header_dir = source if outline else out
+        header = (header_dir / "dut.h").read_text() if blocks else None
         parts = _commit_outputs(record["class"],
             (source / "dut_commit_chunks.cpp").read_text(), record["commit_parts"], header)
         if ([name for name, _ in parts] != record["commit_outputs"] or
@@ -517,11 +627,14 @@ def main() -> None:
                         help="localize outlined store helpers while verifying their exact bodies and order")
     parser.add_argument("--commit-blocks", action="store_true",
                         help="specialize eligible immutable commit tables in an already generated model")
+    parser.add_argument("--outline-invalidation-mib", type=int, default=0,
+                        help="move invalidation data out of the header with this maximum shard size")
     args = parser.parse_args()
     if args.operation == "create":
         create(args.source, args.output, maximum=args.max_mib * 1024 * 1024,
                commit_parts=args.commit_parts, optnone_bytes=args.optnone_mib * 1024 * 1024,
-               local_store_helpers=args.local_store_helpers, commit_blocks=args.commit_blocks)
+               local_store_helpers=args.local_store_helpers, commit_blocks=args.commit_blocks,
+               outline_invalidation_bytes=args.outline_invalidation_mib * 1024 * 1024)
     else:
         verify(args.source, args.output)
     print("reshard", args.operation, "verified", flush=True)

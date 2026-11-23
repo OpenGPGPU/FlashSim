@@ -1,4 +1,5 @@
 """A saved model can be repartitioned without changing its execution."""
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -84,6 +85,40 @@ def test_method_and_commit_partitions_preserve_compiled_behavior(tmp_path):
     assert not (source / "dut.h").read_text().startswith("#pragma once\n")
     with pytest.raises(FileExistsError):
         create(source, out, maximum=70, commit_parts=2)
+
+
+def test_outlined_invalidation_tables_preserve_array_types_and_order(tmp_path):
+    source, out = tmp_path / "original", tmp_path / "derived"
+    fixture(source)
+    header = source / "dut.h"
+    header.write_text(header.read_text().replace(
+        "struct TinyDut {",
+        "static const uint16_t _inv0[] = {1, 17, 1, 4};\n"
+        "static const uint32_t _inv1[] = {65537, 2, 65538};\n"
+        "static_assert(sizeof(_inv0) == 8 && sizeof(_inv1) == 12);\nstruct TinyDut {"))
+    shard = source / "dut_0.cpp"
+    shard.write_text(shard.read_text().replace("value += 1;",
+        "for (auto index : _inv0) value = value * 7 + index;").replace(
+        "value *= 3;", "for (auto index : _inv1) value = value * 5 + index;"))
+    baseline = run_model(source, tmp_path, "before_outline")
+    create(source, out, maximum=100, commit_parts=1, outline_invalidation_bytes=135)
+    assert "extern const uint16_t _inv0[4];" in (out / "dut.h").read_text()
+    assert "extern const uint32_t _inv1[3];" in (out / "dut.h").read_text()
+    tables = sorted(out.glob("dut_invalidation_part*.cpp"))
+    assert len(tables) == 2
+    assert all(path.stat().st_size <= 135 and b'#include "dut.h"' not in path.read_bytes()
+               for path in tables)
+    assert run_model(out, tmp_path, "after_outline") == baseline
+    verify(source, out)
+    # A tampered table remains invalid even when its receipt hash is refreshed.
+    data = tables[0].read_bytes().replace(b"1, 17, 1, 4", b"17, 1, 1, 4")
+    tables[0].write_bytes(data)
+    receipt = out / "flashsim-reshard.json"
+    record = json.loads(receipt.read_text())
+    record["output_sha256"][tables[0].name] = hashlib.sha256(data).hexdigest()
+    receipt.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="differs from its original table"):
+        verify(source, out)
 
 
 def test_rejects_tampering_and_unexpected_top_level_content(tmp_path):
