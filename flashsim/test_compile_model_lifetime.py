@@ -91,3 +91,40 @@ def test_public_optimizer_preserves_callers_input():
     assert model.assigns is assigns and model.signals is signals
     assert model.always.body is body
     assert [(a.lhs, a.rhs) for a in assigns] == values
+
+
+def test_cached_mlir_releases_module_text_during_lowering(tmp_path, monkeypatch):
+    frontend = importlib.import_module('flashsim.circt_frontend')
+    path = tmp_path / 'hw.mlir'
+    path.write_text(MLIR + '\n' + MLIR.replace('@Gate', '@Other'))
+    original_split = frontend._split_modules
+    original_lower = frontend._lower_module
+    original_flatten = frontend._flatten
+    refs = []
+    lowered = []
+
+    def split(text):
+        modules = original_split(text)
+        refs.extend(weakref.ref(module) for module in modules)
+        return modules
+
+    def lower(module):
+        assert all(ref() is None for ref in refs[:len(lowered)])
+        lowered.append(module.name)
+        return original_lower(module)
+
+    def flatten(module, library, remaining):
+        assert refs and all(ref() is None for ref in refs)
+        return original_flatten(module, library, remaining)
+
+    monkeypatch.setattr(frontend, '_split_modules', split)
+    monkeypatch.setattr(frontend, '_lower_module', lower)
+    monkeypatch.setattr(frontend, '_flatten', flatten)
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        assert frontend.parse_hw_mlir(path).name == 'Other'
+        assert lowered == ['Gate', 'Other']
+    finally:
+        if enabled:
+            gc.enable()

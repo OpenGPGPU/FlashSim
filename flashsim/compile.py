@@ -93,7 +93,7 @@ def _compile_module(
                 raise CirctError("assertion inputs changed during CIRCT compilation")
         else:
             prepare_circt_mlir(path, mlir_path, assertions=assertions)
-            mlir = mlir_path.read_text()
+            mlir = mlir_path
         with phase('parse.hw_mlir'):
             if preflatten == '1':
                 mod = parse_hw_mlir(mlir, top=path.stem, preflatten_wires=True)
