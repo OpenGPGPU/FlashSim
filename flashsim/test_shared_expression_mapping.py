@@ -123,7 +123,7 @@ def test_shared_graph_queries_preserve_occurrence_counts_without_expansion():
     read = MemRead("memory", Id("address"))
     expr = Concat((read, read, Id("address")))
     assert list(expr_ids(expr)) == ["address", "memory"]
-    assert expr_id_counts(expr) == {"memory": 2, "address": 3}
+    assert list(expr_id_counts(expr).items()) == [("address", 3), ("memory", 2)]
 
 
 def test_width_only_resolves_operands_that_determine_result_width():

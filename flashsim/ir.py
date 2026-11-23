@@ -266,20 +266,45 @@ def expr_ids(expr: Expr) -> IdSet:
 
 
 def expr_id_counts(expr: Expr) -> dict[str, int]:
-    # Propagate path multiplicities through distinct DAG nodes. Deduplicating
-    # visits alone would undercount a shared input used by both operands.
-    postorder: list[Expr] = []
-    map_expr_memoized(expr, lambda node: postorder.append(node) or node)
-    weights = {id(expr): 1}
+    if isinstance(expr, Id):
+        return {expr.name: 1}
+    if isinstance(expr, _LEAF_EXPR_TYPES):
+        return {}
+
+    # Record each node's original edges in postorder for the read-only walk.
+    root = id(expr)
+    postorder: dict[int, tuple[Expr, tuple[Expr, ...]]] = {}
+    active: set[int] = set()
+    pending: list[tuple[Expr, tuple[Expr, ...] | None]] = [(expr, None)]
+    while pending:
+        node, children = pending.pop()
+        key = id(node)
+        if key in postorder:
+            continue
+        if children is None:
+            children = _expr_children(node)
+            if children:
+                if key in active:
+                    raise ValueError("cyclic expression graph")
+                active.add(key)
+                pending.append((node, children))
+                pending.extend((child, None) for child in reversed(children))
+                continue
+        else:
+            active.remove(key)
+        postorder[key] = (node, children)
+
+    # Each incoming edge contributes its full path multiplicity.
+    weights = {root: 1}
     counts: dict[str, int] = {}
-    for node in reversed(postorder):
-        weight = weights.pop(id(node))
+    for key, (node, children) in reversed(postorder.items()):
+        weight = weights.pop(key)
         if isinstance(node, (Id, MemRead)):
             name = node.name if isinstance(node, Id) else node.mem
             counts[name] = counts.get(name, 0) + weight
-        for child in _expr_children(node):
-            key = id(child)
-            weights[key] = weights.get(key, 0) + weight
+        for child in children:
+            child_key = id(child)
+            weights[child_key] = weights.get(child_key, 0) + weight
     return counts
 
 
