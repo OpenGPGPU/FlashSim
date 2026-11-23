@@ -558,6 +558,20 @@ def test_poke_skips_unchanged_input_image() -> None:
     assert "memcpy(_in_snap, &a, sizeof(_in_snap));" in text
 
 
+def test_invalidation_tables_share_immutable_pages_in_leaf_order() -> None:
+    from flashsim import emit as em
+
+    first = [7, 4, 6, 6, 9, 2, 5]
+    next_pages = [0, 1, 2, 3, 4, 5, 6]
+    pending = {"z": next_pages, "d": list(first), "c": [3, 1], "a": first}
+    pages, tables = em._freeze_invalidation_tables(pending)
+    assert not pending
+    assert pages == {"a": tuple(first), "c": (3, 1), "d": tuple(first),
+                     "z": tuple(next_pages)}
+    assert pages["a"] is pages["d"]
+    assert list(tables.items()) == [(tuple(first), 0), (tuple(next_pages), 1)]
+
+
 def test_bump_sig_stable_for_commit_batching() -> None:
     from flashsim import emit as em
 

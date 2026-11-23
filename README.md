@@ -1364,6 +1364,24 @@ PYTHONHASHSEED=73 FLASHSIM_COMMIT_PARTS=16 python3 -B scripts/bench_narrow_pass.
   --emit-cpp --shards 64 --repeat 1 --flashsim "$FLASH_CHECKOUT"
 ```
 
+After gathering the invalidation pages, the emitter releases each mutable
+leaf list as it freezes it. Leaves and numbered tables then share immutable
+page sequences. Table numbering follows sorted leaf names, and the order and
+multiplicity of page indices are preserved.
+
+The complete dual-CU OpenGPU `8a1919172` model emitted 187,187,963
+invalidation page entries. A second 64-bit reference for each entry occupies
+1.39 GiB. In an allocation comparison using 1,519 of those real tables with
+2,001,303 entries, the container peak went from 30.86 to 16.10 MiB. That
+measurement covers the leaf and table containers. Complete-model generation
+peak and simulator throughput require their own measurements.
+
+The `GpuComputeUnitCore` and `BankedShaderPayloadStore` hierarchies from the
+same MLIR produced identical optimized IR and C++ shards when compared with
+`23333d0`. Use the `bench_narrow_pass.py` command above on both checkouts with
+each hierarchy name. The ordering and sharing regression runs with
+`python3 -B -m pytest flashsim/test_emit_wake.py -q`.
+
 The commit-table transform locates literal prefixes before checking token and
 line boundaries. It also parses the decimal fields once and checks quotes
 without copying the commit body. On a 96 MiB prefix of the generated dual-CU
