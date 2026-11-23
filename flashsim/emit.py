@@ -534,7 +534,8 @@ def _promote_shared_inlines(
         forced: list[str] = []
         extra: list[tuple[int, int, str]] = []
         for name, count in sites.items():
-            if name not in assigns:
+            if count < 2:
+                # Extracting an expression used at one site saves no evaluation.
                 continue
             if count >= _SHARED_INLINE_MIN:
                 forced.append(name)
