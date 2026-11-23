@@ -1,7 +1,7 @@
 """Regeneration should retain cacheable files and remove obsolete shards."""
 import os
 
-from flashsim.compile import compile_file
+from flashsim.compile import _write_generated, compile_file
 
 
 def test_regeneration_preserves_identical_outputs_and_drops_stale_shards(tmp_path):
@@ -31,3 +31,21 @@ endmodule
     assert header.stat().st_mtime_ns != old
     compile_file(source, header, frontend="native", split=0)
     assert not list(tmp_path.glob("dut_*.cpp"))
+
+
+def test_large_generated_file_compares_exact_utf8_bytes(tmp_path):
+    output = tmp_path / "dut.h"
+    text = "a" * (1024 * 1024 - 1) + "é尾\r\n"
+    encoded = text.encode()
+    _write_generated(output, text)
+    assert output.read_bytes() == encoded
+
+    previous = 1590000000000000000
+    os.utime(output, ns=(previous, previous))
+    _write_generated(output, text)
+    assert output.stat().st_mtime_ns == previous
+
+    with output.open("ab") as stream:
+        stream.write(b"unused suffix")
+    _write_generated(output, text)
+    assert output.read_bytes() == encoded

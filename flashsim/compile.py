@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -171,11 +172,20 @@ def compile_file(
     return mod
 
 
+def _encoded_chunks(text: str) -> Iterator[bytes]:
+    chars_per_chunk = 1024 * 1024
+    for start in range(0, len(text), chars_per_chunk):
+        yield text[start:start + chars_per_chunk].encode()
+
+
 def _write_generated(path: Path, text: str) -> None:
-    data = text.encode()
-    if path.is_file() and path.read_bytes() == data:
-        return
-    path.write_bytes(data)
+    if path.is_file():
+        with path.open('rb') as previous:
+            if (all(previous.read(len(chunk)) == chunk for chunk in _encoded_chunks(text))
+                    and not previous.read(1)):
+                return
+    with path.open('wb') as output:
+        output.writelines(_encoded_chunks(text))
 
 
 def _auto_split_count(path: Path, cpp_bytes: int) -> int:
