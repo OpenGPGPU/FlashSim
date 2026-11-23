@@ -87,6 +87,40 @@ def test_method_and_commit_partitions_preserve_compiled_behavior(tmp_path):
         create(source, out, maximum=70, commit_parts=2)
 
 
+def test_each_part_digest_is_checked_when_reconstructed_methods_are_unchanged(tmp_path):
+    source, out = tmp_path / "original", tmp_path / "derived"
+    fixture(source)
+    create(source, out, maximum=70, commit_parts=1)
+    manifest = json.loads((out / "flashsim-reshard.json").read_text())
+    first, second = (out / name for name in manifest["method_parts"]["dut_0.cpp"][:2])
+    initial, following = first.read_bytes(), second.read_bytes()
+    include = b'#include "dut.h"\n'
+    assert initial.endswith(b"\n\n") and following.startswith(include)
+    first.write_bytes(initial[:-1])
+    second.write_bytes(include + b"\n" + following[len(include):])
+    with pytest.raises(ValueError, match="reshard output differs from its manifest"):
+        verify(source, out)
+
+
+def test_method_verification_carries_scope_across_a_long_generated_line(tmp_path):
+    source, out = tmp_path / "original", tmp_path / "derived"
+    fixture(source)
+    shard = source / "dut_0.cpp"
+    shard.write_bytes(shard.read_bytes().replace(b"  value += 1;\n",
+        b"  // " + b"x" * (1024 * 1024 + 3) + b"\n  value += 1;\n"))
+    create(source, out, maximum=70, commit_parts=1)
+    verify(source, out)
+
+    first = out / shard.name
+    first.write_bytes(first.read_bytes() + b"  int unexpected_at_file_scope;\n")
+    receipt = out / "flashsim-reshard.json"
+    record = json.loads(receipt.read_text())
+    record["output_sha256"][first.name] = hashlib.sha256(first.read_bytes()).hexdigest()
+    receipt.write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="top-level content"):
+        verify(source, out)
+
+
 def test_outlined_invalidation_tables_preserve_array_types_and_order(tmp_path):
     source, out = tmp_path / "original", tmp_path / "derived"
     fixture(source)

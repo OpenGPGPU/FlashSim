@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 from contextlib import ExitStack, contextmanager
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
@@ -133,6 +134,50 @@ def digest(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             h.update(block)
     return h.hexdigest()
+
+
+class _DigestReader(io.RawIOBase):
+    """Hash the same blocks the verifier reads for structural checks."""
+
+    def __init__(self, source, joined, skip: int):
+        super().__init__()
+        self.source = source
+        self.value = hashlib.sha256()
+        self.joined = joined
+        self.skip = skip
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, block) -> int:
+        size = self.source.readinto(block)
+        if size:
+            data = memoryview(block)[:size]
+            self.value.update(data)
+            if self.joined is not None:
+                skipped = min(self.skip, size)
+                self.skip -= skipped
+                self.joined.update(data[skipped:])
+        return size
+
+
+@contextmanager
+def _checked_stream(path: Path, expected: str, error: str, *, joined=None, skip: int = 0):
+    # Keep hashing at block granularity even though callers inspect lines.
+    with path.open("rb", buffering=0) as source:
+        reader = _DigestReader(source, joined, skip)
+        with io.BufferedReader(reader, buffer_size=1024 * 1024) as stream:
+            try:
+                yield stream
+            except ValueError:
+                # Report a stale file digest before reporting malformed
+                # structure, as when these checks used separate reads.
+                for _ in iter(lambda: stream.read(1024 * 1024), b""):
+                    pass
+                if reader.value.hexdigest() == expected:
+                    raise
+        if reader.value.hexdigest() != expected:
+            raise ValueError(error)
 
 
 def _files(source: Path) -> list[Path]:
@@ -453,7 +498,9 @@ def verify(source: Path, out: Path) -> None:
             record.get("emitter_sha256") != digest(Path(emit.__file__))):
         raise ValueError("reshard transformer differs from its manifest")
     inputs = _files(source)
-    if {p.name: digest(p) for p in inputs} != record["input_sha256"]:
+    input_hashes = record["input_sha256"]
+    if ({p.name for p in inputs} != set(input_hashes) or
+            any(digest(p) != input_hashes[p.name] for p in inputs[1:])):
         raise ValueError("reshard input differs from its manifest")
     local = record.get("local_store_helpers", False)
     if not isinstance(local, bool):
@@ -494,6 +541,7 @@ def verify(source: Path, out: Path) -> None:
         if not parts or parts != correct or expected.intersection(parts):
             raise ValueError("reshard manifest contains invalid method paths")
         expected.update(parts)
+    method_outputs = expected - {"dut.h"}
     for path in inputs[1:]:
         if path.name not in numbered and path.name != "dut_commit_chunks.cpp":
             if stores is not None and path.name == "dut_mem_stores.cpp":
@@ -514,7 +562,9 @@ def verify(source: Path, out: Path) -> None:
     outputs = [p for p in out.iterdir() if p.name != MANIFEST]
     if any(p.is_symlink() or not p.is_file() for p in outputs):
         raise ValueError("reshard output contains a non-regular file")
-    if {p.name: digest(p) for p in outputs} != record["output_sha256"]:
+    output_hashes = record["output_sha256"]
+    if ({p.name for p in outputs} != expected or
+            any(digest(p) != output_hashes[p.name] for p in outputs if p.name not in method_outputs)):
         raise ValueError("reshard output differs from its manifest")
     header = hashlib.sha256()
     if record["guard_added"]:
@@ -529,7 +579,8 @@ def verify(source: Path, out: Path) -> None:
         if contents.hexdigest() != record["output_sha256"].get(name):
             raise ValueError("derived invalidation data differs from its original table definitions")
 
-    with (source / "dut.h").open("rb") as stream:
+    with _checked_stream(source / "dut.h", input_hashes["dut.h"],
+                         "reshard input differs from its manifest") as stream:
         if stores is None and not outline:
             for block in iter(lambda: stream.read(1024 * 1024), b""):
                 header.update(block)
@@ -552,11 +603,16 @@ def verify(source: Path, out: Path) -> None:
     for name, parts in record["method_parts"].items():
         joined = hashlib.sha256()
         seen_optnone = []
+        annotated = bool(unoptimized[name])
         for i, part in enumerate(parts):
-            with (out / part).open("rb") as stream:
+            # Plain method streams only lose the repeated include lines.
+            # Annotated ones are hashed after skipping their extra lines.
+            with _checked_stream(out / part, output_hashes[part],
+                                 "reshard output differs from its manifest",
+                                 joined=None if annotated else joined, skip=len(INCLUDE) if i else 0) as stream:
                 if stream.readline() != INCLUDE:
                     raise ValueError("derived shard is missing its include")
-                if not i:
+                if annotated and not i:
                     joined.update(INCLUDE)
                 in_method = False
                 while line := stream.readline():
@@ -586,7 +642,8 @@ def verify(source: Path, out: Path) -> None:
                         in_method = False
                     elif line[:1] not in (b" ", b"\t", b"\n", b"\r"):
                         raise ValueError("derived shard has unindented method content")
-                    joined.update(line)
+                    if annotated:
+                        joined.update(line)
                 if in_method:
                     raise ValueError("derived shard ends within a method")
         expected_digest = localized[name] if stores is not None else record["input_sha256"][name]

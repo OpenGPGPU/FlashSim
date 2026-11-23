@@ -431,6 +431,25 @@ On the assertion-enabled 640×480 dual-CU OpenGPU `8a1919172` model this moved
 72 MiB peak aggregate memory. The byte comparison covers the original tables
 and method bodies.
 
+Reshard verification hashes the original header while reconstructing the
+derived header and data tables. It hashes each method shard while checking
+its boundaries and reconstructing the original method stream.
+
+Two pairs on ARM64 macOS with Python 3.14.7 verified the same complete header,
+all invalidation data and the six largest method groups from OpenGPU
+`8a1919172`. Median verification time went from 12.33 to 11.80 seconds.
+The sample saves 4.20 GB of repeated reads. The corresponding header and
+method files in the complete model contain 10.72 GB.
+
+To reproduce, create a derived directory with each tool revision and time its
+verification on the same original C++ input:
+
+```sh
+python3 -B -m flashsim.reshard create --source "$ORIGINAL" --output "$DERIVED" \
+  --max-mib 48 --outline-invalidation-mib 24
+time python3 -B -m flashsim.reshard verify --source "$ORIGINAL" --output "$DERIVED"
+```
+
 For models with exceptionally large individual methods, pass
 `--optnone-mib 8` to `create` to disable optimization only for methods over
 8 MiB. This derived model requires Clang. Other methods keep the compiler
