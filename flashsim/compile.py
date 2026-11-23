@@ -7,7 +7,7 @@ from pathlib import Path
 
 from flashsim.circt_frontend import (
     CirctError,
-    circt_serial_import,
+    circt_import_parallelism,
     circt_verilog_to_mlir,
     parse_hw_mlir,
     verilog_sources,
@@ -39,10 +39,13 @@ def compile_verilog(
     if kind == "circt":
         if path is None:
             raise CirctError("CIRCT frontend needs a Verilog file path")
-        serial = circt_serial_import()
+        workers = circt_import_parallelism()
+        # Keep both legacy values reusable. Older FlashSim versions reject a
+        # marker containing a worker limit and regenerate their own cache.
+        threading = {None: "0", 0: "1"}.get(workers, f"threads:{workers}")
         if mlir_path is None or not (
             _mlir_fresh(mlir_path, path, assertions=assertions)
-            and _mlir_matches(mlir_path, path, assertions=assertions)
+            and _mlir_matches(mlir_path, path, threading, assertions=assertions)
         ):
             fingerprint = _assertion_sources(path) if assertions else None
             with phase('frontend.circt'):
@@ -52,15 +55,15 @@ def compile_verilog(
                 raise CirctError("assertion inputs changed during CIRCT compilation")
             if mlir_path is not None:
                 mlir_path.parent.mkdir(parents=True, exist_ok=True)
-                serial_marker = mlir_path.with_suffix(".mlir.circt-serial")
-                serial_marker.unlink(missing_ok=True)
+                threading_marker = mlir_path.with_suffix(".mlir.circt-serial")
+                threading_marker.unlink(missing_ok=True)
                 mlir_path.write_text(mlir)
                 mlir_path.with_suffix(".mlir.top").write_text(path.stem)
                 mlir_path.with_suffix(".mlir.assertions").write_text("1" if assertions else "0")
                 if assertions:
                     mlir_path.with_suffix(".mlir.assertion-sources.json").write_text(
                         json.dumps(fingerprint, sort_keys=True))
-                serial_marker.write_text("1" if serial else "0")
+                threading_marker.write_text(threading)
         else:
             mlir = mlir_path.read_text()
         with phase('parse.hw_mlir'):
@@ -197,7 +200,8 @@ def _resolve_frontend(frontend: str) -> str:
     return frontend
 
 
-def _mlir_matches(mlir_path: Path, verilog: Path, *, assertions: bool = False) -> bool:
+def _mlir_matches(mlir_path: Path, verilog: Path, threading: str, *,
+                  assertions: bool = False) -> bool:
     """Whether the cached MLIR was produced from *this* Verilog top.
 
     Freshness by mtime alone is not enough: the cache lives in the output
@@ -212,10 +216,10 @@ def _mlir_matches(mlir_path: Path, verilog: Path, *, assertions: bool = False) -
     try:
         marker = mlir_path.with_suffix(".mlir.assertions")
         cached_assertions = marker.is_file() and marker.read_text().strip() == "1"
-        serial_marker = mlir_path.with_suffix(".mlir.circt-serial")
-        cached_serial = serial_marker.read_text().strip()
+        threading_marker = mlir_path.with_suffix(".mlir.circt-serial")
+        cached_threading = threading_marker.read_text().strip()
         return (cached_assertions == assertions
-                and cached_serial == ("1" if circt_serial_import() else "0")
+                and cached_threading == threading
                 and mlir_path.with_suffix(".mlir.top").read_text().strip() == verilog.stem)
     except OSError:
         return False

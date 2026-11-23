@@ -123,8 +123,11 @@ an assertion-free FlashSim screen cannot replace that evidence.
 
 Large `GpuHostSystemAxi` models are emitted as C++ method shards and compiled
 in parallel. Set `FLASHSIM_CIRCT_SERIAL=1` to disable CIRCT's internal
-threading during RTL import when memory is constrained. This setting is part
-of the imported MLIR cache identity and does not disable assertions.
+threading during RTL import when memory is constrained. A `circt-verilog`
+build that supports `--mlir-threads` can use `FLASHSIM_CIRCT_THREADS=4` to
+bound parallel import and lowering. Select either serial mode or a worker
+limit. The threading choice is part of the imported MLIR cache identity,
+and asserted imports still use `--single-unit`.
 
 `FLASHSIM_GC_POLICY=defer` optionally defers automatic Python cyclic garbage
 collection during `compile_verilog` and `compile_file`, including shard emission.

@@ -943,6 +943,19 @@ def circt_serial_import() -> bool:
     return value == "1"
 
 
+def circt_import_parallelism() -> int | None:
+    """Return zero for serial, a positive worker limit, or the tool default."""
+    serial = circt_serial_import()
+    value = os.environ.get("FLASHSIM_CIRCT_THREADS")
+    if value is None:
+        return 0 if serial else None
+    if not re.fullmatch(r"[0-9]{1,10}", value) or not 1 <= int(value) <= 0xFFFFFFFF:
+        raise CirctError("FLASHSIM_CIRCT_THREADS must be a positive 32-bit integer")
+    if serial:
+        raise CirctError("FLASHSIM_CIRCT_THREADS conflicts with FLASHSIM_CIRCT_SERIAL=1")
+    return int(value)
+
+
 def circt_verilog_command(path: Path, *, assertions: bool = False) -> list[str]:
     tool = find_bin("circt-verilog")
     if tool is None:
@@ -950,9 +963,15 @@ def circt_verilog_command(path: Path, *, assertions: bool = False) -> list[str]:
     files = verilog_sources(path, assertions=assertions)
     includes = verilog_include_dirs(path, files) if assertions else []
     srcs = [str(p) for p in files]
+    workers = circt_import_parallelism()
+    threading_args = []
+    if workers == 0:
+        threading_args.append("--mlir-disable-threading")
+    elif workers is not None:
+        threading_args.append(f"--mlir-threads={workers}")
     # Bind layers recursively include one another. Their generated guards
     # must share a compilation unit rather than instantiate checks twice.
-    return [str(tool), *(["--mlir-disable-threading"] if circt_serial_import() else []),
+    return [str(tool), *threading_args,
             *(["--single-unit"] if assertions else []),
             *("-I"+directory for directory in includes), *srcs, "-o", "-"]
 
