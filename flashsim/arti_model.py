@@ -949,8 +949,15 @@ static bool drive_in(T& dst, U val) {
   return true;
 }
 
+// Only the bridge writes these memory-side DUT inputs. Queue and write
+// address changes below schedule the next drive, including after a B/R pop.
+static bool g_mem_drive_pending = true;
+
 static bool mem_drive(void)
 {
+  if (!g_mem_drive_pending)
+    return false;
+  g_mem_drive_pending = false;
   bool ch = false;
   ch |= drive_in(g_rtl->io_m_axi_awready, !g_aw_active);
   ch |= drive_in(g_rtl->io_m_axi_wready, 1);
@@ -978,6 +985,7 @@ static void mem_capture(void)
 {
   if (g_rtl->io_m_axi_awvalid && g_rtl->io_m_axi_awready) {
     g_aw_active = true;
+    g_mem_drive_pending = true;
     g_aw_addr = g_rtl->io_m_axi_awaddr;
     g_aw_id = g_rtl->io_m_axi_awid;
     g_aw_size = 1u << g_rtl->io_m_axi_awsize;
@@ -1027,6 +1035,7 @@ static void mem_capture(void)
     if (w.last) {
       g_bresp.push_back({g_aw_id, (uint8_t)(g_write_status ? 2 : 0)});
       g_aw_active = false;
+      g_mem_drive_pending = true;
     }
   }
   if (g_rtl->io_m_axi_arvalid && g_rtl->io_m_axi_arready) {
@@ -1047,7 +1056,20 @@ static void mem_capture(void)
       r.last = beat + 1 == beats;
       g_rresp.push_back(r);
     }
+    g_mem_drive_pending = true;
     g_arti_idle = 0;
+  }
+}
+
+static void mem_consume(bool b_fire, bool r_fire)
+{
+  if (b_fire && !g_bresp.empty()) {
+    g_bresp.pop_front();
+    g_mem_drive_pending = true;
+  }
+  if (r_fire && !g_rresp.empty()) {
+    g_rresp.pop_front();
+    g_mem_drive_pending = true;
   }
 }
 
@@ -1153,10 +1175,7 @@ static void tick_with(void (*combo_fn)(void), void (*eval_fn)(void))
   // Inputs unchanged since the pre-tick combo's poke; tick() would poke again.
   g_rtl->tick_nba();
   eval_fn();
-  if (b_fire && !g_bresp.empty())
-    g_bresp.pop_front();
-  if (r_fire && !g_rresp.empty())
-    g_rresp.pop_front();
+  mem_consume(b_fire, r_fire);
   {
     // The tail counts down ticks with no externally visible event. It must
     // advance on every such tick, not only while `_chg` is set: gating it on
