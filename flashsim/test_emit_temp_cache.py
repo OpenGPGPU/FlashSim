@@ -70,6 +70,8 @@ def test_inline_site_count_stops_at_threshold_and_counts_each_statement_once(mon
             NbAssign('q', Id('twice')), NbAssign('q', Id('twice'))]
     original = emit.expr_ids
     shared_walks = 0
+    original_count = emit._expr_node_count
+    fat_cost_queries = 0
 
     def counted(expr):
         nonlocal shared_walks
@@ -77,8 +79,16 @@ def test_inline_site_count_stops_at_threshold_and_counts_each_statement_once(mon
             shared_walks += 1
         return original(expr)
 
+    def count_cost(expr):
+        nonlocal fat_cost_queries
+        if expr is fat:
+            fat_cost_queries += 1
+        return original_count(expr)
+
     monkeypatch.setattr(emit, 'expr_ids', counted)
+    monkeypatch.setattr(emit, '_expr_node_count', count_cost)
     monkeypatch.setattr(emit, '_SHARED_INLINE_ROUNDS', 1)
     emit._promote_shared_inlines(body, assigns, cached, {'input', 'stop'})
     assert cached == set(roots) | {'shared', 'leaf', 'twice'}
     assert shared_walks == emit._SHARED_INLINE_MIN
+    assert fat_cost_queries == 1
