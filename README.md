@@ -1315,6 +1315,15 @@ observer and memory effects, and conservative deep-walk fallback. Alias rewrites
 share a pass-local memo through the dedicated DAG mapper; ordinary `map_expr`
 visitors retain their per-occurrence behavior. No GC policy change is required.
 
+The default two-node threshold checks the root's immediate children. Higher
+thresholds cap the shared occurrence counts at the threshold. The alias
+rewrite starts after releasing the structural index. In a Python 3.14 arm64
+run with 110,000 thirteen-operation wire chains, 220 duplicates, and their
+output aliases, deduplication took 12.00 s before the change and 8.99 s
+afterward. Peak RSS fell from 2.14 GiB to 0.97 GiB and the alias results
+matched. The focused tests below also cover shared subexpressions, name
+selection, and updates to memories and assertions.
+
 Validation with Python 3.14.7 and CIRCT, C++, Icarus and Verilator available:
 423 tests passed under each of the `normal` and `defer` compilation GC policies,
 with no skips (193.80 and 202.51 seconds, respectively). Each complete run had

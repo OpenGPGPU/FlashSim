@@ -64,6 +64,7 @@ def test_dedup_shares_count_cache_across_overlapping_assignment_roots(monkeypatc
         return original(expr)
 
     monkeypatch.setattr(opt, "_expr_children", children)
+    monkeypatch.setattr(opt, "_DEDUP_MIN_NODES", (1 << 100) + 1)
     expr = Id("input")
     assigns = {}
     for index in range(100):
@@ -73,6 +74,21 @@ def test_dedup_shares_count_cache_across_overlapping_assignment_roots(monkeypatc
     result = opt._dedup_assigns(assigns, [], [], [], [], [], sigs)[0]
     assert len(result) == 100
     assert calls == 101
+
+
+def test_default_dedup_threshold_avoids_the_expanded_count_map(monkeypatch):
+    def forbidden_count(*args, **kwargs):
+        raise AssertionError("default deduplication counted a whole DAG")
+
+    monkeypatch.setattr(opt, "_DEDUP_MIN_NODES", 2)
+    monkeypatch.setattr(opt, "_expr_nodes", forbidden_count)
+    assigns = {"z": diamond(30), "m": diamond(30), "a": diamond(30),
+               "empty_z": Concat(()), "empty_a": Concat(()),
+               "a_use": Id("m"), "z_use": Id("z")}
+    sigs = {n: Signal(n, 1, "wire") for n in assigns}
+    result = opt._dedup_assigns(assigns, [], [], [], [], [], sigs)[0]
+    assert set(result) == {"a", "empty_z", "empty_a", "a_use", "z_use"}
+    assert result["a_use"] == result["z_use"] == Id("a")
 
 
 def test_dedup_shared_dags_never_recursively_hash_expressions(monkeypatch):

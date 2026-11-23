@@ -1403,9 +1403,13 @@ def _expr_eq(a: Expr, b: Expr) -> bool:
     return False
 
 
-def _expr_nodes(expr: Expr, *, memo: dict[int, tuple[Expr, int]] | None = None) -> int:
+def _expr_nodes(
+    expr: Expr, *, memo: dict[int, tuple[Expr, int]] | None = None,
+    limit: int | None = None,
+) -> int:
     # Count expanded occurrences, as before, but compute shared subtrees once.
     # A diamond DAG with n physical nodes can describe 2**n occurrences.
+    # A threshold query can saturate its counts without retaining large ints.
     counts = {} if memo is None else memo
 
     def count(node: Expr, *, _recur) -> int:
@@ -1415,6 +1419,9 @@ def _expr_nodes(expr: Expr, *, memo: dict[int, tuple[Expr, int]] | None = None) 
             total = 1
             for child in _expr_children(node):
                 total += _recur(child, _recur=_recur)
+                if limit is not None and total >= limit:
+                    total = limit
+                    break
             # Keep originals alive when sharing the cache across roots.
             counts[key] = (node, total)
             return total
@@ -1449,24 +1456,40 @@ class _ExprInterner:
     """Exact structural IDs whose keys never recursively hash an Expr DAG."""
 
     def __init__(self):
-        self.nodes: dict[int, tuple[Expr, int]] = {}
+        self.nodes: dict[int, int] = {}
         self.keys: dict[tuple, int] = {}
+        self.roots: dict[int, Expr] = {}
+        self.field_names: dict[type, tuple[str, ...]] = {}
 
     def value(self, value):
         if isinstance(value, Expr):
-            return self.key(value)
+            return self._key(value)
         if isinstance(value, tuple):
             return tuple(self.value(part) for part in value)
         return value
 
     def key(self, expr: Expr) -> int:
-        cached = self.nodes.get(id(expr))
+        # Holding each root keeps all its child identities live during interning.
+        identity = id(expr)
+        self.roots[identity] = expr
+        return self._key(expr)
+
+    def _key(self, expr: Expr) -> int:
+        identity = id(expr)
+        cached = self.nodes.get(identity)
         if cached is not None:
-            return cached[1]
-        key = (type(expr), *(self.value(getattr(expr, f.name)) for f in fields(expr)))
+            return cached
+        kind = type(expr)
+        names = self.field_names.get(kind)
+        if names is None:
+            names = tuple(f.name for f in fields(expr))
+            self.field_names[kind] = names
+        if kind is ArrayConst:
+            key = (kind, expr.values, expr.width)
+        else:
+            key = (kind, *(self.value(getattr(expr, name)) for name in names))
         canonical = self.keys.setdefault(key, len(self.keys))
-        # Retain originals until this pass ends, so identities cannot be reused.
-        self.nodes[id(expr)] = (expr, canonical)
+        self.nodes[identity] = canonical
         return canonical
 
 
@@ -2323,6 +2346,40 @@ def _alias_expr(expr: Expr, alias: dict[str, str], *, memo=None) -> Expr:
     return walk(expr, _recur=walk)
 
 
+@timed_phase('opt.dedup_index')
+def _dedup_aliases(assigns: dict[str, Expr], sigs: dict[str, Signal]) -> dict[str, str]:
+    canonical_names: dict[int, str] = {}
+    duplicates: dict[str, int] = {}
+    interner = _ExprInterner()
+    node_counts: dict[int, tuple[Expr, int]] = {}
+    minimum = _DEDUP_MIN_NODES
+    for lhs, rhs in assigns.items():
+        sig = sigs.get(lhs)
+        if sig is None or sig.kind != "wire" or sig.depth:
+            continue
+        if isinstance(rhs, (Id, Const, ArrayZeros, ArrayConst)):
+            continue
+        try:
+            # The default threshold needs only one child. Larger thresholds
+            # share capped counts across roots, including repeated DAG edges.
+            if minimum == 2 and not _expr_children(rhs):
+                continue
+            if minimum > 2 and _expr_nodes(rhs, memo=node_counts, limit=minimum) < minimum:
+                continue
+            key = interner.key(rhs)
+        except RecursionError:
+            # Deep structural walks may still exceed the caller's stack limit.
+            # Deduplication is optional; keep that wire intact.
+            continue
+        canonical = canonical_names.setdefault(key, lhs)
+        if lhs < canonical:
+            canonical_names[key] = lhs
+            duplicates[canonical] = key
+        elif lhs != canonical:
+            duplicates[lhs] = key
+    return {name: canonical_names[key] for name, key in duplicates.items()}
+
+
 @timed_phase('opt.dedup')
 def _dedup_assigns(
     assigns: dict[str, Expr],
@@ -2333,53 +2390,27 @@ def _dedup_assigns(
     clocked_processes: list[ClockedProcess],
     sigs: dict[str, Signal],
 ) -> tuple[dict[str, Expr], list[Stmt], list[Stmt], list[MemWrite], list[ClockedAssertion | ClockedPrint], list[ClockedProcess]]:
-    """Merge structurally identical wires (GSIM commonExpr / arcilator dedup).
-    Only scalar wires are merged; array, reg, input, output and mem values stay.
-    The smallest name is canonical so the result is PYTHONHASHSEED-independent.
-    """
+    """Merge structurally identical scalar wires under the smallest name."""
     if _DEDUP_MIN_NODES < 1:
         return assigns, body, reset_epilogue, mem_writes, assertions, clocked_processes
-    groups: dict[int, list[str]] = {}
-    interner = _ExprInterner()
-    node_counts: dict[int, tuple[Expr, int]] = {}
-    for lhs, rhs in assigns.items():
-        sig = sigs.get(lhs)
-        if sig is None or sig.kind != "wire" or sig.depth:
-            continue
-        if isinstance(rhs, (Id, Const, ArrayZeros, ArrayConst)):
-            continue
-        try:
-            if _expr_nodes(rhs, memo=node_counts) < _DEDUP_MIN_NODES:
-                continue
-            groups.setdefault(interner.key(rhs), []).append(lhs)
-        except RecursionError:
-            # Deep structural walks may still exceed the caller's stack limit.
-            # Deduplication is optional; keep that wire intact.
-            continue
-    alias: dict[str, str] = {}
-    for rhs, names in groups.items():
-        if len(names) < 2:
-            continue
-        names = sorted(names)
-        canonical = names[0]
-        for dup in names[1:]:
-            alias[dup] = canonical
+    # Release the complete structural index before retaining rewritten nodes.
+    alias = _dedup_aliases(assigns, sigs)
     if not alias:
         return assigns, body, reset_epilogue, mem_writes, assertions, clocked_processes
     memo: dict[int, tuple[Expr, Expr]] = {}
     def rewrite(expr: Expr) -> Expr:
         return _alias_expr(expr, alias, memo=memo)
     try:
-        new_assigns = {n: rewrite(e) for n, e in assigns.items() if n not in alias}
-        new_body = _map_stmts(body, rewrite)
-        new_reset = _map_stmts(reset_epilogue, rewrite)
-        new_mem = [
-            MemWrite(w.mem, rewrite(w.addr), rewrite(w.data), rewrite(w.enable))
-            for w in mem_writes
-        ]
-        new_assert = [map_observation(a, rewrite)
-                      for a in assertions]
-        new_procs = [ClockedProcess(rewrite(p.clock), p.scope) for p in clocked_processes]
+        with phase('opt.dedup_rewrite'):
+            new_assigns = {n: rewrite(e) for n, e in assigns.items() if n not in alias}
+            new_body = _map_stmts(body, rewrite)
+            new_reset = _map_stmts(reset_epilogue, rewrite)
+            new_mem = [
+                MemWrite(w.mem, rewrite(w.addr), rewrite(w.data), rewrite(w.enable))
+                for w in mem_writes
+            ]
+            new_assert = [map_observation(a, rewrite) for a in assertions]
+            new_procs = [ClockedProcess(rewrite(p.clock), p.scope) for p in clocked_processes]
     except RecursionError:
         # Publishing only part of an alias rewrite would leave dangling wires.
         # Retain the complete original IR if any observer or use is too deep.
