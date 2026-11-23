@@ -398,6 +398,18 @@ generic helper. The option rejects unsupported preprocessor directives and
 already-specialized or already-partitioned commit inputs. The manifest records
 the choice, and `verify` regenerates and checks every derived commit source.
 
+For large headers, `--outline-invalidation-mib 24` moves the generated
+invalidation arrays into data-only translation units of at most 24 MiB.
+The header declares each array with its original type and extent. Verification
+reconstructs the declarations and every initializer from the original C++.
+Include the data units when linking the model.
+
+On the assertion-enabled 640×480 dual-CU OpenGPU `8a1919172` model this moved
+78,666 tables into 60 data units. The generated header fell from 2.22 GB to
+0.73 GB. The complete derivation and verification took 68.8 seconds with
+72 MiB peak aggregate memory. The byte comparison covers the original tables
+and method bodies.
+
 For models with exceptionally large individual methods, pass
 `--optnone-mib 8` to `create` to disable optimization only for methods over
 8 MiB. This derived model requires Clang. Other methods keep the compiler
