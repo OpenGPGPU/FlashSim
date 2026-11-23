@@ -1260,6 +1260,36 @@ PYTHONHASHSEED=73 python3 -B scripts/bench_narrow_pass.py "$OWNER_MLIR" \
   --flashsim "$FLASH_CHECKOUT"
 ```
 
+Bit-slice rewriting stops at the first data operand that cannot be narrowed.
+The optimizer also compares expression sizes before collecting leaf sets for
+the equal-or-larger case. Three alternating pairs against `af91081` used the
+assertion-enabled 640×480 dual-CU OpenGPU `8a1919172` CIRCT output and
+Python 3.14.7 on ARM64 macOS.
+
+| Original hierarchy | Median optimization before | Median optimization after |
+| --- | ---: | ---: |
+| `BlendArithmeticVector` | 10.994 s | 5.876 s |
+| `TexturePairPipeline_1` | 12.906 s | 6.708 s |
+| `GpuComputeUnitCore` | 47.027 s | 29.524 s |
+
+Each hierarchy produced the same optimized IR and generated C++ as its
+baseline. The hierarchy renamer now retains discovered children through the
+postorder walk and returns memoized roots directly. Three alternating pairs
+on `SharedL2Slice` reduced median flattening from 3.784 s to 3.020 s. All 13
+assertions and all generated C++ bytes matched. These measurements cover the
+named stages and hierarchies. Full-host generation, native C++ compilation
+and simulation throughput remain separate checks.
+
+Select each checkout in alternating pairs with the same toolchain and MLIR:
+
+```sh
+PYTHONHASHSEED=73 python3 -B scripts/bench_narrow_pass.py "$OWNER_MLIR" \
+  --module "$MODULE" --hierarchy --preflatten-wires --emit-cpp --repeat 1 \
+  --flashsim "$FLASH_CHECKOUT"
+PYTHONHASHSEED=73 python3 -B scripts/bench_hierarchy_rename.py "$OWNER_MLIR" \
+  --module SharedL2Slice --repeat 1 --flashsim "$FLASH_CHECKOUT"
+```
+
 A 19-node shared sum stays at 19 nodes through renaming and folding, instead of
 expanding into hundreds of thousands of nodes. This does not establish complete
 GPU generation time or simulator throughput. Reproduce the graph regressions

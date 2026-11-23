@@ -11,6 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 import pickle
+import re
 import statistics
 import sys
 import time
@@ -25,15 +26,17 @@ def main():
                         help='include the selected module\'s original child instances')
     parser.add_argument('--preflatten-wires', action='store_true',
                         help='apply compiler wire compaction before flattening')
+    parser.add_argument('--emit-cpp', action='store_true',
+                        help='also measure emission and hash the resulting C++')
     parser.add_argument('--flashsim', type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
     if args.repeat < 1:
         parser.error('positive --repeat required')
     source = args.flashsim.resolve(strict=True)
     sys.path.insert(0, str(source))
-    from flashsim import circt_frontend as frontend, opt
+    from flashsim import circt_frontend as frontend, emit, opt
     from flashsim.preflatten import compact_module_wires
-    for module in (frontend, opt):
+    for module in (frontend, opt, emit):
         if not Path(module.__file__).resolve().is_relative_to(source / 'flashsim'):
             parser.error('compiler must come from the selected checkout')
 
@@ -50,7 +53,9 @@ def main():
     gc.disable()
     opt._narrow_bit_slices = measure
     try:
-        modules = {module.name: module for module in frontend._split_modules(args.mlir.read_text())}
+        text = re.sub(r'\{sv\.[^}]*\}', '', args.mlir.read_text())
+        modules = {module.name: module for module in frontend._split_modules(text)}
+        del text
         if args.module not in modules:
             parser.error('module not found: ' + args.module)
         library = {}
@@ -84,12 +89,19 @@ def main():
         if len(narrowed) != args.repeat:
             parser.error('expected one enabled narrowing pass per optimization')
         digest = hashlib.sha256(pickle.dumps(result, protocol=5)).hexdigest()
-        print(json.dumps(dict(module=leaf.name, input_signals=len(leaf.signals),
+        summary = dict(module=leaf.name, input_signals=len(leaf.signals),
             signals=len(result.signals), assignments=len(result.assigns),
             assertions=len(result.assertions), repeats=args.repeat,
             median_optimize_seconds=statistics.median(times),
             median_narrow_seconds=statistics.median(narrowed),
-            representation_sha256=digest, automatic_gc_during_benchmark=False)), flush=True)
+            representation_sha256=digest, automatic_gc_during_benchmark=False)
+        if args.emit_cpp:
+            started = time.perf_counter()
+            cpp = emit.emit_cpp(result).encode()
+            summary.update(emit_seconds=time.perf_counter() - started,
+                           emitted_cpp_bytes=len(cpp),
+                           emitted_cpp_sha256=hashlib.sha256(cpp).hexdigest())
+        print(json.dumps(summary), flush=True)
     finally:
         opt._narrow_bit_slices = original
         if enabled:
