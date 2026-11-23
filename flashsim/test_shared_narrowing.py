@@ -15,6 +15,22 @@ def shared_sum(expr, depth):
     return expr
 
 
+def test_slice_use_counts_match_exact_counts_across_wide_shared_cones():
+    single = ir.Id("single")
+    shared = shared_sum(ir.Id("many"), 80)
+    assigns = {
+        **{name: ir.Const(0, 1) for name in ("single", "many", "unused", "mixed")},
+        "cone": ir.Concat((single, shared, ir.Id("external"))),
+    }
+    body = [ir.If(ir.Id("condition"), [ir.NbAssign("state", ir.Id("mixed"))])]
+    writes = [ir.MemWrite("memory", ir.Id("address"), ir.Id("mixed"), ir.Const(1, 1))]
+    exact = opt._count_uses(assigns, body, writes)
+    assert exact["many"] == 1 << 80
+    assert opt._count_slice_uses(assigns, body, writes) == {
+        name: min(2, exact[name]) for name in assigns if name in exact
+    } == {"single": 1, "many": 2, "mixed": 2}
+
+
 def test_shared_extract_is_narrowed_once(monkeypatch):
     root = shared_sum(ir.Extract(ir.Id("value"), 0, 8), 12)
     original = opt._slice_src

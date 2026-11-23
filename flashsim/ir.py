@@ -407,13 +407,15 @@ def map_expr_memoized(
                 raise ValueError("cyclic expression graph")
             active.add(key)
             stack.append((node, children))
-            stack.extend((child, None) for child in reversed(children))
+            for child in reversed(children):
+                stack.append((child, None))
             continue
         active.remove(key)
-        mapped = tuple(memo[id(child)][1] for child in children)
         rebuilt = node
-        if any(a is not b for a, b in zip(children, mapped)):
-            rebuilt = _rebuild_expr(node, mapped)
+        for child in children:
+            if memo[id(child)][1] is not child:
+                rebuilt = _rebuild_expr(node, tuple(memo[id(part)][1] for part in children))
+                break
         memo[key] = (node, fn(rebuilt))
     return memo[id(expr)][1]
 
