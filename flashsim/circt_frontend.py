@@ -835,15 +835,17 @@ def _rename_expr(expr: Expr, rename: dict[str, str], memo=None) -> Expr:
                 raise ValueError("expression memo contains a foreign identity")
             continue
         if children is None:
-            if key in active:
-                raise ValueError("cyclic expression graph")
-            active.add(key)
             children = _expr_children(node)
-            stack.append((node, children))
-            stack.extend((child, None) for child in reversed(children)
-                         if not isinstance(child, _LEAF_EXPR_TYPES))
-            continue
-        active.remove(key)
+            composites = [child for child in children if not isinstance(child, _LEAF_EXPR_TYPES)]
+            if composites:
+                if key in active:
+                    raise ValueError("cyclic expression graph")
+                active.add(key)
+                stack.append((node, children))
+                stack.extend((child, None) for child in reversed(composites))
+                continue
+        else:
+            active.remove(key)
         mapped = tuple(_rename_leaf(child, rename, names)
                        if isinstance(child, _LEAF_EXPR_TYPES) else memo[id(child)][1]
                        for child in children)
