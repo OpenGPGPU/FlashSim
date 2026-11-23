@@ -459,6 +459,15 @@ size and reconstructs the original source. Compilation may become faster at
 the expense of runtime; validate the resulting model against a reference for
 the intended workload before drawing performance conclusions.
 
+On the assertion-enabled dual-CU OpenGPU `8a1919172` model, Apple Clang 16
+compiled `dut_extra_49_0002.cpp` in 665.0 seconds. Applying `optnone` to its
+single 63,504-line method took 48.2 seconds with the same precompiled header
+and `-O2` for the other methods. The variant used 3.70 GiB peak aggregate
+memory. Both objects exported the same 5,499 definitions, and the object
+size increased from 3.27 to 4.27 MB. This comparison covers one translation
+unit. Selecting these flags for a workload also requires measuring the
+linked simulator.
+
 The output directory must be new. The transformer splits complete generated
 methods and, when requested, an existing chunked commit dispatcher. It adds a
 header guard if needed and records hashes of the original and derived files
