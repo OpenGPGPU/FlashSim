@@ -139,11 +139,11 @@ def digest(path: Path) -> str:
 class _DigestReader(io.RawIOBase):
     """Hash the same blocks the verifier reads for structural checks."""
 
-    def __init__(self, source, joined, skip: int):
+    def __init__(self, source, consume, skip: int):
         super().__init__()
         self.source = source
         self.value = hashlib.sha256()
-        self.joined = joined
+        self.consume = consume
         self.skip = skip
 
     def readable(self) -> bool:
@@ -154,18 +154,18 @@ class _DigestReader(io.RawIOBase):
         if size:
             data = memoryview(block)[:size]
             self.value.update(data)
-            if self.joined is not None:
+            if self.consume is not None:
                 skipped = min(self.skip, size)
                 self.skip -= skipped
-                self.joined.update(data[skipped:])
+                self.consume(data[skipped:])
         return size
 
 
 @contextmanager
-def _checked_stream(path: Path, expected: str, error: str, *, joined=None, skip: int = 0):
+def _checked_stream(path: Path, expected: str, error: str, *, consume=None, skip: int = 0):
     # Keep hashing at block granularity even though callers inspect lines.
     with path.open("rb", buffering=0) as source:
-        reader = _DigestReader(source, joined, skip)
+        reader = _DigestReader(source, consume, skip)
         with io.BufferedReader(reader, buffer_size=1024 * 1024) as stream:
             try:
                 yield stream
@@ -491,6 +491,87 @@ def create(source: Path, out: Path, *, maximum: int, commit_parts: int,
         raise
 
 
+def _verify_method_parts(source: Path, out: Path, record, unoptimized: list[str],
+                         *, paired: bool, localized: str | None) -> None:
+    name = source.name
+    expected_input = record["input_sha256"][name]
+    joined = hashlib.sha256()
+    seen_optnone = []
+    annotated = bool(unoptimized)
+    with ExitStack() as stack:
+        original = stack.enter_context(source.open("rb")) if paired else None
+        matches_original = True
+        consume = None if annotated else joined.update
+        if original is not None:
+            def compare_and_hash(data):
+                nonlocal matches_original
+                joined.update(data)
+                if matches_original:
+                    # The read is at most len(data) bytes. startswith compares
+                    # the live buffer directly and rejects a short read.
+                    matches_original = original.read(len(data)).startswith(data)
+
+            consume = compare_and_hash
+
+        for i, part in enumerate(record["method_parts"][name]):
+            # Subsequent parts repeat the include. Annotated parts also need
+            # their tool-inserted lines removed from the reconstructed digest.
+            with _checked_stream(out / part, record["output_sha256"][part],
+                                 "reshard output differs from its manifest",
+                                 consume=consume, skip=len(INCLUDE) if i else 0) as stream:
+                if stream.readline() != INCLUDE:
+                    raise ValueError("derived shard is missing its include")
+                if annotated and not i:
+                    joined.update(INCLUDE)
+                in_method = False
+                while line := stream.readline():
+                    marked = False
+                    if not in_method and line == OPTNONE_LINES[0]:
+                        for expected_line in OPTNONE_LINES[1:]:
+                            if stream.readline() != expected_line:
+                                raise ValueError("invalid optnone annotation")
+                        line = stream.readline()
+                        marked = True
+                    if not in_method:
+                        match = METHOD.fullmatch(line)
+                        if match:
+                            if match.group(1).decode("ascii") != record["class"]:
+                                raise ValueError("derived shard contains another DUT class")
+                            method = match.group(2).decode("ascii")
+                            if marked:
+                                seen_optnone.append(method)
+                            if marked != (method in unoptimized):
+                                raise ValueError("derived method has incorrect optnone annotation")
+                            in_method = True
+                        elif marked:
+                            raise ValueError("optnone annotation has no method")
+                        elif line.strip():
+                            raise ValueError("derived shard contains top-level content")
+                    elif line == b"}\n":
+                        in_method = False
+                    elif line[:1] not in (b" ", b"\t", b"\n", b"\r"):
+                        raise ValueError("derived shard has unindented method content")
+                    if annotated:
+                        joined.update(line)
+                if in_method:
+                    raise ValueError("derived shard ends within a method")
+        if original is not None and (not matches_original or original.read(1)):
+            # On a mismatch, determine which side differs from the receipt.
+            if digest(source) != expected_input:
+                raise ValueError("reshard input differs from its manifest")
+            raise ValueError("derived methods do not reconstruct " + name)
+
+    expected = expected_input if localized is None else localized
+    if joined.hexdigest() != expected:
+        if paired:
+            # Equality with the entire original stream has already been
+            # checked, so the reconstructed digest also binds the input.
+            raise ValueError("reshard input differs from its manifest")
+        raise ValueError("derived methods do not reconstruct " + name)
+    if seen_optnone != unoptimized:
+        raise ValueError("derived optnone methods differ from original order")
+
+
 def verify(source: Path, out: Path) -> None:
     source, out = source.resolve(), out.resolve()
     record = json.loads((out / MANIFEST).read_text())
@@ -499,8 +580,7 @@ def verify(source: Path, out: Path) -> None:
         raise ValueError("reshard transformer differs from its manifest")
     inputs = _files(source)
     input_hashes = record["input_sha256"]
-    if ({p.name for p in inputs} != set(input_hashes) or
-            any(digest(p) != input_hashes[p.name] for p in inputs[1:])):
+    if {p.name for p in inputs} != set(input_hashes):
         raise ValueError("reshard input differs from its manifest")
     local = record.get("local_store_helpers", False)
     if not isinstance(local, bool):
@@ -520,17 +600,22 @@ def verify(source: Path, out: Path) -> None:
             [f"dut_invalidation_part{index:04d}.cpp" for index in range(len(invalidation_outputs))]
             or (invalidation_outputs and not outline)):
         raise ValueError("invalid invalidation data shard paths")
+    numbered = {p.name for p in inputs if NUMBERED.fullmatch(p.name)}
+    threshold = record.get("optnone_bytes", 0)
+    if not isinstance(threshold, int) or threshold < 0:
+        raise ValueError("invalid optnone threshold")
+    # Plain splits can prove the original digest using the byte-identical
+    # reconstructed stream. Other transformations still hash the input first.
+    paired = numbered if not local and not threshold else set()
+    if any(digest(p) != input_hashes[p.name] for p in inputs[1:] if p.name not in paired):
+        raise ValueError("reshard input differs from its manifest")
     stores = _LocalStores(source, record["class"]) if local else None
     if stores is not None:
         if record.get("local_store_count") != len(stores.parts):
             raise ValueError("local store helper count differs")
         _no_other_store_references(inputs)
-    numbered = {p.name for p in inputs if NUMBERED.fullmatch(p.name)}
     if set(record["method_parts"]) != numbered or not 1 <= record["commit_parts"] <= 64:
         raise ValueError("reshard manifest does not cover the original methods")
-    threshold = record.get("optnone_bytes", 0)
-    if not isinstance(threshold, int) or threshold < 0:
-        raise ValueError("invalid optnone threshold")
     unoptimized = {p.name: _large_methods(p, threshold) for p in inputs if NUMBERED.fullmatch(p.name)}
     if record.get("optnone_methods", {name: [] for name in numbered}) != unoptimized:
         raise ValueError("optnone methods do not match the original source")
@@ -600,57 +685,9 @@ def verify(source: Path, out: Path) -> None:
         localized = {p.name: _localized_digest(p, stores) for p in inputs
                      if NUMBERED.fullmatch(p.name)}
         stores.finish()
-    for name, parts in record["method_parts"].items():
-        joined = hashlib.sha256()
-        seen_optnone = []
-        annotated = bool(unoptimized[name])
-        for i, part in enumerate(parts):
-            # Plain method streams only lose the repeated include lines.
-            # Annotated ones are hashed after skipping their extra lines.
-            with _checked_stream(out / part, output_hashes[part],
-                                 "reshard output differs from its manifest",
-                                 joined=None if annotated else joined, skip=len(INCLUDE) if i else 0) as stream:
-                if stream.readline() != INCLUDE:
-                    raise ValueError("derived shard is missing its include")
-                if annotated and not i:
-                    joined.update(INCLUDE)
-                in_method = False
-                while line := stream.readline():
-                    marked = False
-                    if not in_method and line == OPTNONE_LINES[0]:
-                        for expected_line in OPTNONE_LINES[1:]:
-                            if stream.readline() != expected_line:
-                                raise ValueError("invalid optnone annotation")
-                        line = stream.readline()
-                        marked = True
-                    if not in_method:
-                        match = METHOD.fullmatch(line)
-                        if match:
-                            if match.group(1).decode("ascii") != record["class"]:
-                                raise ValueError("derived shard contains another DUT class")
-                            method = match.group(2).decode("ascii")
-                            if marked:
-                                seen_optnone.append(method)
-                            if marked != (method in unoptimized[name]):
-                                raise ValueError("derived method has incorrect optnone annotation")
-                            in_method = True
-                        elif marked:
-                            raise ValueError("optnone annotation has no method")
-                        elif line.strip():
-                            raise ValueError("derived shard contains top-level content")
-                    elif line == b"}\n":
-                        in_method = False
-                    elif line[:1] not in (b" ", b"\t", b"\n", b"\r"):
-                        raise ValueError("derived shard has unindented method content")
-                    if annotated:
-                        joined.update(line)
-                if in_method:
-                    raise ValueError("derived shard ends within a method")
-        expected_digest = localized[name] if stores is not None else record["input_sha256"][name]
-        if joined.hexdigest() != expected_digest:
-            raise ValueError("derived methods do not reconstruct " + name)
-        if seen_optnone != unoptimized[name]:
-            raise ValueError("derived optnone methods differ from original order")
+    for name in record["method_parts"]:
+        _verify_method_parts(source / name, out, record, unoptimized[name],
+                             paired=name in paired, localized=localized.get(name))
     if record["commit_parts"] > 1 or blocks:
         header_dir = source if outline else out
         header = (header_dir / "dut.h").read_text() if blocks else None

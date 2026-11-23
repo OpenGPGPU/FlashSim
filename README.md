@@ -434,12 +434,23 @@ and method bodies.
 Reshard verification hashes the original header while reconstructing the
 derived header and data tables. It hashes each method shard while checking
 its boundaries and reconstructing the original method stream.
+For plain splits, verification compares the reconstructed method stream with
+the original file as it checks the parts. One SHA-256 digest binds the shared
+stream. Verification also checks each part's digest and the original end of
+file. On the model above, this avoids a separate digest of 8.49 GB of numbered
+method sources.
 
 Two pairs on ARM64 macOS with Python 3.14.7 verified the same complete header,
 all invalidation data and the six largest method groups from OpenGPU
 `8a1919172`. Median verification time went from 12.33 to 11.80 seconds.
 The sample saves 4.20 GB of repeated reads. The corresponding header and
 method files in the complete model contain 10.72 GB.
+
+The plain-split comparison was measured against `99a22e8` on the complete
+OpenGPU model with 86 original files and 285 derived files. Both revisions
+verified the same bytes in two alternating pairs on ARM64 macOS with Python
+3.14.7. Median verification fell from 30.59 to 26.75 seconds, and the new
+verifier used about 64 MiB peak RSS.
 
 To reproduce, create a derived directory with each tool revision and time its
 verification on the same original C++ input:
