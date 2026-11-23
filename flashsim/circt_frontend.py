@@ -21,6 +21,7 @@ from flashsim.ir import (
     Const,
     Expr,
     Extract,
+    If,
     Id,
     MemRead,
     MemWrite,
@@ -29,6 +30,9 @@ from flashsim.ir import (
     Signal,
     Ternary,
     UnaryOp,
+    _LEAF_EXPR_TYPES,
+    _expr_children,
+    _rebuild_expr,
     map_observation,
 )
 from flashsim.toolchain import find_bin
@@ -797,53 +801,61 @@ class _RenameMemo(dict):
         self.names = {}
 
 
-def _rename_expr(expr: Expr, rename: dict[str, str], memo=None) -> Expr:
-    from flashsim.ir import _expr_children, _rebuild_expr
+def _rename_leaf(expr: Expr, rename: dict[str, str], names: dict[str, Id]) -> Expr:
+    if not isinstance(expr, Id):
+        return expr
+    name = expr.name
+    if (cached := names.get(name)) is not None:
+        return cached
+    if (mapped := rename.get(name)) is None:
+        return expr
+    renamed = Id(mapped)
+    names[name] = renamed
+    return renamed
 
+
+def _rename_expr(expr: Expr, rename: dict[str, str], memo=None) -> Expr:
     if memo is None:
         memo = _RenameMemo()
-
-    def leaf(node):
-        if isinstance(node, Id) and node.name in rename:
-            if node.name not in memo.names:
-                memo.names[node.name] = Id(rename[node.name])
-            return memo.names[node.name]
-        return node
-
-    if not _expr_children(expr):
-        return leaf(expr)
+    names = memo.names
+    if isinstance(expr, _LEAF_EXPR_TYPES):
+        return _rename_leaf(expr, rename, names)
+    root_key = id(expr)
+    if (cached := memo.get(root_key)) is not None:
+        if cached[0] is not expr:
+            raise ValueError("expression memo contains a foreign identity")
+        return cached[1]
     active = set()
-    stack = [(expr, False)]
+    stack = [(expr, None)]
     while stack:
-        node, ready = stack.pop()
+        node, children = stack.pop()
         key = id(node)
-        if key in memo:
-            if memo[key][0] is not node:
+        if (cached := memo.get(key)) is not None:
+            if cached[0] is not node:
                 raise ValueError("expression memo contains a foreign identity")
             continue
-        children = _expr_children(node)
-        if not ready:
+        if children is None:
             if key in active:
                 raise ValueError("cyclic expression graph")
             active.add(key)
-            stack.append((node, True))
-            stack.extend((child, False) for child in reversed(children)
-                         if _expr_children(child))
+            children = _expr_children(node)
+            stack.append((node, children))
+            stack.extend((child, None) for child in reversed(children)
+                         if not isinstance(child, _LEAF_EXPR_TYPES))
             continue
         active.remove(key)
-        mapped = tuple(memo[id(child)][1] if _expr_children(child) else leaf(child)
+        mapped = tuple(_rename_leaf(child, rename, names)
+                       if isinstance(child, _LEAF_EXPR_TYPES) else memo[id(child)][1]
                        for child in children)
         rebuilt = (_rebuild_expr(node, mapped)
                    if any(a is not b for a, b in zip(children, mapped)) else node)
         if isinstance(rebuilt, MemRead):
             rebuilt = MemRead(rename.get(rebuilt.mem, rebuilt.mem), rebuilt.addr)
         memo[key] = (node, rebuilt)
-    return memo[id(expr)][1]
+    return memo[root_key][1]
 
 
 def _rename_stmt(stmt, rename: dict[str, str], memo=None):
-    from flashsim.ir import If
-
     if memo is None:
         memo = _RenameMemo()
     if isinstance(stmt, NbAssign):
