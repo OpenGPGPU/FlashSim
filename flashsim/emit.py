@@ -6,6 +6,7 @@ import re
 import sys
 import zlib
 from collections import Counter, OrderedDict, defaultdict
+from collections.abc import Iterable
 from collections.abc import Set as AbstractSet
 from io import StringIO
 
@@ -477,19 +478,30 @@ def _promote_shared_inlines(
         stmt_exprs([stmt], exprs, _recur=stmt_exprs)
         stmt_roots.append(exprs)
 
+    def count_site(expressions: Iterable[Expr], sites: dict[str, int]) -> None:
+        seen: set[str] = set()
+        for expr in expressions:
+            pending = list(expr_ids(expr))
+            while pending:
+                name = pending.pop()
+                if name in seen or name in cached or name in stop or name not in assigns:
+                    continue
+                count = sites.get(name, 0)
+                if count == _SHARED_INLINE_MIN:
+                    # The earlier sites reached this wire and all of its
+                    # uncached dependencies. They already meet the threshold.
+                    continue
+                seen.add(name)
+                sites[name] = count + 1
+                pending.extend(expr_ids(assigns[name]))
+
     for _ in range(_SHARED_INLINE_ROUNDS):
-        sites: dict[str, int] = defaultdict(int)
+        sites: dict[str, int] = {}
         for name in sorted(cached):
-            if name not in assigns:
-                continue
-            for tmp in set(_uncached_needed(assigns[name], assigns, cached, stop)):
-                sites[tmp] += 1
+            if name in assigns:
+                count_site((assigns[name],), sites)
         for exprs in stmt_roots:
-            seen: set[str] = set()
-            for expr in exprs:
-                seen.update(_uncached_needed(expr, assigns, cached, stop))
-            for tmp in seen:
-                sites[tmp] += 1
+            count_site(exprs, sites)
         forced: list[str] = []
         extra: list[tuple[int, int, str]] = []
         for name, count in sites.items():
