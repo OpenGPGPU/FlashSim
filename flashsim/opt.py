@@ -211,7 +211,7 @@ def _optimize_owned(owned: list[Module]) -> Module:
             ]
         assigns, body = _dce(assigns, body, observed, mem_writes)
     if _LUT:
-        assigns = _apply_lut(assigns, sigs)
+        _apply_lut(assigns, sigs)
 
     referred = keep.copy()
     referred.update(assigns)
@@ -2720,30 +2720,6 @@ def _apply_used_bits(
     for name, sig in sigs.items():
         if sig.kind in {"output", "reg", "mem"}:
             used[name] = sig.width
-    body_pairs: list[tuple[Expr, int]] = []
-
-    def walk(stmts: list[Stmt], *, _recur) -> None:
-        for stmt in stmts:
-            if isinstance(stmt, NbAssign):
-                target = sigs.get(stmt.lhs)
-                body_pairs.append((stmt.rhs, target.width if target is not None else 32))
-            elif isinstance(stmt, If):
-                body_pairs.append((stmt.cond, 1))
-                _recur(stmt.then_body, _recur=_recur)
-                _recur(stmt.else_body, _recur=_recur)
-
-    walk(body, _recur=walk)
-    walk(reset_epilogue, _recur=walk)
-    for expr in observed_exprs:
-        body_pairs.append((expr, expr_width(expr, sigs)))
-    for wr in mem_writes:
-        try:
-            body_pairs.append((wr.addr, expr_width(wr.addr, sigs)))
-        except (KeyError, TypeError, ValueError):
-            body_pairs.append((wr.addr, 32))
-        mem = sigs.get(wr.mem)
-        body_pairs.append((wr.data, mem.width if mem is not None else 32))
-        body_pairs.append((wr.enable, 1))
     queue: deque[str] = deque()
     queued: set[str] = set()
 
@@ -2762,9 +2738,34 @@ def _apply_used_bits(
             used[name] = need
             enqueue(name)
 
-    for expr, need in body_pairs:
+    def demand(expr: Expr, need: int) -> None:
         for name, leaf_need in _expr_demands(expr, need, sigs).items():
             bump(name, leaf_need)
+
+    def walk(stmts: list[Stmt], *, _recur) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, NbAssign):
+                target = sigs.get(stmt.lhs)
+                demand(stmt.rhs, target.width if target is not None else 32)
+            elif isinstance(stmt, If):
+                demand(stmt.cond, 1)
+                _recur(stmt.then_body, _recur=_recur)
+                _recur(stmt.else_body, _recur=_recur)
+
+    # Seed the worklist as statements are visited, before propagating demands.
+    walk(body, _recur=walk)
+    walk(reset_epilogue, _recur=walk)
+    for expr in observed_exprs:
+        demand(expr, expr_width(expr, sigs))
+    for wr in mem_writes:
+        try:
+            width = expr_width(wr.addr, sigs)
+        except (KeyError, TypeError, ValueError):
+            width = 32
+        mem = sigs.get(wr.mem)
+        demand(wr.addr, width)
+        demand(wr.data, mem.width if mem is not None else 32)
+        demand(wr.enable, 1)
     for name, need in used.items():
         if need > 0:
             enqueue(name)
@@ -2774,8 +2775,7 @@ def _apply_used_bits(
         rhs = assigns.get(name)
         if rhs is None:
             continue
-        for leaf, leaf_need in _expr_demands(rhs, used[name], sigs).items():
-            bump(leaf, leaf_need)
+        demand(rhs, used[name])
     new_sigs: dict[str, Signal] = {}
     for name, sig in sigs.items():
         need = used.get(name, 0)
@@ -2883,8 +2883,8 @@ def _lut_eligible(expr: Expr, sigs: dict[str, Signal]) -> list[str] | None:
 
 
 @timed_phase('opt.lut')
-def _apply_lut(assigns: dict[str, Expr], sigs: dict[str, Signal]) -> dict[str, Expr]:
-    out: dict[str, Expr] = {}
+def _apply_lut(assigns: dict[str, Expr], sigs: dict[str, Signal]) -> None:
+    # Each replacement reads only its current expression and the signal table.
     for lhs, rhs in assigns.items():
         sig = sigs.get(lhs)
         replaced = rhs
@@ -2917,5 +2917,5 @@ def _apply_lut(assigns: dict[str, Expr], sigs: dict[str, Signal]) -> dict[str, E
                         table_const = Const(table, bits_width)
                         idx_expr: Expr = Id(leaves[0]) if len(leaves) == 1 else Concat(tuple(Id(name) for name in leaves))
                         replaced = Extract(BinOp(">>", table_const, idx_expr), 0, 1)
-        out[lhs] = replaced
-    return out
+        if replaced is not rhs:
+            assigns[lhs] = replaced
