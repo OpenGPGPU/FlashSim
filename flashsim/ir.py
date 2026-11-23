@@ -219,8 +219,11 @@ class IdSet(set):
         return iter(sorted(set.__iter__(self)))
 
 
+_LEAF_EXPR_TYPES = (Id, Const, ArrayZeros, ArrayConst)
+
+
 def _expr_children(node: Expr) -> tuple[Expr, ...]:
-    if isinstance(node, (Id, Const, ArrayZeros, ArrayConst)):
+    if isinstance(node, _LEAF_EXPR_TYPES):
         return ()
     if isinstance(node, (UnaryOp, Extract)):
         return (node.a,)
@@ -358,27 +361,28 @@ def map_expr_memoized(
     `map_expr` retains its per-occurrence visitor semantics.
     """
     if memo is None:
+        if isinstance(expr, _LEAF_EXPR_TYPES):
+            return fn(expr)
         memo = {}
     active: set[int] = set()
-    stack = [(expr, False)]
+    stack: list[tuple[Expr, tuple[Expr, ...] | None]] = [(expr, None)]
     while stack:
-        node, ready = stack.pop()
+        node, children = stack.pop()
         key = id(node)
         if key in memo:
             if memo[key][0] is not node:
                 raise ValueError("expression memo contains a foreign identity")
             continue
-        children = _expr_children(node)
-        if not children:
-            # Leaves still visit once, without a return pass or rebuild state.
-            memo[key] = (node, fn(node))
-            continue
-        if not ready:
+        if children is None:
+            children = _expr_children(node)
+            if not children:
+                memo[key] = (node, fn(node))
+                continue
             if key in active:
                 raise ValueError("cyclic expression graph")
             active.add(key)
-            stack.append((node, True))
-            stack.extend((child, False) for child in reversed(children))
+            stack.append((node, children))
+            stack.extend((child, None) for child in reversed(children))
             continue
         active.remove(key)
         mapped = tuple(memo[id(child)][1] for child in children)

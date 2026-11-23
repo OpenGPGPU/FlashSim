@@ -1243,6 +1243,23 @@ python3 -B scripts/bench_emit_buffers.py --flashsim "$PWD" --registers 150000
 The benchmark writes no model files. Its digest is for immediate byte comparison;
 keep only final results and reproduction commands after the comparison ends.
 
+The memoized expression visitor carries each node's children through its
+postorder rewrite and calls the visitor directly for an isolated leaf.
+On the assertion-enabled `L2MshrTable` hierarchy from OpenGPU `8a1919172`,
+three alternating pairs reduced median optimization time from 13.806 s to
+12.727 s (7.8%). Lowering, wire compaction, optimization and C++ emission took
+30.274 s and 28.910 s (4.5%). The optimized IR and 9,910,802 bytes of generated
+C++ matched in all six runs. These measurements cover the selected hierarchy.
+
+Compare baseline `670b3a9` and the candidate in fresh processes using the same
+CIRCT output. The command reports the optimization time and the IR digest.
+
+```sh
+PYTHONHASHSEED=73 python3 -B scripts/bench_narrow_pass.py "$OWNER_MLIR" \
+  --module L2MshrTable --hierarchy --preflatten-wires --repeat 1 \
+  --flashsim "$FLASH_CHECKOUT"
+```
+
 A 19-node shared sum stays at 19 nodes through renaming and folding, instead of
 expanding into hundreds of thousands of nodes. This does not establish complete
 GPU generation time or simulator throughput. Reproduce the graph regressions

@@ -23,6 +23,8 @@ def main():
     parser.add_argument('--repeat', type=int, default=3)
     parser.add_argument('--hierarchy', action='store_true',
                         help='include the selected module\'s original child instances')
+    parser.add_argument('--preflatten-wires', action='store_true',
+                        help='apply compiler wire compaction before flattening')
     parser.add_argument('--flashsim', type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
     if args.repeat < 1:
@@ -30,6 +32,7 @@ def main():
     source = args.flashsim.resolve(strict=True)
     sys.path.insert(0, str(source))
     from flashsim import circt_frontend as frontend, opt
+    from flashsim.preflatten import compact_module_wires
     for module in (frontend, opt):
         if not Path(module.__file__).resolve().is_relative_to(source / 'flashsim'):
             parser.error('compiler must come from the selected checkout')
@@ -56,7 +59,10 @@ def main():
             name = pending.pop()
             if name in library:
                 continue
-            library[name] = frontend._lower_module(modules[name])
+            lowered = frontend._lower_module(modules[name])
+            if args.preflatten_wires:
+                lowered = compact_module_wires(lowered)
+            library[name] = lowered
             if args.hierarchy:
                 pending.extend(child for _, _, child, _ in library[name].instances)
         del modules
