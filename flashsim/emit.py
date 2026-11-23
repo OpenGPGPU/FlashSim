@@ -507,6 +507,11 @@ def _promote_shared_inlines(
         stmt_exprs([stmt], exprs, _recur=stmt_exprs)
         stmt_roots.append(exprs)
 
+    # Promotion changes which wires a site stops at. The direct references of
+    # each binding are fixed across sites and rounds. Cache small lists after
+    # the second visit and bound the retained names on large models.
+    references: dict[str, tuple[str, ...]] = {}
+
     def count_site(expressions: Iterable[Expr], sites: dict[str, int]) -> None:
         seen: set[str] = set()
         for expr in expressions:
@@ -522,7 +527,17 @@ def _promote_shared_inlines(
                     continue
                 seen.add(name)
                 sites[name] = count + 1
-                pending.extend(expr_ids(assigns[name]))
+                children = references.get(name)
+                if children is None:
+                    dependencies = expr_ids(assigns[name])
+                    if not count or len(dependencies) > 32:
+                        pending.extend(dependencies)
+                        continue
+                    children = tuple(dependencies)
+                    if len(references) >= 16384:
+                        references.clear()
+                    references[name] = children
+                pending.extend(children)
 
     for _ in range(_SHARED_INLINE_ROUNDS):
         sites: dict[str, int] = {}
