@@ -54,3 +54,31 @@ def test_fresh_collector_reflects_a_changed_cached_set():
     body = [NbAssign('result', Id('temp'))]
     assert emit._UncachedTempCollector(set(), assigns, {'input'}).collect(body) == {'temp'}
     assert emit._UncachedTempCollector({'temp'}, assigns, {'input'}).collect(body) == set()
+
+
+def test_inline_site_count_stops_at_threshold_and_counts_each_statement_once(monkeypatch):
+    fat = Id('input')
+    for _ in range(12):
+        fat = BinOp('+', fat, Const(1))
+    shared = BinOp('&', Id('leaf'), Id('stop'))
+    assigns = {'shared': shared, 'leaf': Id('input'), 'once': fat, 'twice': fat,
+               'stop': Id('blocked'), 'blocked': Const(0)}
+    roots = {f'root_{index}': Id('shared') for index in range(40)}
+    assigns.update(roots)
+    cached = set(roots)
+    body = [If(Id('stop'), [NbAssign('q', Id('once')) for _ in range(32)], []),
+            NbAssign('q', Id('twice')), NbAssign('q', Id('twice'))]
+    original = emit.expr_ids
+    shared_walks = 0
+
+    def counted(expr):
+        nonlocal shared_walks
+        if expr is shared:
+            shared_walks += 1
+        return original(expr)
+
+    monkeypatch.setattr(emit, 'expr_ids', counted)
+    monkeypatch.setattr(emit, '_SHARED_INLINE_ROUNDS', 1)
+    emit._promote_shared_inlines(body, assigns, cached, {'input', 'stop'})
+    assert cached == set(roots) | {'shared', 'leaf', 'twice'}
+    assert shared_walks == emit._SHARED_INLINE_MIN
