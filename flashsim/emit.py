@@ -3781,7 +3781,7 @@ _SPLIT_CORE = frozenset(
 _SPLIT_OWN_FILE = frozenset({"_commit"})
 
 _METHOD_START_RE = re.compile(
-    r"^  ((?:__attribute__\(\(noinline\)\) )?)void ([A-Za-z_][A-Za-z0-9_]*)\(\) \{(})?$"
+    r"^  ((?:__attribute__\(\(noinline\)\) )?)void ([A-Za-z_][A-Za-z0-9_]*)\(\) \{(})?(?=\n*\Z)"
 )
 _CPP_STRING_LITERAL_RE = re.compile(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*' ''', re.VERBOSE)
 
@@ -4353,7 +4353,7 @@ def _split_dut_lines(
 
     line = next(lines, None)
     while line is not None:
-        mm = _METHOD_START_RE.match(line.rstrip("\n"))
+        mm = _METHOD_START_RE.match(line)
         if not mm:
             out_lines.append(line)
             line = next(lines, None)
@@ -4390,15 +4390,9 @@ def _split_dut_lines(
         out_lines.append(f"  {attr}void {name}();\n")
         if trailing_blank:
             out_lines.append(trailing_blank)
-        # Convert `  void name() {` / attr form → `void Class::name() {`
-        first = body_lines[0]
-        first = re.sub(
-            r"^  ((?:__attribute__\(\(noinline\)\) )?)void "
-            + re.escape(name)
-            + r"\(\) \{",
-            rf"void {cls}::{name}() {{",
-            first,
-        )
+        # The start match already covers the in-class signature. Reuse its
+        # end offset so the original line ending follows the definition.
+        first = f"void {cls}::{name}() {{" + body_lines[0][mm.end():]
         # Dedent body by 2 spaces (class indent)
         converted = [first]
         for bl in body_lines[1:]:

@@ -1331,6 +1331,49 @@ PYTHONHASHSEED=73 FLASHSIM_COMMIT_PARTS=16 FLASHSIM_PHASE_TIMINGS=1 \
 Use the same script and MLIR with `FLASH_CHECKOUT` set to baseline `fb2802c`
 and the current checkout.
 
+The C++ splitter reuses the parsed method signature when writing out-of-line
+definitions. A 48.7 MB sample of 2,745 methods from the assertion-enabled
+dual-CU OpenGPU `8a1919172` model took 0.352 seconds at `9ccf025` and
+0.225 seconds with signature reuse. The medians use three fresh Python 3.14.7
+processes per revision on ARM64 macOS. The reconstructed header and all 64
+shards matched byte for byte. The timing covers splitting those methods.
+
+Run this command in each FlashSim checkout against the same resharded model:
+
+```sh
+python3 -B - "$RESHARDED_DUT" <<'PY'
+import hashlib
+from pathlib import Path
+import sys
+from time import monotonic
+from flashsim.emit import _split_dut_lines
+
+directory = Path(sys.argv[1])
+cls = 'GpuHostSystemAxiDut'
+prefix = 'void ' + cls + '::'
+
+def methods():
+    yield f'struct {cls} {{\n'
+    for name in ('dut_10.cpp', 'dut_12.cpp', 'dut_extra_49_0002.cpp'):
+        with (directory / name).open() as stream:
+            assert stream.readline() == '#include "dut.h"\n'
+            for line in stream:
+                if line.startswith(prefix):
+                    yield '  void ' + line[len(prefix):]
+                elif line != '\n':
+                    yield '  ' + line
+                else:
+                    yield line
+    yield '};\n'
+
+started = monotonic()
+header, shards = _split_dut_lines(cls, methods(), 64)
+print(monotonic() - started)
+print([hashlib.sha256(text.encode()).hexdigest()
+       for _, text in [('dut.h', header), *shards]])
+PY
+```
+
 SOP simplification follows dependencies reachable from candidate OR
 assignments and reuses bounded width results. Constant folding updates the
 optimizer's private assignment table in place. Final validation reuses the
