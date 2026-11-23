@@ -89,7 +89,7 @@ static unsigned log2(unsigned n) {unsigned r=0; while(n>1) {n>>=1; ++r;} return 
 static uint64_t all_strobes() {return UINT64_MAX >> (64 - M_AXI_BYTES);}
 static void reset() {
   dut = {}; g_wbeats.clear(); g_bresp.clear(); g_rresp.clear();
-  g_aw_active=false; calls=fail_call=0; memory.fill(0xaa);
+  g_aw_active=false; g_mem_drive_pending=true; calls=fail_call=0; memory.fill(0xaa);
   g_mem_write_cb=write_cb;
 }
 static void write(unsigned size, unsigned lane, uint64_t mask, bool last=true) {
@@ -107,6 +107,11 @@ int main() {
   assert(calls==(M_AXI_BYTES+WRITE_CALLBACK_BYTES-1)/WRITE_CALLBACK_BYTES &&
          g_bresp.size()==1 && g_bresp.front().resp==0);
   for(unsigned i=0;i<M_AXI_BYTES;++i) assert(memory[256+i]==i+1);
+  assert(mem_drive() && dut.io_m_axi_bvalid && dut.io_m_axi_bid==7);
+  assert(!mem_drive());
+  mem_consume(true,false);
+  assert(mem_drive() && !dut.io_m_axi_bvalid);
+  assert(!mem_drive());
   reset(); unsigned sparse=M_AXI_BYTES-1;
   write(M_AXI_BYTES,0,UINT64_C(1)<<sparse);
   assert(calls==1 && g_bresp.front().resp==0);
@@ -171,13 +176,17 @@ int main() {
       mem_drive();assert(dut.io_m_axi_rvalid && dut.io_m_axi_rid==9+j);
       assert(dut.io_m_axi_rdata[0]==17+j && dut.io_m_axi_rlast);
     }
-    g_rresp.pop_front();
+    mem_consume(false,true);
   }
-  mem_drive();assert(!dut.io_m_axi_rvalid);
+  assert(mem_drive() && !dut.io_m_axi_rvalid);
   // Admission remains bounded even if the consumer never drains R.
-  for(unsigned j=0;j<64;++j)g_rresp.push_back({});
-  mem_drive();assert(!dut.io_m_axi_arready);
-  g_rresp.pop_front();mem_drive();assert(dut.io_m_axi_arready);
+  dut.io_m_axi_arvalid=true; dut.io_m_axi_araddr=256; dut.io_m_axi_arid=9;
+  dut.io_m_axi_arsize=2; dut.io_m_axi_arlen=63;
+  mem_capture();
+  assert(mem_drive() && !dut.io_m_axi_arready);
+  assert(!mem_drive());
+  mem_consume(false,true);
+  assert(mem_drive() && dut.io_m_axi_arready);
 }
 """
     source = tmp_path / "check.cpp"
