@@ -16,7 +16,7 @@ import os
 import re
 import sys
 from collections import ChainMap, Counter, deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import fields
 from functools import lru_cache
 from flashsim.phase_timing import phase, timed_phase
@@ -47,6 +47,7 @@ from flashsim.ir import (
     Stmt,
     Ternary,
     UnaryOp,
+    _expr_children as _ir_expr_children,
     expr_id_counts,
     expr_ids,
     expr_width,
@@ -419,34 +420,72 @@ def _fold_node(expr: Expr) -> Expr:
     return expr
 
 
+def _use_roots(
+    assigns: dict[str, Expr],
+    body: list[Stmt],
+    mem_writes: list[MemWrite] | None = None,
+) -> Iterator[Expr]:
+    yield from assigns.values()
+    pending = list(reversed(body))
+    while pending:
+        stmt = pending.pop()
+        if isinstance(stmt, NbAssign):
+            yield stmt.rhs
+        elif isinstance(stmt, If):
+            yield stmt.cond
+            pending.extend(reversed(stmt.else_body))
+            pending.extend(reversed(stmt.then_body))
+        else:
+            raise TypeError(stmt)
+    for wr in mem_writes or []:
+        yield wr.addr
+        yield wr.data
+        yield wr.enable
+        yield Id(wr.mem)
+
+
 def _count_uses(
     assigns: dict[str, Expr],
     body: list[Stmt],
     mem_writes: list[MemWrite] | None = None,
 ) -> dict[str, int]:
     uses: dict[str, int] = {}
-
-    def add(expr: Expr) -> None:
+    for expr in _use_roots(assigns, body, mem_writes):
         for name, n in expr_id_counts(expr).items():
             uses[name] = uses.get(name, 0) + n
+    return uses
 
-    for expr in assigns.values():
-        add(expr)
-    for stmt in body:
-        if isinstance(stmt, NbAssign):
-            add(stmt.rhs)
-        elif isinstance(stmt, If):
-            add(stmt.cond)
-            nested = _count_uses({}, stmt.then_body + stmt.else_body)
-            for name, n in nested.items():
-                uses[name] = uses.get(name, 0) + n
-        else:
-            raise TypeError(stmt)
-    for wr in mem_writes or []:
-        add(wr.addr)
-        add(wr.data)
-        add(wr.enable)
-        uses[wr.mem] = uses.get(wr.mem, 0) + 1
+
+def _count_slice_uses(
+    assigns: dict[str, Expr], body: list[Stmt], mem_writes: list[MemWrite],
+) -> dict[str, int]:
+    # Narrowing only tests whether an assigned source has more than one use.
+    # Count the common small expressions directly without building a DAG
+    # index and a separate per-expression count table.
+    uses: dict[str, int] = {}
+
+    def add(name: str, count: int) -> None:
+        if name in assigns and (previous := uses.get(name, 0)) < 2:
+            uses[name] = min(2, previous + count)
+
+    for expr in _use_roots(assigns, body, mem_writes):
+        pending = [expr]
+        for _ in range(64):
+            if not pending:
+                break
+            node = pending.pop()
+            if isinstance(node, Id):
+                add(node.name, 1)
+            elif isinstance(node, MemRead):
+                add(node.mem, 1)
+                pending.append(node.addr)
+            else:
+                pending.extend(_ir_expr_children(node))
+        if pending:
+            # Count the unvisited paths together so a large shared cone
+            # still costs only one DAG walk, with exact path multiplicity.
+            for name, count in expr_id_counts(Concat(tuple(pending))).items():
+                add(name, count)
     return uses
 
 
@@ -1171,7 +1210,7 @@ def _narrow_bit_slices(
     mem_writes: list[MemWrite],
     sigs: dict[str, Signal],
 ) -> tuple[dict[str, Expr], list[Stmt], list[MemWrite]]:
-    uses = _count_uses(assigns, body, mem_writes)
+    uses = _count_slice_uses(assigns, body, mem_writes)
     fresh: dict[str, Expr] = {}
     cache: dict[tuple[str, int, int], Expr] = {}
     width_cache: dict[int, tuple[Expr, int]] = {}

@@ -1301,6 +1301,29 @@ An isolated fold of 500,000 identifier bindings eliminated 22 MiB of transient
 Python allocations for copying the binding table. Whole-host peak memory and
 simulation throughput require separate measurements.
 
+Bit-slice narrowing counts uses of assigned values only up to two. Small
+expressions use a direct walk and larger shared cones retain exact DAG
+multiplicity for the remaining paths. The expression mapper builds a new
+operand tuple only when a child changes.
+
+Two alternating pairs of fresh Python 3.14.7 processes used the same
+assertion-enabled dual-CU OpenGPU `8a1919172` MLIR and seed 73. The optimized
+IR and every C++ shard matched before and after for both hierarchies.
+
+| Hierarchy | Bit-slice narrowing | Total optimization |
+| --- | ---: | ---: |
+| `L2MshrTable` | 1.25 → 0.86 s | 11.06 → 8.95 s |
+| `GpuComputeUnitCore` | 8.01 → 7.53 s | 20.63 → 18.43 s |
+
+Peak aggregate memory varied across the pairs. Reproduce with each checkout
+at baseline `270f623` and the current revision, using the same existing MLIR:
+
+```sh
+PYTHONHASHSEED=73 FLASHSIM_COMMIT_PARTS=16 python3 -B scripts/bench_narrow_pass.py \
+  "$OWNER_MLIR" --module "$MODULE" --hierarchy --preflatten-wires \
+  --emit-cpp --shards 64 --repeat 1 --flashsim "$FLASH_CHECKOUT"
+```
+
 The commit-table transform locates literal prefixes before checking token and
 line boundaries. It also parses the decimal fields once and checks quotes
 without copying the commit body. On a 96 MiB prefix of the generated dual-CU
