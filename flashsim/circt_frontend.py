@@ -228,19 +228,25 @@ def _split_modules(src: str) -> list[_ParsedMod]:
     return mods
 
 
-def parse_hw_mlir(src: str, top: str | None = None, *, preflatten_wires: bool = False) -> Module:
-    src = re.sub(r"\{sv\.[^}]*\}", "", src)
+def parse_hw_mlir(src: str | Path, top: str | None = None, *, preflatten_wires: bool = False) -> Module:
+    """Lower CIRCT text or a cached MLIR file."""
     with phase('parse.split_modules'):
+        if isinstance(src, Path):
+            src = src.read_text()
+        src = re.sub(r"\{sv\.[^}]*\}", "", src)
         parsed = _split_modules(src)
+    del src
     if not parsed:
         raise CirctError("no hw.module found in CIRCT output")
+    default_top = next((m.name for m in reversed(parsed) if not m.private), parsed[-1].name)
     with phase('parse.lower_modules'):
-        by_name = {m.name: _lower_module(m) for m in parsed}
-    if top and top in by_name:
-        chosen = by_name[top]
-    else:
-        public = [m for m in parsed if not m.private]
-        chosen = by_name[(public[-1] if public else parsed[-1]).name]
+        by_name: dict[str, Module] = {}
+        parsed.reverse()
+        while parsed:
+            raw = parsed.pop()
+            by_name[raw.name] = _lower_module(raw)
+        del raw
+    chosen = by_name[top] if top and top in by_name else by_name[default_top]
     remaining, reachable = _reachable_instances(chosen, by_name)
     # Unreachable modules cannot contribute to this top. Releasing their IR and
     # completed children reduces the peak cost of flattening large hierarchies.
