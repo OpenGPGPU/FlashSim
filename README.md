@@ -133,6 +133,27 @@ Set `FLASHSIM_CIRCT_LARGEST_FIRST=1` with a CIRCT build that supports
 `--mlir-pass-schedule-largest-first`. Parallel MLIR passes dispatch larger
 modules first and report diagnostics in source order.
 
+File-based generation streams CIRCT stdout into a temporary MLIR file.
+FlashSim publishes the cache after the tool succeeds and rechecks the input
+fingerprint for asserted imports. Use the same CIRCT environment to prepare
+an asserted import ahead of model generation:
+
+```sh
+python3 -B - "$TOP_SV" "$OUT/hw.mlir" <<'PY'
+import sys
+from pathlib import Path
+from flashsim.compile import prepare_circt_mlir
+
+prepare_circt_mlir(Path(sys.argv[1]), Path(sys.argv[2]), assertions=True)
+PY
+```
+
+Transporting the same 243.7 MB dual-CU MLIR through subprocess stdout on
+ARM64 macOS reduced the measured Python process peak RSS from 837 to 28 MiB.
+Two alternating pairs of fresh Python 3.14.7 processes wrote and verified
+identical bytes. This isolates transfer and file writing from CIRCT lowering,
+MLIR parsing and C++ emission.
+
 `FLASHSIM_GC_POLICY=defer` optionally defers automatic Python cyclic garbage
 collection during `compile_verilog` and `compile_file`, including shard emission.
 Reference counting remains active; the caller's enabled/disabled GC state is
