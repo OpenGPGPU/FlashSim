@@ -1716,6 +1716,45 @@ _SOP_LITS_MAX = 64
 _SOP_FALSE = frozenset([("<false>", True)])
 
 
+def _sop_dependency_order(assigns: dict[str, Expr],
+                          candidates: dict[str, None]) -> list[str]:
+    def postorder(roots, detect_cycles: bool) -> list[str] | None:
+        order: list[str] = []
+        state: dict[str, int] = {}
+        for root in roots:
+            stack = [(root, False)]
+            while stack:
+                name, done = stack.pop()
+                if done:
+                    state[name] = 2
+                    if name in candidates:
+                        order.append(name)
+                    continue
+                if name in state:
+                    continue
+                state[name] = 1
+                stack.append((name, True))
+                expr = assigns[name]
+                dependencies = (expr.name,) if isinstance(expr, Id) else expr_ids(expr)
+                for dep in dependencies:
+                    if dep not in assigns:
+                        continue
+                    status = state.get(dep, 0)
+                    if not status:
+                        stack.append((dep, False))
+                    elif status == 1 and detect_cycles:
+                        return None
+        return order
+
+    # Only SOP candidates can change. Walk through their original dependencies,
+    # including aliases and wider nodes. Keep the old root order on feedback
+    # graphs, where changing the traversal roots can change the rewrite order.
+    order = postorder(candidates, detect_cycles=True)
+    if order is None:
+        order = postorder(assigns, detect_cycles=False)
+    return order
+
+
 @timed_phase('opt.merge_sop')
 def _merge_sop_terms(
     assigns: dict[str, Expr], sigs: dict[str, Signal]
@@ -1731,9 +1770,13 @@ def _merge_sop_terms(
     absorption until nothing changes.
     """
 
+    width_cache: dict[int, tuple[Expr, int]] = {}
+
     def bit(e: Expr) -> bool:
         try:
-            return expr_width(e, sigs) == 1
+            # This pass rewrites bindings while signal widths stay fixed.
+            # Cache overlapping nested operands across term and negation checks.
+            return _slice_width(e, sigs, width_cache) == 1
         except (KeyError, TypeError):
             return False
 
@@ -1893,37 +1936,20 @@ def _merge_sop_terms(
         return _and_chain(parts)
 
     negs: dict[Expr, Expr] = {}
+    candidates: dict[str, None] = {}
     for name, e in assigns.items():
+        if isinstance(e, BinOp) and e.op == "|":
+            sig = sigs.get(name)
+            if sig is not None and not sig.depth and sig.width == 1:
+                candidates[name] = None
         n = neg_of(e)
         if n is not None and name in sigs and not sigs[name].depth:
             negs.setdefault(resolve(n), Id(name))
 
-    order: list[str] = []
-    state: dict[str, int] = {}
-    for root in assigns:
-        stack = [(root, False)]
-        while stack:
-            name, done = stack.pop()
-            if done:
-                order.append(name)
-                continue
-            if state.get(name):
-                continue
-            state[name] = 1
-            stack.append((name, True))
-            for dep in expr_ids(assigns[name]):
-                if dep in assigns and not state.get(dep):
-                    stack.append((dep, False))
-
     out = assigns
     merged = 0
-    for name in order:
+    for name in _sop_dependency_order(assigns, candidates):
         e = out[name]
-        sig = sigs.get(name)
-        if sig is None or sig.depth or sig.width != 1:
-            continue
-        if not (isinstance(e, BinOp) and e.op == "|"):
-            continue
         parts = _flatten_op_limited(e, "|", _SOP_TERMS_MAX)
         if parts is None or len(parts) < 2 or not all(bit(p) for p in parts):
             continue
