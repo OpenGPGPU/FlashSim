@@ -242,8 +242,9 @@ def _expr_children(node: Expr) -> tuple[Expr, ...]:
     raise TypeError(type(node))
 
 
-def expr_ids(expr: Expr) -> IdSet:
-    names = IdSet()
+def expr_ids(expr: Expr, *, ordered: bool = True) -> set[str]:
+    """Find signal names, sorting on iteration when their order is observable."""
+    names = IdSet() if ordered else set()
     seen: set[int] = set()
     stack = [expr]
     while stack:

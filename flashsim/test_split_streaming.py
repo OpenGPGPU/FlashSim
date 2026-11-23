@@ -55,8 +55,15 @@ def test_explicit_split_preserves_constructor_and_releases_input(monkeypatch, mi
         assert all(ref() is None for ref in refs)
         return split(cls, lines, n_shards)
 
+    def emit_lines(mod, output):
+        output.extend(raw_lines[:3])
+        del raw_lines[:3]
+        assert all(ref() is None for ref in refs[:3])
+        output.extend(raw_lines)
+        raw_lines.clear()
+
     monkeypatch.setattr(emit, '_CPP_BLOCK_LINES', 3)
     monkeypatch.setattr(emit, '_BULK_CONSTRUCTOR_MIN_FIELDS', min_fields)
-    monkeypatch.setattr(emit, '_emit_cpp_lines', lambda mod: raw_lines)
+    monkeypatch.setattr(emit, '_emit_cpp_lines', emit_lines)
     monkeypatch.setattr(emit, '_split_dut_lines', check_split)
     assert emit.emit_split_cpp(SimpleNamespace(name='Sample'), 4) == expected
