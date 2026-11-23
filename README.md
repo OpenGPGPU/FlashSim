@@ -1270,6 +1270,35 @@ PYTHONHASHSEED=73 FLASHSIM_COMMIT_PARTS=16 FLASHSIM_PHASE_TIMINGS=1 \
 Use the same script and MLIR with `FLASH_CHECKOUT` set to baseline `fb2802c`
 and the current checkout.
 
+SOP simplification follows dependencies reachable from candidate OR
+assignments and reuses bounded width results. Constant folding updates the
+optimizer's private assignment table in place. Final validation reuses the
+dependencies gathered for signal selection. The emitter reuses small direct
+dependency lists across inline sites and promotion rounds.
+
+One fresh-process pair per hierarchy used the assertion-enabled OpenGPU
+`8a1919172` MLIR and Python 3.14.7. The serialized optimized IR and every
+generated C++ shard matched in both pairs.
+
+| Hierarchy | SOP before → after | Cached-wire selection before → after | C++ generation before → after |
+| --- | ---: | ---: | ---: |
+| `GpuComputeUnitCore` | 0.63 → 0.29 s | 2.41 → 2.22 s | 9.76 → 9.54 s |
+| `BankedShaderPayloadStore` | 0.27 → 0.13 s | 1.92 → 1.55 s | 7.85 → 7.53 s |
+
+An isolated fold of 500,000 identifier bindings eliminated 22 MiB of transient
+Python allocations for copying the binding table. Whole-host peak memory and
+simulation throughput require separate measurements.
+
+Select `GpuComputeUnitCore` or `BankedShaderPayloadStore` as `MODULE` and run
+the same command with baseline `39c920f` and the updated checkout.
+
+```sh
+PYTHONHASHSEED=73 FLASHSIM_COMMIT_PARTS=16 FLASHSIM_PHASE_TIMINGS=1 \
+  python3 -B scripts/bench_narrow_pass.py "$OWNER_MLIR" \
+  --module "$MODULE" --hierarchy --preflatten-wires --emit-cpp --shards 64 \
+  --repeat 1 --flashsim "$FLASH_CHECKOUT"
+```
+
 The memoized expression visitor carries each node's children through its
 postorder rewrite and calls the visitor directly for an isolated leaf.
 On the assertion-enabled `L2MshrTable` hierarchy from OpenGPU `8a1919172`,
