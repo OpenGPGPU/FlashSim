@@ -566,22 +566,30 @@ def test_invalidation_tables_share_immutable_pages_in_leaf_order() -> None:
     pending = {"z": next_pages, "d": list(first), "c": [3, 1], "a": first}
     pages, tables = em._freeze_invalidation_tables(pending)
     assert not pending
-    assert pages == {"a": tuple(first), "c": (3, 1), "d": tuple(first),
-                     "z": tuple(next_pages)}
+    first_table = em._InvalidationTable(0, len(first))
+    assert pages == {"a": first_table, "c": (3, 1), "d": first_table,
+                     "z": em._InvalidationTable(1, len(next_pages))}
     assert pages["a"] is pages["d"]
-    assert list(tables.items()) == [(tuple(first), 0), (tuple(next_pages), 1)]
+    assert tables.popleft() == tuple(first)
+    assert tables.popleft() == tuple(next_pages)
+    assert not tables
+
+    lines: list[str] = []
+    em._emit_bump_sig(pages["d"], (), lines, 2, once=True)
+    assert "_bst[0] != _bep" in lines[0]
+    assert "fs_bump(_pg, _inv0, 7u);" in lines[0]
 
 
 def test_bump_sig_stable_for_commit_batching() -> None:
     from flashsim import emit as em
 
     em._LEAF_HOLDS = {"a": [1, 2, 3], "b": [1, 2, 3], "c": [9]}
-    leaf_parts = {"a": [10, 11], "b": [10, 11], "c": []}
+    leaf_parts = {"a": (10, 11), "b": (10, 11), "c": ()}
     assert em._bump_sig("a", leaf_parts) == em._bump_sig("b", leaf_parts)
     assert em._bump_sig("a", leaf_parts) != em._bump_sig("c", leaf_parts)
     lines: list[str] = []
     em._HOLD_WAKE_TABLES = {}
-    em._emit_bump_sig((10, 11), (1, 2, 3), {}, lines, 2)
+    em._emit_bump_sig((10, 11), (1, 2, 3), lines, 2)
     assert any("_pg[10]++" in ln for ln in lines)
     assert any("_h_need[" in ln for ln in lines)
 
@@ -616,7 +624,7 @@ def test_page_gen_gates_idle_eager_demand() -> None:
 
     em._PAGE_GEN = True
     lines: list[str] = []
-    em._emit_bump_sig((3,), (), {}, lines, 4)
+    em._emit_bump_sig((3,), (), lines, 4)
     assert any("_pg[3]++;" in ln for ln in lines)
     assert any("_pg_gen++;" in ln for ln in lines)
     em._PAGE_GEN = False
@@ -701,19 +709,19 @@ def test_every_hold_wake_arms_the_summary_word() -> None:
 
     # Inline path: a handful of hold ids, one per 64-bit word.
     lines: list[str] = []
-    emit._emit_bump_sig((), (0, 1, 63, 64, 130), {}, lines, 4)
+    emit._emit_bump_sig((), (0, 1, 63, 64, 130), lines, 4)
     assert lines, "no inline wake emitted"
     assert arms_all(lines), lines
 
     # Packed word-mask path.
     emit._HOLD_WAKE_PACKED = {(0,) * 65: 0}
     lines = []
-    emit._emit_bump_sig((), (0,) * 65, {}, lines, 4)
+    emit._emit_bump_sig((), (0,) * 65, lines, 4)
     assert any("fs_wake_mask(_h_need, _h_any," in ln for ln in lines), lines
 
     # Bit-list path.
     emit._HOLD_WAKE_PACKED = {}
     emit._HOLD_WAKE_TABLES = {tuple(range(10)): 0}
     lines = []
-    emit._emit_bump_sig((), tuple(range(10)), {}, lines, 4)
+    emit._emit_bump_sig((), tuple(range(10)), lines, 4)
     assert any("fs_wake(_h_need, _h_any," in ln for ln in lines), lines

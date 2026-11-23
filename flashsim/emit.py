@@ -6,7 +6,7 @@ import re
 import sys
 import zlib
 from collections import Counter, OrderedDict, defaultdict, deque
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from io import StringIO
@@ -1568,23 +1568,35 @@ def _wake_pack_enabled() -> bool:
     return os.environ.get("FLASHSIM_WAKE_PACK", _WAKE_PACK_DEFAULT) != "0"
 
 
+@dataclass(frozen=True, slots=True)
+class _InvalidationTable:
+    index: int
+    size: int
+
+
+_LeafPages = tuple[int, ...] | _InvalidationTable
+
+
 def _freeze_invalidation_tables(
     pending: dict[str, list[int]],
-) -> tuple[dict[str, tuple[int, ...]], dict[tuple[int, ...], int]]:
+) -> tuple[dict[str, _LeafPages], deque[tuple[int, ...]]]:
     # Sorted, not insertion order: leaf_parts is discovered by walking a set of
     # wire names, so its order follows PYTHONHASHSEED. Numbering the tables by
     # discovery order makes the emitted C++ differ between two runs of the same
     # input, which defeats ccache and makes a binary unreproducible from source.
-    leaf_parts: dict[str, tuple[int, ...]] = {}
-    tables: dict[tuple[int, ...], tuple[int, ...]] = {}
+    leaf_parts: dict[str, _LeafPages] = {}
+    tables: dict[tuple[int, ...], _InvalidationTable] = {}
     for leaf in sorted(pending):
         # Take ownership of each list individually. Keeping both complete
         # collections alive would duplicate the page references.
         pages = tuple(pending.pop(leaf))
         if len(pages) > _BUMP_INLINE:
-            pages = tables.setdefault(pages, pages)
-        leaf_parts[leaf] = pages
-    return leaf_parts, {pages: index for index, pages in enumerate(tables)}
+            # Each leaf needs only the emitted table's index and extent.
+            leaf_parts[leaf] = tables.setdefault(
+                pages, _InvalidationTable(len(tables), len(pages)))
+        else:
+            leaf_parts[leaf] = pages
+    return leaf_parts, deque(tables)
 
 
 def _cond_stop_leaves(
@@ -1751,38 +1763,36 @@ def _hold_wake_sparse(
 
 
 def _bump_sig(
-    leaf: str, leaf_parts: Mapping[str, Sequence[int]]
-) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    leaf: str, leaf_parts: Mapping[str, _LeafPages]
+) -> tuple[_LeafPages, tuple[int, ...]]:
     """Invalidation + wake signature for a committed leaf."""
-    return (tuple(leaf_parts.get(leaf, ())), tuple(_LEAF_HOLDS.get(leaf, ())))
+    return (leaf_parts.get(leaf, ()), tuple(_LEAF_HOLDS.get(leaf, ())))
 
 
 def _emit_bump_sig(
-    parts: tuple[int, ...],
+    parts: _LeafPages,
     holds: tuple[int, ...],
-    tables: dict[tuple[int, ...], int],
     lines: list[str],
     indent: int,
     once: bool = False,
 ) -> None:
     sp = " " * indent
-    if parts:
-        if len(parts) <= _BUMP_INLINE:
-            for p in parts:
-                lines.append(f"{sp}_pg[{p}]++;")
-                _note_page_gen(lines, indent)
-        elif once:
+    if isinstance(parts, _InvalidationTable):
+        i = parts.index
+        if once:
             # Pages are only compared for equality, so registers sharing a
             # table need one bump per commit, not one each.
-            i = tables[parts]
             gen = " _pg_gen++;" if _PAGE_GEN else ""
             lines.append(
                 f"{sp}if (_bst[{i}] != _bep) {{ _bst[{i}] = _bep; "
-                f"fs_bump(_pg, _inv{i}, {len(parts)}u);{gen} }}"
+                f"fs_bump(_pg, _inv{i}, {parts.size}u);{gen} }}"
             )
         else:
-            i = tables[parts]
-            lines.append(f"{sp}fs_bump(_pg, _inv{i}, {len(parts)}u);")
+            lines.append(f"{sp}fs_bump(_pg, _inv{i}, {parts.size}u);")
+            _note_page_gen(lines, indent)
+    else:
+        for p in parts:
+            lines.append(f"{sp}_pg[{p}]++;")
             _note_page_gen(lines, indent)
     if not holds:
         return
@@ -1821,8 +1831,6 @@ def _report_wake_locality(
     name: str,
     hold_buckets: list[tuple[str, list[Stmt]]],
     leaf_holds: dict[str, list[int]],
-    wire_part: dict[str, int],
-    leaf_parts: dict[str, tuple[int, ...]],
     always_body: list[Stmt],
 ) -> None:
     """FLASHSIM_WAKE_STATS=1: how much of the wake set is cross-partition.
@@ -1862,14 +1870,13 @@ def _report_wake_locality(
 
 def _bump_parts(
     leaf: str,
-    leaf_parts: dict[str, tuple[int, ...]],
-    tables: dict[tuple[int, ...], int],
+    leaf_parts: dict[str, _LeafPages],
     lines: list[str],
     indent: int,
     once: bool = False,
 ) -> None:
     parts, holds = _bump_sig(leaf, leaf_parts)
-    _emit_bump_sig(parts, holds, tables, lines, indent, once)
+    _emit_bump_sig(parts, holds, lines, indent, once)
     _emit_pass_wake(_LEAF_PASSES.get(leaf, ()), lines, indent)
 
 
@@ -2700,8 +2707,7 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
             region_holds = {k: sorted(v) for k, v in cut_map.items()}
             del memo, holds_map, cut_map
             _report_wake_locality(
-                mod.name, hold_buckets, leaf_holds, wire_part, leaf_parts,
-                always_body,
+                mod.name, hold_buckets, leaf_holds, always_body,
             )
     del wire_deps, cut
     with observe_phase('emit.pass_wakes'):
@@ -2976,8 +2982,10 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
         "  }",
         "}",
     ]
-    for key, idx in sorted(inv_tables.items(), key=lambda kv: kv[1]):
-        inner = ", ".join(str(p) for p in key)
+    inv_count = len(inv_tables)
+    # Release each page tuple as soon as its C++ definition is rendered.
+    for idx in range(inv_count):
+        inner = ", ".join(map(str, inv_tables.popleft()))
         lines.append(f"static const {page_index_type} _inv{idx}[] = {{{inner}}};")
     for key, idx in sorted(_HOLD_WAKE_TABLES.items(), key=lambda kv: kv[1]):
         inner = ", ".join(str(p) for p in key)
@@ -3088,8 +3096,8 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
     # is expensive" from "the wake set is too wide to skip" on a real host
     # workload, where wall clock alone cannot tell the two apart.
     lines.append("  uint64_t _nt = 0, _cc = 0, _hc = 0, _hb = 0;")
-    if inv_tables:
-        lines.append(f"  uint64_t _bep = 0, _bst[{len(inv_tables)}] = {{}};")
+    if inv_count:
+        lines.append(f"  uint64_t _bep = 0, _bst[{inv_count}] = {{}};")
     lines.append("")
     lines.append("  void poke_inputs() {")
     if in_span:
@@ -3124,7 +3132,7 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
             lines.append(f"    if (memcmp({name}, {name}__prev, sizeof({name}))) {{")
         else:
             lines.append(f"    if ({name} != {name}__prev) {{")
-        _bump_parts(name, leaf_parts, inv_tables, lines, 6)
+        _bump_parts(name, leaf_parts, lines, 6)
         if is_wide(width):
             lines.append(f"      memcpy({name}__prev, {name}, sizeof({name}));")
         else:
@@ -3226,20 +3234,20 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
                 sp = " " * indent
                 if is_wide(sig.width):
                     lines.append(f"{sp}if (memcmp({name}__n, {name}, sizeof({name}))) {{")
-                    _bump_parts(name, leaf_parts, inv_tables, lines, indent + 2, True)
+                    _bump_parts(name, leaf_parts, lines, indent + 2, True)
                     lines.append(f"{sp}  _chg++;")
                     lines.append(f"{sp}  memcpy({name}, {name}__n, sizeof({name}));")
                     lines.append(f"{sp}}}")
                 else:
                     lines.append(f"{sp}if ({name}__n != {name}) {{")
-                    _bump_parts(name, leaf_parts, inv_tables, lines, indent + 2, True)
+                    _bump_parts(name, leaf_parts, lines, indent + 2, True)
                     lines.append(f"{sp}  _chg++;")
                     lines.append(f"{sp}  {name} = {name}__n;")
                     lines.append(f"{sp}}}")
 
             lines.append("  void _commit() {")
             lines.append("    _cc += _nw;")
-            if inv_tables:
+            if inv_count:
                 lines.append("    _bep++;")
             lines.append("    for (unsigned i = 0; i < _nw; i++) {")
             if hot_idx:
@@ -3264,13 +3272,13 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
                     lines.append(
                         f"        if (memcmp({name}__n, {name}, sizeof({name}))) {{"
                     )
-                    _bump_parts(name, leaf_parts, inv_tables, lines, 10, True)
+                    _bump_parts(name, leaf_parts, lines, 10, True)
                     lines.append("          _chg++;")
                     lines.append(f"          memcpy({name}, {name}__n, sizeof({name}));")
                     lines.append("        }")
                 else:
                     lines.append(f"        if ({name}__n != {name}) {{")
-                    _bump_parts(name, leaf_parts, inv_tables, lines, 10, True)
+                    _bump_parts(name, leaf_parts, lines, 10, True)
                     lines.append("          _chg++;")
                     lines.append(f"          {name} = {name}__n;")
                     lines.append("        }")
@@ -3647,7 +3655,7 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
             # zero, so an empty dirty list must not enter the function. `_bep`
             # still advances: it is the per-tick bump epoch, and a later
             # commit of the same signal has to see a new epoch.
-            if inv_tables:
+            if inv_count:
                 lines.append("    if (_nw) _commit(); else _bep++;")
             else:
                 lines.append("    if (_nw) _commit();")
@@ -3660,7 +3668,7 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
             ac_body.append(
                 f"    if (_ac[{idx}] && memcmp({name}__n, {name}, sizeof({name}))) {{"
             )
-            _bump_parts(name, leaf_parts, inv_tables, ac_body, 6)
+            _bump_parts(name, leaf_parts, ac_body, 6)
             ac_body.append("      _chg++;")
             ac_body.append(f"      memcpy({name}, {name}__n, sizeof({name}));")
             ac_body.append("    }")
@@ -3669,19 +3677,19 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
             sig = sigs[name]
             if sig.depth:
                 lines.append(f"    if (memcmp({name}__n, {name}, sizeof({name}))) {{")
-                _bump_parts(name, leaf_parts, inv_tables, lines, 6)
+                _bump_parts(name, leaf_parts, lines, 6)
                 lines.append("      _chg++;")
                 lines.append(f"      memcpy({name}, {name}__n, sizeof({name}));")
                 lines.append("    }")
             elif is_wide(sig.width):
                 lines.append(f"    if ({name}__w && memcmp({name}__n, {name}, sizeof({name}))) {{")
-                _bump_parts(name, leaf_parts, inv_tables, lines, 6)
+                _bump_parts(name, leaf_parts, lines, 6)
                 lines.append("      _chg++;")
                 lines.append(f"      memcpy({name}, {name}__n, sizeof({name}));")
                 lines.append("    }")
             else:
                 lines.append(f"    if ({name}__w && {name}__n != {name}) {{")
-                _bump_parts(name, leaf_parts, inv_tables, lines, 6)
+                _bump_parts(name, leaf_parts, lines, 6)
                 lines.append("      _chg++;")
                 lines.append(f"      {name} = {name}__n;")
                 lines.append("    }")
@@ -3703,7 +3711,7 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
                 )
             else:
                 sink.append(f"        if ({wr.mem}[__wa{i}] != __wd{i}) {{")
-            _bump_parts(wr.mem, leaf_parts, inv_tables, sink, 10)
+            _bump_parts(wr.mem, leaf_parts, sink, 10)
             sink.append("          _chg++;")
             sink.append("        }")
             if is_wide(w):
@@ -4621,7 +4629,7 @@ def _emit_eager_region(
             if track:
                 lines.append(f"    if ({name} != {name}__o) {{")
                 if holds:
-                    _emit_bump_sig((), tuple(holds), {}, lines, 6)
+                    _emit_bump_sig((), tuple(holds), lines, 6)
                 for q in ups:
                     lines.append(f"      _up{q} = 1;")
                 _emit_pass_wake([q for q in ups if q in _PASS_BIT], lines, 6)
