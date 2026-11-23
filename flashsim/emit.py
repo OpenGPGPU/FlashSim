@@ -5,7 +5,7 @@ import os
 import re
 import sys
 import zlib
-from collections import Counter, OrderedDict, defaultdict
+from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
@@ -2074,36 +2074,75 @@ def _note_page_gen(lines: list[str], indent: int) -> None:
     if _PAGE_GEN:
         lines.append(f"{' ' * indent}_pg_gen++;")
 
+_CONSTRUCTOR_FIELD = re.compile(
+    r"^  (?P<type_decl>(?:alignas\(\d+\) )?"
+    r"(?P<type>uint(?:8|16|32|64)_t|unsigned __int128|unsigned|bool)) "
+    r"(?P<declarators>[^;\n]+);\n?$"
+)
+_CONSTRUCTOR_DECLARATOR = re.compile(
+    r"^(?P<name>\w+)(?P<dims>(?:\[[^\]\n]+\])*)"
+    r"(?:\s*=\s*(?P<init>.+))?$"
+)
+_DECLARATOR_PUNCTUATION = re.compile(r"[\[\](){},]")
+
+
+def _split_declarators(text: str) -> list[str]:
+    # Scalar generation counters share a declaration. Array initializers
+    # and parenthesized expressions may themselves contain commas.
+    result, begin, nesting = [], 0, []
+    for delimiter in _DECLARATOR_PUNCTUATION.finditer(text):
+        char = delimiter[0]
+        if char in "([{":
+            nesting.append(char)
+        elif char in ")]}":
+            opening = nesting.pop() if nesting else None
+            assert opening == {")": "(", "]": "[", "}": "{"}[char]
+        elif char == "," and not nesting:
+            pos = delimiter.start()
+            result.append(text[begin:pos].strip())
+            begin = pos + 1
+    assert not nesting
+    result.append(text[begin:].strip())
+    return result
+
+
+def _initialized_member(line: str, cls: str):
+    match = _CONSTRUCTOR_FIELD.match(line)
+    if match is None:
+        return None
+    declarations = [_CONSTRUCTOR_DECLARATOR.fullmatch(part)
+                    for part in _split_declarators(match["declarators"])]
+    assert all(declarations), (cls, line)
+    count = sum(part["init"] is not None for part in declarations)
+    if count:
+        return match, declarations, count
+    return None
+
+
+def _strip_member_initializer(match, declarations, restore: StringIO) -> str:
+    for part in declarations:
+        initial = part["init"]
+        if initial is None or initial.replace(" ", "").lower() in (
+                "0", "0u", "0ull", "{}", "{0}", "{0u}"):
+            continue
+        if part["dims"]:
+            name = "__bulk_initial_" + part["name"]
+            restore.write(f"    static const {match['type']} {name}{part['dims']} = {initial};\n")
+            restore.write(f"    memcpy({part['name']}, {name}, sizeof({part['name']}));\n")
+        else:
+            restore.write(f"    {part['name']} = {initial};\n")
+    names = ", ".join(part["name"] + part["dims"] for part in declarations)
+    return f"  {match['type_decl']} {names};\n"
+
+
+def _bulk_constructor_start(cls: str) -> str:
+    return f"  {cls}() {{\n    memset(static_cast<void*>(this), 0, sizeof(*this));\n"
+
+
 def _bulk_state_constructor(cpp: str, cls: str,
                             min_fields: int = _BULK_CONSTRUCTOR_MIN_FIELDS) -> str:
     """Initialize generated arithmetic storage without a huge ctor init list."""
     start = cpp.index(f"struct {cls} {{")
-    field = re.compile(
-        r"^  (?P<type_decl>(?:alignas\(\d+\) )?"
-        r"(?P<type>uint(?:8|16|32|64)_t|unsigned __int128|unsigned|bool)) "
-        r"(?P<declarators>[^;\n]+);\n?$"
-    )
-    declarator = re.compile(
-        r"^(?P<name>\w+)(?P<dims>(?:\[[^\]\n]+\])*)"
-        r"(?:\s*=\s*(?P<init>.+))?$"
-    )
-
-    def split_declarators(text: str) -> list[str]:
-        # Scalar generation counters share a declaration. Array initializers
-        # and parenthesized expressions may themselves contain commas.
-        result, begin, nesting = [], 0, []
-        for pos, char in enumerate(text):
-            if char in "([{":
-                nesting.append(char)
-            elif char in ")]}":
-                opening = nesting.pop() if nesting else None
-                assert opening == {")": "(", "]": "[", "}": "{"}[char]
-            elif char == "," and not nesting:
-                result.append(text[begin:pos].strip())
-                begin = pos + 1
-        assert not nesting
-        result.append(text[begin:].strip())
-        return result
 
     closing = None
 
@@ -2112,13 +2151,8 @@ def _bulk_state_constructor(cpp: str, cls: str,
         depth, offset = 0, start
         for line in _iter_lines(cpp, start):
             following = offset + len(line)
-            if depth == 1 and (match := field.match(line)):
-                declarations = [declarator.fullmatch(part)
-                                for part in split_declarators(match["declarators"])]
-                assert all(declarations), (cls, line)
-                count = sum(part["init"] is not None for part in declarations)
-                if count:
-                    yield offset, following, match, declarations, count
+            if depth == 1 and (member := _initialized_member(line, cls)):
+                yield offset, following, *member
             depth += line.count("{") - line.count("}")
             if depth == 0:
                 closing = offset
@@ -2145,24 +2179,12 @@ def _bulk_state_constructor(cpp: str, cls: str,
             output.write(cpp[offset:min(offset + chunk, end)])
 
     with StringIO() as output, StringIO() as restore:
-        restore.write(f"  {cls}() {{\n    memset(static_cast<void*>(this), 0, sizeof(*this));\n")
+        restore.write(_bulk_constructor_start(cls))
         written = 0
         for offset, following, match, declarations, _ in chain(pending, members):
             copy_text(output, written, offset)
-            names = ", ".join(part["name"] + part["dims"] for part in declarations)
-            output.write("  " + match["type_decl"] + " " + names + ";\n")
+            output.write(_strip_member_initializer(match, declarations, restore))
             written = following
-            for part in declarations:
-                initial = part["init"]
-                if initial is None or initial.replace(" ", "").lower() in (
-                        "0", "0u", "0ull", "{}", "{0}", "{0u}"):
-                    continue
-                if part["dims"]:
-                    name = "__bulk_initial_" + part["name"]
-                    restore.write(f"    static const {match['type']} {name}{part['dims']} = {initial};\n")
-                    restore.write(f"    memcpy({part['name']}, {name}, sizeof({part['name']}));\n")
-                else:
-                    restore.write(f"    {part['name']} = {initial};\n")
         assert closing is not None
         copy_text(output, written, closing)
         output.write(restore.getvalue())
@@ -2512,13 +2534,16 @@ def _hold_group_size() -> int:
 
 
 def emit_cpp(mod: Module) -> str:
-    # Release the raw emitter's local data before rewriting the constructor.
-    cpp = _emit_cpp_text(mod)
+    lines = _emit_cpp_lines(mod)
+    with observe_phase('emit.join_text'):
+        lines.append("")
+        cpp = "\n".join(lines)
+        lines.clear()
     with observe_phase('emit.constructor'):
         return _bulk_state_constructor(cpp, f"{mod.name}Dut")
 
 
-def _emit_cpp_text(mod: Module) -> str:
+def _emit_cpp_lines(mod: Module) -> list[str]:
     hold_group = _hold_group_size()
     sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
     assigns = assign_map(mod)
@@ -3701,14 +3726,7 @@ def _emit_cpp_text(mod: Module) -> str:
     _WAKE_PACK_WORDS = 0
     _LARGE = False
     _PAGE_GEN = False
-    with observe_phase('emit.join_text'):
-        # Preserve the trailing newline without copying the complete joined
-        # model to append it. Release lines shared with the memory sink and
-        # large-write helper before returning the packed text.
-        lines.append("")
-        cpp = "\n".join(lines)
-        lines.clear()
-    return cpp
+    return lines
 
 
 # Methods that stay in the class body even when splitting: tiny helpers called
@@ -3743,13 +3761,17 @@ _SPLIT_OWN_FILE = frozenset({"_commit"})
 _METHOD_START_RE = re.compile(
     r"^  ((?:__attribute__\(\(noinline\)\) )?)void ([A-Za-z_][A-Za-z0-9_]*)\(\) \{(})?$"
 )
+_CPP_STRING_LITERAL_RE = re.compile(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*' ''', re.VERBOSE)
 
 
 def _method_brace_delta(line: str) -> int:
     # Diagnostics may contain unmatched braces and escaped quotes. They are
     # string contents, not method boundaries in the generated C++.
-    code = re.sub(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*' ''', "", line,
-                  flags=re.VERBOSE).split("//", 1)[0]
+    if "{" not in line and "}" not in line:
+        return 0
+    if '"' in line or "'" in line:
+        line = _CPP_STRING_LITERAL_RE.sub("", line)
+    code = line.split("//", 1)[0]
     return code.count("{") - code.count("}")
 
 
@@ -4137,6 +4159,99 @@ def _iter_lines(text: str, start: int = 0):
         start = end
 
 
+_CPP_BLOCK_LINES = 8192
+
+
+def _pack_cpp_blocks(lines: list[str]) -> deque[str]:
+    """Join and release one block at a time, including the final newline."""
+    blocks = deque()
+    for begin in range(0, len(lines), _CPP_BLOCK_LINES):
+        end = min(begin + _CPP_BLOCK_LINES, len(lines))
+        block = lines[begin:end]
+        lines[begin:end] = [""] * len(block)
+        block.append("")
+        blocks.append("\n".join(block))
+        del block
+    lines.clear()
+    return blocks
+
+
+def _consume_cpp_blocks(blocks: deque[str]) -> Iterator[str]:
+    while blocks:
+        yield from _iter_lines(blocks.popleft())
+
+
+def _constructor_rows(lines: Iterator[str], cls: str):
+    marker = f"struct {cls} {{"
+    depth = None
+    for line in lines:
+        if depth is None:
+            start = line.find(marker)
+            if start < 0:
+                yield line, None, False
+                continue
+            declaration = line[start:]
+            depth = declaration.count("{") - declaration.count("}")
+            member = None
+        else:
+            member = _initialized_member(line, cls) if depth == 1 else None
+            depth += line.count("{") - line.count("}")
+        yield line, member, depth == 0
+        if depth == 0:
+            return
+    if depth is None:
+        raise ValueError("substring not found")
+
+
+def _needs_bulk_constructor(blocks: Iterable[str], cls: str) -> bool:
+    initialized = 0
+    lines = (line for block in blocks for line in _iter_lines(block))
+    for _, member, _ in _constructor_rows(lines, cls):
+        if member:
+            initialized += member[-1]
+            if initialized >= _BULK_CONSTRUCTOR_MIN_FIELDS:
+                return True
+    return False
+
+
+def _bulk_constructor_lines(lines: Iterator[str], cls: str) -> Iterator[str]:
+    with StringIO() as restore:
+        for line, member, closing in _constructor_rows(lines, cls):
+            if member:
+                match, declarations, _ = member
+                line = _strip_member_initializer(match, declarations, restore)
+            if closing:
+                yield from _iter_lines(_bulk_constructor_start(cls))
+                yield from _iter_lines(restore.getvalue())
+                yield "  }\n"
+                yield line
+                break
+            yield line
+        else:
+            raise AssertionError(f"missing closing brace for {cls}")
+    yield from lines
+
+
+def emit_split_cpp(mod: Module, n_shards: int) -> tuple[str, list[tuple[str, str]]]:
+    """Emit an explicitly sharded model without building a monolithic string."""
+    if n_shards < 1:
+        raise ValueError("n_shards must be >= 1")
+    cls = f"{mod.name}Dut"
+    with observe_phase('emit_cpp'):
+        lines = _emit_cpp_lines(mod)
+        with observe_phase('emit.join_text'):
+            blocks = _pack_cpp_blocks(lines)
+        with observe_phase('emit.constructor'):
+            bulk = _needs_bulk_constructor(blocks, cls)
+    # The rewrite feeds the splitter directly. Release each input block as
+    # its lines move into the output header and shards.
+    with observe_phase('split_dut_methods'):
+        source = _consume_cpp_blocks(blocks)
+        if bulk:
+            source = _bulk_constructor_lines(source, cls)
+        return _split_dut_lines(cls, source, n_shards)
+
+
 class _SplitSink:
     """Pack output incrementally instead of retaining one Python object per line."""
     def __init__(self):
@@ -4172,8 +4287,12 @@ def split_dut_methods(
     m = re.search(r"^struct (\w+) \{", cpp, re.M)
     if not m:
         raise ValueError("dut header has no struct")
-    cls = m.group(1)
-    lines = iter(_iter_lines(cpp))
+    return _split_dut_lines(m.group(1), _iter_lines(cpp), n_shards)
+
+
+def _split_dut_lines(
+    cls: str, lines: Iterator[str], n_shards: int
+) -> tuple[str, list[tuple[str, str]]]:
     out_lines = _SplitSink()
     shards = [_SplitSink() for _ in range(n_shards)]
     own_files: dict[str, _SplitSink] = {}

@@ -1,6 +1,11 @@
 """Large-model splitting preserves source lines without a full line list."""
 import random
+from types import SimpleNamespace
+import weakref
 
+import pytest
+
+from flashsim import emit
 from flashsim.emit import _iter_lines, split_dut_methods
 
 
@@ -22,3 +27,36 @@ def test_split_keeps_non_method_source_and_unusual_line_endings():
     assert header == source
     assert parts == [('dut_0.cpp', '#include "dut.h"\n\n'),
                      ('dut_1.cpp', '#include "dut.h"\n\n')]
+
+
+@pytest.mark.parametrize('min_fields', [3, 10])
+def test_explicit_split_preserves_constructor_and_releases_input(monkeypatch, min_fields):
+    source = [
+        '#include <cstdint>\r', 'struct SampleDut {',
+        '  uint32_t first = 0u, other = 7;',
+        '  alignas(16) uint8_t data[2][2] = {{1, 2}, {3, 4}};',
+        '  uint32_t unchanged;', '  void _work() {',
+        *['    first += other; // é'] * 30,
+        '  }', '', '};', '',
+    ]
+    cpp = emit._bulk_state_constructor(
+        '\n'.join([*source, '']), 'SampleDut', min_fields=min_fields)
+    expected = split_dut_methods(cpp, n_shards=4)
+
+    class Line(str):
+        pass
+
+    raw_lines = [Line(line) for line in source]
+    refs = [weakref.ref(line) for line in raw_lines]
+    split = emit._split_dut_lines
+
+    def check_split(cls, lines, n_shards):
+        assert not raw_lines
+        assert all(ref() is None for ref in refs)
+        return split(cls, lines, n_shards)
+
+    monkeypatch.setattr(emit, '_CPP_BLOCK_LINES', 3)
+    monkeypatch.setattr(emit, '_BULK_CONSTRUCTOR_MIN_FIELDS', min_fields)
+    monkeypatch.setattr(emit, '_emit_cpp_lines', lambda mod: raw_lines)
+    monkeypatch.setattr(emit, '_split_dut_lines', check_split)
+    assert emit.emit_split_cpp(SimpleNamespace(name='Sample'), 4) == expected

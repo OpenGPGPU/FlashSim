@@ -1250,6 +1250,26 @@ python3 -B scripts/bench_emit_buffers.py --flashsim "$PWD" --registers 150000
 The benchmark writes no model files. Its digest is for immediate byte comparison;
 keep only final results and reproduction commands after the comparison ends.
 
+Explicit sharding consumes bounded C++ blocks. It releases the emitter's
+original lines as it packs them, then releases each input block as the
+constructor rewrite feeds the splitter. The constructor timing covers the
+threshold check. The rewrite is included in the split timing.
+
+On the assertion-enabled `BankedShaderPayloadStore` hierarchy from OpenGPU
+`8a1919172`, one Python 3.14.7 pair took 9.24 and 8.00 seconds for C++ emission
+and splitting. All 43,651,684 output bytes, including the header and every
+shard, matched. The measurement covers this hierarchy's code generation.
+
+```sh
+PYTHONHASHSEED=73 FLASHSIM_COMMIT_PARTS=16 FLASHSIM_PHASE_TIMINGS=1 \
+  python3 -B scripts/bench_narrow_pass.py "$OWNER_MLIR" \
+  --module BankedShaderPayloadStore --hierarchy --preflatten-wires \
+  --emit-cpp --shards 64 --repeat 1 --flashsim "$FLASH_CHECKOUT"
+```
+
+Use the same script and MLIR with `FLASH_CHECKOUT` set to baseline `fb2802c`
+and the current checkout.
+
 The memoized expression visitor carries each node's children through its
 postorder rewrite and calls the visitor directly for an isolated leaf.
 On the assertion-enabled `L2MshrTable` hierarchy from OpenGPU `8a1919172`,

@@ -111,12 +111,15 @@ def test_reserved_name_check_only_rejects_actual_region_collisions():
 @pytest.mark.parametrize('with_assertions', [False, True])
 def test_compile_file_groups_after_splitting_without_changing_method_sources(tmp_path, monkeypatch, split, with_assertions):
     import flashsim.compile as compile_module
+    from flashsim import emit
     original, _ = model_source()
     if with_assertions:
         original = original.replace('struct ProbeDut {\n',
             'struct ProbeDut {\n  static constexpr uint64_t assertion_count = 17;\n')
-    monkeypatch.setattr(compile_module, 'compile_verilog',
-                        lambda *args, **kwargs: (SimpleNamespace(name='Probe'), original))
+    monkeypatch.setattr(compile_module, '_compile_module',
+                        lambda *args, **kwargs: SimpleNamespace(name='Probe'))
+    monkeypatch.setattr(emit, '_emit_cpp_lines',
+                        lambda mod: original.removesuffix('\n').split('\n'))
     verilog = tmp_path / 'Probe.v'
     verilog.write_text('module Probe; endmodule\n')
     flat = tmp_path / 'flat' / 'dut.h'
