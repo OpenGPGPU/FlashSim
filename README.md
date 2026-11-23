@@ -1416,10 +1416,10 @@ PYTHONHASHSEED=73 FLASHSIM_COMMIT_PARTS=16 python3 -B scripts/bench_narrow_pass.
   --emit-cpp --shards 64 --repeat 1 --flashsim "$FLASH_CHECKOUT"
 ```
 
-After gathering the invalidation pages, the emitter releases each mutable
-leaf list as it freezes it. Leaves and numbered tables then share immutable
-page sequences. Table numbering follows sorted leaf names, and the order and
-multiplicity of page indices are preserved.
+The emitter releases each mutable leaf list as it freezes the invalidation
+pages. Leaves that use the same long list share its table index and extent.
+Writing each numbered table releases its page sequence. Table numbering
+follows sorted leaf names, and each table preserves page order and duplicates.
 
 The complete dual-CU OpenGPU `8a1919172` model emitted 187,187,963
 invalidation page entries. A second 64-bit reference for each entry occupies
@@ -1428,11 +1428,52 @@ invalidation page entries. A second 64-bit reference for each entry occupies
 measurement covers the leaf and table containers. Complete-model generation
 peak and simulator throughput require their own measurements.
 
-The `GpuComputeUnitCore` and `BankedShaderPayloadStore` hierarchies from the
-same MLIR produced identical optimized IR and C++ shards when compared with
-`23333d0`. Use the `bench_narrow_pass.py` command above on both checkouts with
-each hierarchy name. The ordering and sharing regression runs with
-`python3 -B -m pytest flashsim/test_emit_wake.py -q`.
+On 6,842 real tables with 3,125,565 entries from the same model, releasing
+table payloads during emission reduced peak traced Python allocations from
+50.35 to 29.57 MiB. The table definitions and every commit reference matched.
+This allocation measurement covers the table containers and their rendered
+text. In a separate timing on the same inputs, freezing, writing and freeing
+the tables and emitting their commit references took 0.269 and 0.222 CPU
+seconds, using medians of three fresh processes per revision.
+
+The complete C++ output and optimized IR of the
+`GpuComputeUnitCore` and `BankedShaderPayloadStore` hierarchies also matched
+the baseline `3db345b`. Use the `bench_narrow_pass.py` command above on both
+checkouts with each hierarchy name.
+
+Measure table emission on the same resharded model with Python 3.14.7. Pass
+`keep` on the baseline checkout and `release` on the current checkout.
+
+```sh
+python3 -B - "$RESHARDED_DUT/dut_invalidation_part0000.cpp" release <<'PY'
+from pathlib import Path
+import re
+import sys
+import tracemalloc
+from flashsim.emit import _freeze_invalidation_tables
+
+pattern = re.compile(rb'extern const uint32_t _inv\d+\[\d+\] = \{([0-9, ]+)\};\n')
+pending = {}
+with Path(sys.argv[1]).open('rb') as stream:
+    for line in stream:
+        if (match := pattern.fullmatch(line)):
+            pending[f'{len(pending):08}'] = list(map(int, match[1].split(b',')))
+tracemalloc.start()
+by_leaf, tables = _freeze_invalidation_tables(pending)
+tracemalloc.reset_peak()
+lines = []
+if sys.argv[2] == 'keep':
+    for pages, index in sorted(tables.items(), key=lambda item: item[1]):
+        inner = ', '.join(str(page) for page in pages)
+        lines.append(f'static const uint32_t _inv{index}[] = {{{inner}}};')
+else:
+    for index in range(len(tables)):
+        inner = ', '.join(map(str, tables.popleft()))
+        lines.append(f'static const uint32_t _inv{index}[] = {{{inner}}};')
+print(tracemalloc.get_traced_memory()[1] / 1048576)
+PY
+python3 -B -m pytest flashsim/test_emit_wake.py -q
+```
 
 The commit-table transform locates literal prefixes before checking token and
 line boundaries. It also parses the decimal fields once and checks quotes
