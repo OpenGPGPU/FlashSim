@@ -1283,6 +1283,14 @@ assertions and all generated C++ bytes matched. These measurements cover the
 named stages and hierarchies. Full-host generation, native C++ compilation
 and simulation throughput remain separate checks.
 
+One fresh-process pair on the complete 640×480 dual-CU HW MLIR reduced Python
+hierarchy flattening from 1,019.785 s to 820.285 s. Both runs used preflatten
+wire compaction and produced 11,964,861 signals and 11,083,125 assignments.
+Run `parse_hw_mlir` with `top="GpuHostSystemAxi"`, `preflatten_wires=True` and
+`FLASHSIM_PHASE_TIMINGS=1` on the same HW MLIR to observe the flatten phase.
+CIRCT import had already finished. Both runs reached the 12 GiB ceiling in the
+subsequent Python optimizer with C++ emission still pending.
+
 Select each checkout in alternating pairs with the same toolchain and MLIR:
 
 ```sh
