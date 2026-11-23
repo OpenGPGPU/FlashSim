@@ -1039,32 +1039,30 @@ def _slice_src_uncached(
         if inner is not None and memo.costs.fits_inline(inner):
             return UnaryOp("~", inner)
         return None
+    # Both data arms must narrow. A failed first arm already determines the
+    # fallback, so it need not expand the other arm's shared expression graph.
     if isinstance(src, BinOp) and src.op in {"&", "|", "^"}:
         left = _slice_src(
             src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache, memo
         )
+        if left is None:
+            return None
         right = _slice_src(
             src.b, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache, memo
         )
-        if (
-            left is not None
-            and right is not None
-            and memo.costs.fits_inline(left, right)
-        ):
+        if right is not None and memo.costs.fits_inline(left, right):
             return BinOp(src.op, left, right)
         return None
     if isinstance(src, Ternary):
         left = _slice_src(
             src.a, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache, memo
         )
+        if left is None:
+            return None
         right = _slice_src(
             src.b, low, width, assigns, sigs, uses, fresh, cache, seen, fuel - 1, width_cache, memo
         )
-        if (
-            left is not None
-            and right is not None
-            and memo.costs.fits_inline(left, right)
-        ):
+        if right is not None and memo.costs.fits_inline(left, right):
             return Ternary(src.cond, left, right)
         return None
     if isinstance(src, Id) and src.name in assigns and src.name not in seen:
@@ -1098,8 +1096,8 @@ def _slice_src_uncached(
         )
         if (
             not cheaper
-            and memo.costs.leaf_set(sliced) == memo.costs.leaf_set(original)
             and memo.costs.node_count(sliced) >= memo.costs.node_count(original)
+            and memo.costs.leaf_set(sliced) == memo.costs.leaf_set(original)
         ):
             return None
         if memo.costs.fits_inline(sliced) or uses.get(src.name, 0) <= 1:
