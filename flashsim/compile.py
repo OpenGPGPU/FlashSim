@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from collections.abc import Iterator
@@ -230,8 +229,9 @@ def _mlir_fresh(mlir_path: Path, verilog: Path, fingerprint: dict[str, str] | No
 
 
 def _assertion_sources(verilog: Path) -> dict[str, str]:
-    return {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
-            for path in verilog_dependencies(verilog)}
+    hashes: dict[str, str] = {}
+    verilog_dependencies(verilog, hashes=hashes)
+    return hashes
 
 
 def _resolve_frontend(frontend: str) -> str:
