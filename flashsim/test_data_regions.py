@@ -119,7 +119,7 @@ def test_compile_file_groups_after_splitting_without_changing_method_sources(tmp
     monkeypatch.setattr(compile_module, '_compile_module',
                         lambda *args, **kwargs: SimpleNamespace(name='Probe'))
     monkeypatch.setattr(emit, '_emit_cpp_lines',
-                        lambda mod: original.removesuffix('\n').split('\n'))
+                        lambda mod, lines: lines.extend(original.removesuffix('\n').split('\n')))
     verilog = tmp_path / 'Probe.v'
     verilog.write_text('module Probe; endmodule\n')
     flat = tmp_path / 'flat' / 'dut.h'

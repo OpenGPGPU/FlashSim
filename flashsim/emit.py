@@ -9,8 +9,10 @@ from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import Iterable, Iterator, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
+from functools import lru_cache
 from io import StringIO
 from itertools import chain, groupby
+from typing import Protocol
 
 from flashsim.phase_timing import phase as observe_phase
 
@@ -44,6 +46,11 @@ from flashsim.ir import (
 )
 
 
+class _LineSink(Protocol):
+    def append(self, line: str, /) -> None: ...
+    def extend(self, lines: Iterable[str], /) -> None: ...
+
+
 def assign_map(mod: Module) -> dict[str, Expr]:
     return {a.lhs: a.rhs for a in mod.assigns}
 
@@ -60,7 +67,7 @@ def cone_leaves(root: str, assigns: dict[str, Expr], stop: set[str]) -> set[str]
         if name in stop or name not in assigns:
             found.add(name)
             continue
-        stack.extend(expr_ids(assigns[name]))
+        stack.extend(expr_ids(assigns[name], ordered=False))
     return found
 
 
@@ -111,7 +118,7 @@ def _cone_leaves_many(roots: set[str], assigns: dict[str, Expr], stop: set[str],
             results[root] = interned.setdefault(value, value)
             continue
         active = {root}
-        stack = [_LeafFrame(root, iter(expr_ids(assigns[root])))]
+        stack = [_LeafFrame(root, iter(expr_ids(assigns[root], ordered=False)))]
         while stack:
             frame = stack[-1]
             name = frame.name
@@ -156,7 +163,7 @@ def _cone_leaves_many(roots: set[str], assigns: dict[str, Expr], stop: set[str],
                 break
             else:
                 active.add(child)
-                stack.append(_LeafFrame(child, iter(expr_ids(assigns[child]))))
+                stack.append(_LeafFrame(child, iter(expr_ids(assigns[child], ordered=False))))
     return {root: results[root] for root in ordered}
 
 
@@ -245,16 +252,19 @@ def cached_wires(mod: Module, assigns: dict[str, Expr]) -> set[str]:
     cached = {n for n in names if n in assigns}
     users: dict[str, int] = defaultdict(int)
     for name in cached:
-        for dep in expr_ids(assigns[name]):
+        for dep in expr_ids(assigns[name], ordered=False):
             if dep in assigns and dep not in cached:
                 users[dep] += 1
     for dep, n in users.items():
         if n >= 2 and not _is_ssa_temp(dep):
             cached.add(dep)
-    _promote_large_gpu_ssa(assigns, cached)
+    with observe_phase('emit.promote_large_wires'):
+        _promote_large_gpu_ssa(assigns, cached)
     stop = set(collect_regs(mod)) | set(collect_inputs(mod)) | set(collect_mems(mod))
-    _promote_bulky_gated_cones(mod.always.body, assigns, cached, stop)
-    _promote_shared_inlines(mod.always.body, assigns, cached, stop)
+    with observe_phase('emit.promote_gated_wires'):
+        _promote_bulky_gated_cones(mod.always.body, assigns, cached, stop)
+    with observe_phase('emit.promote_shared_wires'):
+        _promote_shared_inlines(mod.always.body, assigns, cached, stop)
     return cached
 
 
@@ -380,72 +390,49 @@ def _promote_bulky_gated_cones(
     with `_expr_node_count >= _BULKY_TMP_NODES` are promoted, and only from
     regions that would otherwise inline ≥ `_BULKY_GATED_CONE` SSA locals.
     """
-    regions: list[tuple[int, list[str]]] = []
+    regions: set[tuple[int, tuple[str, ...]]] = set()
     collector = _UncachedTempCollector(cached, assigns, stop)
 
-    def region_temps(needed: set[str], min_nodes: int) -> list[str]:
-        out: list[str] = []
-        # Sorted: `needed` is a set, and these names are ranked against a
-        # promotion cap below, so set order would make the cap pick a
-        # different subset on every run.
-        for n in sorted(needed):
-            if n in cached or not _is_ssa_temp(n) or not _is_gpu_hot_ssa(n):
-                continue
-            if _expr_node_count(assigns[n]) < min_nodes:
-                continue
-            out.append(n)
-        return out
+    @lru_cache(maxsize=32768)
+    def node_cost(name: str) -> int:
+        return _expr_node_count(assigns[name])
+
+    def note_region(needed: AbstractSet[str]) -> None:
+        hot_temps = [name for name in needed
+                     if _is_ssa_temp(name) and _is_gpu_hot_ssa(name)]
+        size = len(hot_temps)
+        if size < _BULKY_GATED_CONE:
+            return
+        min_nodes = _MEGA_TMP_NODES if size >= _MEGA_GATED_CONE else _BULKY_TMP_NODES
+        eligible = tuple(sorted(name for name in hot_temps if node_cost(name) >= min_nodes))
+        if eligible:
+            # The same ordered candidates can make further promotions only
+            # once, because the cached set grows throughout selection.
+            regions.add((size, eligible))
 
     def walk(stmts: list[Stmt], gated: bool, *, _recur) -> None:
         for stmt in stmts:
             if isinstance(stmt, If):
-                def note_arm(arm: list[Stmt]) -> None:
-                    raw = collector.collect(arm)
-                    raw_ssa = [
-                        n
-                        for n in raw
-                        if _is_ssa_temp(n) and _is_gpu_hot_ssa(n) and n not in cached
-                    ]
-                    if len(raw_ssa) >= _BULKY_GATED_CONE:
-                        min_nodes = (
-                            _MEGA_TMP_NODES
-                            if len(raw_ssa) >= _MEGA_GATED_CONE
-                            else _BULKY_TMP_NODES
-                        )
-                        regions.append((len(raw_ssa), region_temps(raw, min_nodes)))
-
                 # Both arms can host mega cones (merged same-cond holds keep
                 # else). Promote either arm when it would inline a bulky SSA set.
-                note_arm(stmt.then_body)
+                note_region(collector.collect(stmt.then_body))
                 if stmt.else_body:
-                    note_arm(stmt.else_body)
+                    note_region(collector.collect(stmt.else_body))
                 _recur(stmt.then_body, True, _recur=_recur)
                 if stmt.else_body:
                     _recur(stmt.else_body, True, _recur=_recur)
             elif isinstance(stmt, NbAssign):
                 if gated:
-                    raw = [
-                        n
-                        for n in collector.expr(stmt.rhs)
-                        if _is_ssa_temp(n) and _is_gpu_hot_ssa(n) and n not in cached
-                    ]
-                    if len(raw) >= _BULKY_GATED_CONE:
-                        min_nodes = (
-                            _MEGA_TMP_NODES
-                            if len(raw) >= _MEGA_GATED_CONE
-                            else _BULKY_TMP_NODES
-                        )
-                        regions.append((len(raw), region_temps(set(raw), min_nodes)))
+                    note_region(collector.expr(stmt.rhs))
             else:
                 raise TypeError(stmt)
 
     walk(body, False, _recur=walk)
     # Size desc, then name list, so equal-size regions have a stable order.
-    regions.sort(key=lambda rt: (-rt[0], rt[1]))
     added = 0
-    for size, temps in regions:
+    for size, temps in sorted(regions, key=lambda region: (-region[0], region[1])):
         # Prefer larger exprs first within a region; name breaks ties.
-        ranked = sorted(temps, key=lambda n: (-_expr_node_count(assigns[n]), n))
+        ranked = sorted(temps, key=lambda name: (-node_cost(name), name))
         region_cap = (
             _MEGA_REGION_PROMOTE_CAP if size >= _MEGA_GATED_CONE else len(ranked)
         )
@@ -515,7 +502,7 @@ def _promote_shared_inlines(
     def count_site(expressions: Iterable[Expr], sites: dict[str, int]) -> None:
         seen: set[str] = set()
         for expr in expressions:
-            pending = list(expr_ids(expr))
+            pending = list(expr_ids(expr, ordered=False))
             while pending:
                 name = pending.pop()
                 if name in seen or name in cached or name in stop or name not in assigns:
@@ -529,7 +516,7 @@ def _promote_shared_inlines(
                 sites[name] = count + 1
                 children = references.get(name)
                 if children is None:
-                    dependencies = expr_ids(assigns[name])
+                    dependencies = expr_ids(assigns[name], ordered=False)
                     if not count or len(dependencies) > 32:
                         pending.extend(dependencies)
                         continue
@@ -541,7 +528,9 @@ def _promote_shared_inlines(
 
     for _ in range(_SHARED_INLINE_ROUNDS):
         sites: dict[str, int] = {}
-        for name in sorted(cached):
+        # Each site contributes once up to the same saturation threshold.
+        # The forced set and sorted cost ranking depend only on those counts.
+        for name in cached:
             if name in assigns:
                 count_site((assigns[name],), sites)
         for exprs in stmt_roots:
@@ -882,7 +871,7 @@ def _emit_index_switch(
     expr: Ternary,
     cached: set[str],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     scratch: list[int],
     emit_arm,
@@ -919,7 +908,7 @@ def _emit_ternary_priority(
     expr: Ternary,
     cached: set[str],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     scratch: list[int],
     emit_arm,
@@ -988,7 +977,7 @@ class _UncachedTempCollector:
         entry = self._expressions.get(id(expr))
         if entry is not None:
             return entry[1]
-        names = frozenset(_uncached_needed(expr, self.assigns, self.cached, self.stop))
+        names = frozenset(_uncached_names(expr, self.assigns, self.cached, self.stop))
         if len(self._expressions) < 32768 and self._expression_names + len(names) <= 250000:
             self._expressions[id(expr)] = (expr, names)
             self._expression_names += len(names)
@@ -1057,7 +1046,7 @@ def _emit_ssa_assign(
     cached: set[str],
     assigns: dict[str, Expr],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     scratch: list[int],
 ) -> None:
@@ -1085,7 +1074,7 @@ def _emit_ssa_binding(
     cached: set[str],
     assigns: dict[str, Expr],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     declared: set[str],
     scratch: list[int],
@@ -1129,7 +1118,7 @@ def _emit_branch_hoist(
     assigns: dict[str, Expr],
     stop: set[str],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     declared: set[str],
     scratch: list[int],
@@ -1235,8 +1224,8 @@ def cached_deps(root: str, assigns: dict[str, Expr], cached: set[str], stop: set
 
 
 def _is_ssa_temp(name: str) -> bool:
-    toks = name.split("_")
-    return bool(toks) and len(toks[-1]) > 1 and toks[-1][0] == "t" and toks[-1][1:].isdigit()
+    suffix = name[name.rfind("_") + 1:]
+    return len(suffix) > 1 and suffix[0] == "t" and suffix[1:].isdigit()
 
 
 def skip_partition_key(name: str) -> str:
@@ -1254,12 +1243,10 @@ def skip_partition_key(name: str) -> str:
     related temps can skip independently without one part per wire.
     """
     toks = name.split("_")
-    while toks and _is_ssa_temp("_".join(toks)):
+    while toks and _is_ssa_temp(toks[-1]):
         toks.pop()
     if toks and toks[0] in {"system", "gpu"}:
         toks = toks[1:]
-        while toks and _is_ssa_temp("_".join(toks)):
-            toks.pop()
     if not toks:
         return name
     # vectorCoalescer / fmaAlu holds were one multi-100KB method each because
@@ -1384,31 +1371,11 @@ def _ordered_leaf_sets(leaf_sets):
     return ordered
 
 
-def _eager_regions(
-    cached: set[str],
-    cdeps: dict[str, list[str]],
-    wire_deps: dict[str, AbstractSet[str]],
-) -> tuple[dict[str, int], list[list[str]]]:
-    """Cached wires to evaluate as straight-line passes instead of lazily.
-
-    Seeds are the cached wires whose skip key matches `FLASHSIM_EAGER_RE`
-    (all of them by default; a capture group makes one region per match).
-    On GpuHostSystemAxi an L2 slice's SSA cone reads the slice state regs
-    almost everywhere, so one state change invalidated ~16k lazy evals at
-    once; each paid a call and an `__ok` check and re-inlined the uncached
-    temps it shares with its neighbours, ~11 MB of code per active fill
-    cycle. A topologically ordered pass computes each shared temp once with
-    no per-wire dispatch.
-
-    Any outside wire that both feeds a region and reads it is pulled in, so a
-    region never re-enters itself through a foreign eval.
-    Each region is then split into one pass per exact leaf set, so a leaf
-    change reruns only the wires that read it. A wire's deps read a subset
-    of its leaves, so passes ordered by leaf-set size never re-enter.
-    Returns (wire -> pass id, pass id -> wires in topological order).
-    """
-    if not _EAGER or len(cached) <= 128:
-        return {}, []
+def _eager_members(cached: set[str], cdeps: dict[str, list[str]]) -> list[set[str]]:
+    # The default selects every cached wire in one region. It cannot re-enter
+    # across an outside cache, so skip the naming scan and reverse edges.
+    if _EAGER_KEY_RE.pattern == r".*":
+        return [cached]
     seeds: dict[str, set[str]] = defaultdict(set)
     for w in cached:
         m = _EAGER_KEY_RE.match(skip_partition_key(w))
@@ -1460,9 +1427,37 @@ def _eager_regions(
                     break
             if merged:
                 break
+    return sets
+
+
+def _eager_regions(
+    cached: set[str],
+    cdeps: dict[str, list[str]],
+    wire_deps: dict[str, AbstractSet[str]],
+) -> tuple[dict[str, int], list[list[str]]]:
+    """Cached wires to evaluate as straight-line passes instead of lazily.
+
+    Seeds are the cached wires whose skip key matches `FLASHSIM_EAGER_RE`
+    (all of them by default; a capture group makes one region per match).
+    On GpuHostSystemAxi an L2 slice's SSA cone reads the slice state regs
+    almost everywhere, so one state change invalidated ~16k lazy evals at
+    once; each paid a call and an `__ok` check and re-inlined the uncached
+    temps it shares with its neighbours, ~11 MB of code per active fill
+    cycle. A topologically ordered pass computes each shared temp once with
+    no per-wire dispatch.
+
+    Any outside wire that both feeds a region and reads it is pulled in, so a
+    region never re-enters itself through a foreign eval.
+    Each region is then split into one pass per exact leaf set, so a leaf
+    change reruns only the wires that read it. A wire's deps read a subset
+    of its leaves, so passes ordered by leaf-set size never re-enter.
+    Returns (wire -> pass id, pass id -> wires in topological order).
+    """
+    if not _EAGER or len(cached) <= 128:
+        return {}, []
     eager_of: dict[str, int] = {}
     regions: list[list[str]] = []
-    for region in sets:
+    for region in _eager_members(cached, cdeps):
         order: list[str] = []
         seen: set[str] = set()
         for root in sorted(region):
@@ -1772,7 +1767,7 @@ def _bump_sig(
 def _emit_bump_sig(
     parts: _LeafPages,
     holds: tuple[int, ...],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     once: bool = False,
 ) -> None:
@@ -1871,7 +1866,7 @@ def _report_wake_locality(
 def _bump_parts(
     leaf: str,
     leaf_parts: dict[str, _LeafPages],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     once: bool = False,
 ) -> None:
@@ -1939,7 +1934,7 @@ def _force_wake_method(nparts: int, nholds: int, npasses: int,
     return lines
 
 
-def _emit_pass_wake(passes, lines: list[str], indent: int) -> None:
+def _emit_pass_wake(passes, lines: _LineSink, indent: int) -> None:
     words: dict[int, int] = defaultdict(int)
     for r in passes:
         words[_PASS_BIT[r] >> 6] |= 1 << (_PASS_BIT[r] & 63)
@@ -1953,7 +1948,7 @@ def _emit_pass_wake(passes, lines: list[str], indent: int) -> None:
         )
 
 
-def _emit_pass_tables(lines: list[str], cls: str, pass_bit: dict[int, int],
+def _emit_pass_tables(lines: _LineSink, cls: str, pass_bit: dict[int, int],
                       drained: set[int], regions: list[list[str]],
                       wire_part: dict[str, int]) -> list[str] | None:
     """Share ready-pass guards while retaining lazy dependency fallbacks.
@@ -2026,7 +2021,7 @@ def _emit_pass_tables(lines: list[str], cls: str, pass_bit: dict[int, int],
     return body
 
 
-def _emit_pass_dispatch(lines: list[str], npw: int, npass: int,
+def _emit_pass_dispatch(lines: _LineSink, npw: int, npass: int,
                         body: list[str] | None = None) -> None:
     """Drain woken passes through a summary-of-words bitmap.
 
@@ -2098,7 +2093,7 @@ _BULK_CONSTRUCTOR_MIN_FIELDS = 65536
 _PAGE_GEN = False
 
 
-def _note_page_gen(lines: list[str], indent: int) -> None:
+def _note_page_gen(lines: _LineSink, indent: int) -> None:
     if _PAGE_GEN:
         lines.append(f"{' ' * indent}_pg_gen++;")
 
@@ -2237,7 +2232,7 @@ def _eval_invoke(name: str, indent: int) -> str:
     return f"{sp}if ({name}__ok != _pg[{p}]) eval_{name}();"
 
 
-def _mark_write(name: str, lines: list[str], indent: int) -> None:
+def _mark_write(name: str, lines: _LineSink, indent: int) -> None:
     sp = " " * indent
     extra = f" {_HOLD_TAKEN}" if _HOLD_TAKEN else ""
     if _LARGE:
@@ -2562,7 +2557,8 @@ def _hold_group_size() -> int:
 
 
 def emit_cpp(mod: Module) -> str:
-    lines = _emit_cpp_lines(mod)
+    lines: list[str] = []
+    _emit_cpp_lines(mod, lines)
     with observe_phase('emit.join_text'):
         lines.append("")
         cpp = "\n".join(lines)
@@ -2571,7 +2567,7 @@ def emit_cpp(mod: Module) -> str:
         return _bulk_state_constructor(cpp, f"{mod.name}Dut")
 
 
-def _emit_cpp_lines(mod: Module) -> list[str]:
+def _emit_cpp_lines(mod: Module, lines: _LineSink) -> None:
     hold_group = _hold_group_size()
     sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
     assigns = assign_map(mod)
@@ -2628,7 +2624,11 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
     with observe_phase('emit.leaf_dependencies'):
         wire_deps = _cone_leaves_many(cached, assigns, stop)
     with observe_phase('emit.cached_dependencies'):
-        cdeps = {w: cached_deps(w, assigns, cached, stop) for w in sorted(cached)}
+        cdeps = {}
+        for wire in sorted(cached):
+            deps = cached_deps(wire, assigns, cached, stop)
+            if deps:
+                cdeps[wire] = deps
     with observe_phase('emit.eager_regions'):
         eager_of, eager_regions = _eager_regions(cached, cdeps, wire_deps)
     with observe_phase('emit.partitions'):
@@ -2758,7 +2758,7 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
     _ARRAY_INDEX = {n: i for i, n in enumerate(array_writes)} if large else {}
     _LARGE = large
 
-    lines: list[str] = [
+    lines.extend([
         "#pragma once",
         "#include <cstdint>",
         "#include <cstring>",
@@ -2981,7 +2981,7 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
         "    any[i >> 6] |= 1ull << (i & 63);",
         "  }",
         "}",
-    ]
+    ])
     inv_count = len(inv_tables)
     # Release each page tuple as soon as its C++ definition is rendered.
     for idx in range(inv_count):
@@ -3177,10 +3177,11 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
         for i, (_key, stmts) in enumerate(hold_buckets):
             word, bit = i >> 6, i & 63
             mask = f"(1ull << {bit})"
-            hold_start = len(lines)
-            lines.append(f"  __attribute__((noinline)) void _nba_h{i}() {{")
-            lines.append(f"    _h_need[{word}] &= ~{mask};")
-            lines.append(f"    _h_busy[{word}] &= ~{mask};")
+            hold_lines = [
+                f"  __attribute__((noinline)) void _nba_h{i}() {{",
+                f"    _h_need[{word}] &= ~{mask};",
+                f"    _h_busy[{word}] &= ~{mask};",
+            ]
             # The dispatch loop re-checks the final state after the hold runs.
             # Delaying the summary clear until then avoids decrementing twice
             # when the hold body re-arms itself through `_HOLD_TAKEN`.
@@ -3193,21 +3194,22 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
             # coalescer skip-evals even when outer enables were false.
             demanded = _collect_top_gate_demands(stmts, cached, assigns, stop)
             for dep in sorted(demanded):
-                lines.append(_eval_invoke(dep, 4))
+                hold_lines.append(_eval_invoke(dep, 4))
             _emit_nba_tree(
                 stmts,
                 cached,
                 assigns,
                 stop,
                 sigs,
-                lines,
+                hold_lines,
                 4,
                 set(),
                 [0],
                 demanded,
             )
             _HOLD_TAKEN = ""
-            lines[hold_start:] = _drop_dominated_eager_calls(lines[hold_start:])
+            lines.extend(_drop_dominated_eager_calls(hold_lines))
+            del hold_lines
             lines.append("  }")
             lines.append("")
         if live_stmts:
@@ -3756,7 +3758,6 @@ def _emit_cpp_lines(mod: Module) -> list[str]:
     _WAKE_PACK_WORDS = 0
     _LARGE = False
     _PAGE_GEN = False
-    return lines
 
 
 # Methods that stay in the class body even when splitting: tiny helpers called
@@ -4221,18 +4222,31 @@ def _iter_lines(text: str, start: int = 0):
 _CPP_BLOCK_LINES = 8192
 
 
-def _pack_cpp_blocks(lines: list[str]) -> deque[str]:
-    """Join and release one block at a time, including the final newline."""
-    blocks = deque()
-    for begin in range(0, len(lines), _CPP_BLOCK_LINES):
-        end = min(begin + _CPP_BLOCK_LINES, len(lines))
-        block = lines[begin:end]
-        lines[begin:end] = [""] * len(block)
-        block.append("")
-        blocks.append("\n".join(block))
-        del block
-    lines.clear()
-    return blocks
+class _CppBlocks:
+    """Pack complete lines as they are emitted for an explicitly sharded DUT."""
+
+    def __init__(self) -> None:
+        self._lines: list[str] = []
+        self._blocks: deque[str] = deque()
+
+    def append(self, line: str) -> None:
+        self._lines.append(line)
+        if len(self._lines) == _CPP_BLOCK_LINES:
+            self._flush()
+
+    def extend(self, lines: Iterable[str]) -> None:
+        for line in lines:
+            self.append(line)
+
+    def _flush(self) -> None:
+        self._lines.append("")
+        self._blocks.append("\n".join(self._lines))
+        self._lines.clear()
+
+    def finish(self) -> deque[str]:
+        if self._lines:
+            self._flush()
+        return self._blocks
 
 
 def _consume_cpp_blocks(blocks: deque[str]) -> Iterator[str]:
@@ -4297,9 +4311,10 @@ def emit_split_cpp(mod: Module, n_shards: int) -> tuple[str, list[tuple[str, str
         raise ValueError("n_shards must be >= 1")
     cls = f"{mod.name}Dut"
     with observe_phase('emit_cpp'):
-        lines = _emit_cpp_lines(mod)
+        output = _CppBlocks()
+        _emit_cpp_lines(mod, output)
         with observe_phase('emit.join_text'):
-            blocks = _pack_cpp_blocks(lines)
+            blocks = output.finish()
         with observe_phase('emit.constructor'):
             bulk = _needs_bulk_constructor(blocks, cls)
     # The rewrite feeds the splitter directly. Release each input block as
@@ -4525,7 +4540,7 @@ def _emit_cone_temp(
     assigns: dict[str, Expr],
     sigs: dict[str, Signal],
     cached: set[str],
-    lines: list[str],
+    lines: _LineSink,
     scratch: list[int],
 ) -> None:
     tw = sigs[tmp].width if tmp in sigs else 32
@@ -4554,7 +4569,7 @@ def _emit_cached_value(
     assigns: dict[str, Expr],
     sigs: dict[str, Signal],
     cached: set[str],
-    lines: list[str],
+    lines: _LineSink,
     scratch: list[int],
 ) -> None:
     expr = assigns[name]
@@ -4577,7 +4592,7 @@ def _emit_eager_region(
     stop: set[str],
     cached: set[str],
     cdeps: dict[str, list[str]],
-    lines: list[str],
+    lines: _LineSink,
 ) -> list[str]:
     """`_eager{r}()`: every wire of region r in dependency order.
 
@@ -4597,15 +4612,16 @@ def _emit_eager_region(
             demanded.add(call)
             lines.append(call)
     dp = _PASS_PAGE[r]
-    ready_body_start = len(lines)
-    lines.append(f"    _eg{r} = _pg[{part}];")
-    lines.append(f"    if (_ed{r} == _pg[{dp}] && !_up{r}) return;")
-    lines.append(f"    _ed{r} = _pg[{dp}];")
-    lines.append(f"    _up{r} = 0;")
+    ready_body = [
+        f"    _eg{r} = _pg[{part}];",
+        f"    if (_ed{r} == _pg[{dp}] && !_up{r}) return;",
+        f"    _ed{r} = _pg[{dp}];",
+        f"    _up{r} = 0;",
+    ]
     nchunks = (len(order) + _EAGER_CHUNK - 1) // _EAGER_CHUNK
     for k in range(nchunks):
-        lines.append(f"    _eager{r}_{k}();")
-    ready_body = lines[ready_body_start:]
+        ready_body.append(f"    _eager{r}_{k}();")
+    lines.extend(ready_body)
     lines.append("  }")
     lines.append("")
     _EAGER_DONE = region | set(foreign)
@@ -4650,7 +4666,7 @@ def _emit_eval_method(
     sigs: dict[str, Signal],
     stop: set[str],
     cached: set[str],
-    lines: list[str],
+    lines: _LineSink,
     part: int,
 ) -> None:
     expr = assigns[name]
@@ -4707,7 +4723,7 @@ def _emit_assign(
     expr: Expr,
     cached: set[str],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     mask: str | None,
     scratch: list[int] | None = None,
@@ -4794,7 +4810,7 @@ def _cond_code(
     expr: Expr,
     cached: set[str],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     scratch: list[int] | None = None,
 ) -> str:
@@ -4824,7 +4840,7 @@ def _bind_narrow(
     width: int,
     cached: set[str],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     scratch: list[int],
 ) -> str:
@@ -4849,7 +4865,7 @@ def _emit_narrow_from_wide(
     dest_w: int,
     cached: set[str],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     scratch: list[int],
 ) -> None:
@@ -4985,7 +5001,7 @@ def _emit_narrow_from_wide(
     lines.append(f"{sp}{dest} = {emit_expr(expr, sigs)};")
 
 
-def _wtmp(lines: list[str], indent: int, nlimbs: int, scratch: list[int]) -> str:
+def _wtmp(lines: _LineSink, indent: int, nlimbs: int, scratch: list[int]) -> str:
     i = scratch[0]
     scratch[0] += 1
     name = f"__wl{i}"
@@ -5024,7 +5040,7 @@ def _emit_shift_amt(
     expr: Expr,
     cached: set[str],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     scratch: list[int],
 ) -> str:
@@ -5046,7 +5062,7 @@ def _emit_setbits_scalar(
     offset: int,
     width: int,
     src_c: str,
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     scratch: list[int],
 ) -> None:
@@ -5074,7 +5090,7 @@ def _place_bits(
     width: int,
     cached: set[str],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     scratch: list[int],
 ) -> None:
@@ -5109,7 +5125,7 @@ def _materialize_limbs(
     width: int,
     cached: set[str],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     scratch: list[int],
 ) -> str:
@@ -5142,7 +5158,7 @@ def _emit_wide_assign(
     expr: Expr,
     cached: set[str],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     scratch: list[int] | None = None,
 ) -> None:
@@ -5287,7 +5303,7 @@ def _emit_array_assign(
     expr: Expr,
     cached: set[str],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     scratch: list[int] | None = None,
 ) -> None:
@@ -5348,7 +5364,7 @@ def _emit_eval_calls(
     cached: set[str],
     assigns: dict[str, Expr],
     stop: set[str],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     satisfied_passes: set[int] | None = None,
 ) -> None:
@@ -5400,7 +5416,7 @@ def _emit_eval_calls(
 def _emit_demand(
     expr: Expr,
     cached: set[str],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     demanded: set[str] | None = None,
 ) -> None:
@@ -5457,13 +5473,31 @@ def _uncached_needed(
     return needed
 
 
+def _uncached_names(
+    expr: Expr,
+    assigns: dict[str, Expr],
+    cached: set[str],
+    stop: set[str],
+) -> set[str]:
+    """Collect the same cone as _uncached_needed without ordering bindings."""
+    names: set[str] = set()
+    pending = list(expr_ids(expr, ordered=False))
+    while pending:
+        name = pending.pop()
+        if name in names or name in cached or name in stop or name not in assigns:
+            continue
+        names.add(name)
+        pending.extend(expr_ids(assigns[name], ordered=False))
+    return names
+
+
 def _emit_compute(
     expr: Expr,
     cached: set[str],
     assigns: dict[str, Expr],
     stop: set[str],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     declared: set[str],
     scratch: list[int] | None = None,
@@ -5502,7 +5536,7 @@ def _emit_reset_epilogue(
     assigns: dict[str, Expr],
     stop: set[str],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
 ) -> None:
     """One shared reset check after next-state, GSIM's slow-path reset.
 
@@ -5530,7 +5564,7 @@ def _emit_nba_tree(
     assigns: dict[str, Expr],
     stop: set[str],
     sigs: dict[str, Signal],
-    lines: list[str],
+    lines: _LineSink,
     indent: int,
     declared: set[str],
     scratch: list[int] | None = None,

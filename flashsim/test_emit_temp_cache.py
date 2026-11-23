@@ -35,12 +35,12 @@ def test_nested_and_shared_arms_match_uncached_traversal(monkeypatch):
         pool.extend(layer)
     expected = [_naive([stmt], cached, assigns, stop) for stmt in pool]
     calls = 0
-    original = emit._uncached_needed
+    original = emit._uncached_names
     def counted(*args):
         nonlocal calls
         calls += 1
         return original(*args)
-    monkeypatch.setattr(emit, '_uncached_needed', counted)
+    monkeypatch.setattr(emit, '_uncached_names', counted)
     collector = emit._UncachedTempCollector(cached, assigns, stop)
     actual = [collector.collect([stmt]) for stmt in pool]
     assert actual == expected
@@ -73,11 +73,11 @@ def test_inline_site_count_stops_at_threshold_and_counts_each_statement_once(mon
     original_count = emit._expr_node_count
     fat_cost_queries = 0
 
-    def counted(expr):
+    def counted(expr, **options):
         nonlocal shared_walks
         if expr is shared:
             shared_walks += 1
-        return original(expr)
+        return original(expr, **options)
 
     def count_cost(expr):
         nonlocal fat_cost_queries
