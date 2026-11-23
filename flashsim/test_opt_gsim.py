@@ -48,6 +48,17 @@ def _module(assigns: list[Assign], body: list) -> Module:
     return Module("Slice", _signals(), assigns, AlwaysFF("clock", body), ["clock"])
 
 
+def test_constant_output_keeps_its_driver_after_substitution() -> None:
+    expected = Const(0xa5, 8)
+    mod = optimize(_module(
+        [Assign("out", expected), Assign("bit", Extract(Id("out"), 0, 1))], [],
+    ))
+    assigns = {item.lhs: item.rhs for item in mod.assigns}
+    assert assigns["out"] == expected
+    assert assigns["bit"] == Const(1, 1)
+    assert "uint8_t out = 0;" in emit_cpp(mod)
+
+
 def test_extract_of_concat_drops_the_unused_half() -> None:
     mod = optimize(_module(
         [
