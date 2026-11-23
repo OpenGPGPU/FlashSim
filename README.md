@@ -129,6 +129,10 @@ bound parallel import and lowering. Select either serial mode or a worker
 limit. The threading choice is part of the imported MLIR cache identity,
 and asserted imports still use `--single-unit`.
 
+Set `FLASHSIM_CIRCT_LARGEST_FIRST=1` with a CIRCT build that supports
+`--mlir-pass-schedule-largest-first`. Parallel MLIR passes dispatch larger
+modules first and report diagnostics in source order.
+
 `FLASHSIM_GC_POLICY=defer` optionally defers automatic Python cyclic garbage
 collection during `compile_verilog` and `compile_file`, including shard emission.
 Reference counting remains active; the caller's enabled/disabled GC state is
