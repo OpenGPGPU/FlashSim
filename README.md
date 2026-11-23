@@ -171,6 +171,36 @@ disabled. Reproduce them with
 `python3 -B -m pytest flashsim/test_compile_model_lifetime.py -q`.
 These checks establish input lifetime, not complete GPU generation memory use.
 
+File-based generation releases the cached MLIR text after splitting and each
+module body as lowering finishes. Two alternating pairs on the same
+assertion-enabled 640×480 dual-CU OpenGPU checked-uniform MLIR lowered 1,430
+modules with identical signal, assignment, sequential and assertion counts.
+On ARM64 macOS, the median peak process footprint reported by
+`/usr/bin/time -l` went from 1.95 to 1.58 GiB. Median peak RSS went from
+2.63 to 2.60 GiB. Both revisions reached the flatten handoff in about 44 s.
+
+With Python 3.14.7 and that cached MLIR, run once per checkout with
+`text` at `bae89bb` and `file` with the updated parser.
+
+```sh
+PYTHONHASHSEED=73 /usr/bin/time -l python3 -B - "$OWNER_MLIR" file <<'PY'
+import gc
+from pathlib import Path
+import sys
+from flashsim import circt_frontend
+
+def stop_at_flatten(top, library, remaining):
+    print(top.name, len(library))
+    return top
+
+gc.disable()
+circt_frontend._flatten = stop_at_flatten
+path = Path(sys.argv[1])
+source = path.read_text() if sys.argv[2] == 'text' else path
+circt_frontend.parse_hw_mlir(source, top='GpuHostSystemAxi')
+PY
+```
+
 Memoized expression mapping visits terminal nodes directly without scheduling
 a second traversal pass. Shared roots retain the same identity memo and visitor
 semantics. On the actual 32850-bit-waiter `L2MshrTable` (328653 flattened signals),
@@ -451,6 +481,16 @@ OpenGPU model with 86 original files and 285 derived files. Both revisions
 verified the same bytes in two alternating pairs on ARM64 macOS with Python
 3.14.7. Median verification fell from 30.59 to 26.75 seconds, and the new
 verifier used about 64 MiB peak RSS.
+
+Generation compares and writes C++ files in bounded UTF-8 chunks. On an
+unchanged 314,872,973-byte commit shard from the same model, temporary Python
+allocations during the comparison fell from 601 to 3.1 MiB in two alternating
+pairs against `bae89bb`. This measurement starts after the generated text is
+in memory. Start `tracemalloc` at that point and measure
+`tracemalloc.get_traced_memory()[1]` after calling `_write_generated` with
+the existing shard and its text. Exact UTF-8 bytes, suffix replacement and
+unchanged modification times are covered by
+`python3 -B -m pytest flashsim/test_compile_incremental.py -q`.
 
 To reproduce, create a derived directory with each tool revision and time its
 verification on the same original C++ input:
@@ -1426,6 +1466,20 @@ PYTHONHASHSEED=73 FLASHSIM_COMMIT_PARTS=16 python3 -B scripts/bench_narrow_pass.
   "$OWNER_MLIR" --module "$MODULE" --hierarchy --preflatten-wires \
   --emit-cpp --shards 64 --repeat 1 --flashsim "$FLASH_CHECKOUT"
 ```
+
+Slice queries reuse their memo while the generated bindings are stable.
+Concatenation offsets are computed as the parts are examined, and the
+inline-size check bounds its worklist before adding children. Two alternating
+pairs against `bae89bb` used the same assertion-enabled OpenGPU `8a1919172`
+MLIR and Python 3.14.7. Each hierarchy's optimized IR and emitted C++ matched.
+
+| Hierarchy | Bit-slice narrowing | Total optimization |
+| --- | ---: | ---: |
+| `TexturePairPipeline_1` | 3.43 → 3.05 s | 5.44 → 5.05 s |
+| `GpuComputeUnitCore` | 7.54 → 6.81 s | 18.41 → 17.88 s |
+
+Use the command above with the two hierarchy names and omit `--shards 64`
+and `FLASHSIM_COMMIT_PARTS=16` to reproduce these measurements.
 
 The emitter releases each mutable leaf list as it freezes the invalidation
 pages. Leaves that use the same long list share its table index and extent.
