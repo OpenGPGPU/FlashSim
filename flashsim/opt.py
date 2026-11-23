@@ -84,10 +84,9 @@ def _optimize_owned(owned: list[Module]) -> Module:
     source_mem_writes = mod.mem_writes
     del mod
     outputs = {n for n, s in sigs.items() if s.kind == "output"}
-    regs = {n for n, s in sigs.items() if s.kind == "reg"}
-    inputs = {n for n, s in sigs.items() if s.kind == "input"}
-    mems = {n for n, s in sigs.items() if s.kind == "mem"}
-    keep = outputs | regs | inputs | mems | {clock_name}
+    keep = outputs.copy()
+    keep.update(n for n, s in sigs.items() if s.kind in {"reg", "input", "mem"})
+    keep.add(clock_name)
 
     # CIRCT may materialize a constant as a named wire and then reference that
     # wire directly from an always_ff body. `_subst_consts` removes the named
@@ -127,7 +126,7 @@ def _optimize_owned(owned: list[Module]) -> Module:
         )
         for w in source_mem_writes
     ]
-    del source_mem_writes
+    del source_mem_writes, rewrite, consts
     # Array reads index named storage in the emitter.  Inlining an array-valued
     # SSA definition would turn that storage into an unsupported expression.
     array_wires = {n for n, s in sigs.items() if s.kind == "wire" and s.depth}
@@ -135,7 +134,8 @@ def _optimize_owned(owned: list[Module]) -> Module:
     # per-assignment reference and reverse-use graphs for inlining.
     assigns, body = _dce(assigns, body, observed, mem_writes)
     assigns, body = _inline_single_use(assigns, body, observed | array_wires, mem_writes)
-    assigns = {k: _fold_expr(v) for k, v in assigns.items()}
+    del array_wires
+    _fold_owned_assignments(assigns)
     body = _map_stmts(body, _fold_expr)
     mem_writes = [
         MemWrite(w.mem, _fold_expr(w.addr), _fold_expr(w.data), _fold_expr(w.enable))
@@ -143,7 +143,7 @@ def _optimize_owned(owned: list[Module]) -> Module:
     ]
     if _BIT_SLICE:
         assigns, body, mem_writes = _narrow_bit_slices(assigns, body, mem_writes, sigs)
-        assigns = {k: _fold_expr(v) for k, v in assigns.items()}
+        _fold_owned_assignments(assigns)
         body = _map_stmts(body, _fold_expr)
         mem_writes = [
             MemWrite(w.mem, _fold_expr(w.addr), _fold_expr(w.data), _fold_expr(w.enable))
@@ -191,7 +191,7 @@ def _optimize_owned(owned: list[Module]) -> Module:
         assertion_reads = observer_reads()
         observed = outputs | assertion_reads
         with phase('opt.post_dedup_fold'):
-            assigns = {k: _fold_expr(v) for k, v in assigns.items()}
+            _fold_owned_assignments(assigns)
             body = _map_stmts(body, _fold_expr)
             reset_epilogue = _map_stmts(reset_epilogue, _fold_expr)
         assigns, body = _dce(assigns, body, observed, mem_writes)
@@ -201,7 +201,7 @@ def _optimize_owned(owned: list[Module]) -> Module:
         assigns, sigs = _apply_used_bits(assigns, body, reset_epilogue, mem_writes,
                                         sigs, observed_exprs)
         with phase('opt.post_used_bits_fold'):
-            assigns = {k: _fold_expr(v) for k, v in assigns.items()}
+            _fold_owned_assignments(assigns)
             body = _map_stmts(body, _fold_expr)
             reset_epilogue = _map_stmts(reset_epilogue, _fold_expr)
             mem_writes = [
@@ -212,9 +212,17 @@ def _optimize_owned(owned: list[Module]) -> Module:
     if _LUT:
         assigns = _apply_lut(assigns, sigs)
 
-    referred: set[str] = set(assigns)
-    for expr in assigns.values():
-        referred |= expr_ids(expr)
+    referred = keep.copy()
+    referred.update(assigns)
+    dangling_assignment: tuple[str, str] | None = None
+    for name, expr in assigns.items():
+        dependencies = expr_ids(expr)
+        referred.update(dependencies)
+        if dangling_assignment is None:
+            for dep in dependencies:
+                if dep not in assigns and dep not in keep:
+                    dangling_assignment = (dep, name)
+                    break
     for stmt in body:
         referred |= stmt_reads(stmt) | stmt_writes(stmt)
     for stmt in reset_epilogue:
@@ -223,20 +231,18 @@ def _optimize_owned(owned: list[Module]) -> Module:
         referred |= expr_ids(wr.addr) | expr_ids(wr.data) | expr_ids(wr.enable)
         referred.add(wr.mem)
     referred |= assertion_reads
-    # Sorted, not set order: `keep | referred` is a set union, so iterating it
+    # Sorted, not set order: `referred` is a set, so iterating it
     # directly makes the signal order (and therefore the generated struct
     # layout) depend on PYTHONHASHSEED. Two runs on the same input then emit
     # different C++, which guarantees a ccache miss on every 280 MB ARTI
     # rebuild and makes a binary unreproducible from source.
-    new_sigs: dict[str, Signal] = {
-        n: sigs[n] for n in sorted(keep | referred) if n in sigs
-    }
+    new_sigs = {n: sigs[n] for n in sorted(referred) if n in sigs}
+    del referred
     _fill_missing_wire_signals(sigs, new_sigs, assigns)
+    if dangling_assignment is not None:
+        dep, name = dangling_assignment
+        raise ValueError(f"dangling wire {dep} used by {name}")
     new_assigns = [Assign(lhs, rhs) for lhs, rhs in assigns.items()]
-    for name, expr in assigns.items():
-        for dep in expr_ids(expr):
-            if dep not in assigns and dep not in keep:
-                raise ValueError(f"dangling wire {dep} used by {name}")
     for stmt in body:
         for dep in stmt_reads(stmt):
             if dep not in assigns and dep not in keep:
@@ -347,6 +353,15 @@ def _concat_as_shift(left: Expr, right: Expr, sigs: dict[str, Signal]) -> Expr |
 
 def _fold_expr(expr: Expr) -> Expr:
     return map_expr_memoized(expr, _fold_node)
+
+
+def _fold_owned_assignments(assigns: dict[str, Expr]) -> None:
+    # Folding reads only the current expression. Replace changed values in the
+    # optimizer's private table and let the old roots go as each one is folded.
+    for name, expr in assigns.items():
+        folded = _fold_expr(expr)
+        if folded is not expr:
+            assigns[name] = folded
 
 
 def _fold_node(expr: Expr) -> Expr:
