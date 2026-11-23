@@ -846,11 +846,14 @@ def _rename_expr(expr: Expr, rename: dict[str, str], memo=None) -> Expr:
                 continue
         else:
             active.remove(key)
-        mapped = tuple(_rename_leaf(child, rename, names)
-                       if isinstance(child, _LEAF_EXPR_TYPES) else memo[id(child)][1]
-                       for child in children)
-        rebuilt = (_rebuild_expr(node, mapped)
-                   if any(a is not b for a, b in zip(children, mapped)) else node)
+        mapped: list[Expr] = []
+        changed = False
+        for child in children:
+            renamed = (_rename_leaf(child, rename, names) if isinstance(child, _LEAF_EXPR_TYPES)
+                       else memo[id(child)][1])
+            mapped.append(renamed)
+            changed = changed or renamed is not child
+        rebuilt = _rebuild_expr(node, tuple(mapped)) if changed else node
         if isinstance(rebuilt, MemRead):
             rebuilt = MemRead(rename.get(rebuilt.mem, rebuilt.mem), rebuilt.addr)
         memo[key] = (node, rebuilt)
