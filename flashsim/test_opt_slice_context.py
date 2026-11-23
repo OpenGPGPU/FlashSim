@@ -105,6 +105,21 @@ def test_unknown_width_failures_and_their_parents_are_not_cached():
         assert query(src, signals, memo=memo) == expected
 
 
+def test_unassigned_identifier_rechecks_a_width_declared_later():
+    src = Id("later")
+    signals = {}
+    memo = opt._SliceMemo()
+
+    def narrow():
+        return opt._slice_src(src, 0, 4, {}, signals, {}, {}, {}, set(), memo=memo)
+
+    assert narrow() is None
+    assert memo.unknown_widths == 1
+    signals["later"] = Signal("later", 4, "input")
+    assert narrow() is src
+    assert not memo.entries
+
+
 def test_cache_is_bounded_and_full_width_id_returns_the_current_object(monkeypatch):
     monkeypatch.setattr(opt, "_SLICE_RESULT_CACHE_MAX", 3)
     memo = opt._SliceMemo()
