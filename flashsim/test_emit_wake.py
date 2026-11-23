@@ -105,6 +105,21 @@ struct FooDut {{
     assert "void FooDut::_commit()" not in parts[1][1]
 
 
+def test_partition_leaf_ids_are_unique_and_ordered() -> None:
+    from flashsim.emit import _partition_maps
+
+    deps = {
+        f"wire_{index}": frozenset(("shared", f"leaf_{index % 3}"))
+        for index in range(150)
+    }
+    eager = {wire: index % 11 for index, wire in enumerate(deps) if index % 5}
+    wire_part, leaf_parts, count = _partition_maps(set(deps), deps, eager)
+    assert count == len(set(wire_part.values()))
+    assert leaf_parts.keys() == {"shared", "leaf_0", "leaf_1", "leaf_2"}
+    for leaf, parts in leaf_parts.items():
+        assert parts == sorted({wire_part[wire] for wire in deps if leaf in deps[wire]})
+
+
 def test_l2_partition_keeps_slice_submodule() -> None:
     from flashsim.emit import skip_partition_key
 
