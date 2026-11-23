@@ -28,9 +28,9 @@ def test_serial_setting_invalidates_mlir_cache(tmp_path, monkeypatch):
     mlir = tmp_path / "hw.mlir"
     calls = []
 
-    def import_rtl(path, **kwargs):
+    def import_rtl(path, *, output, **kwargs):
         calls.append(circt_frontend.circt_serial_import())
-        return "hw.module @Top() { hw.output }\n"
+        output.write(b"hw.module @Top() { hw.output }\n")
 
     monkeypatch.setattr(compiler, "circt_verilog_to_mlir", import_rtl)
     monkeypatch.delenv("FLASHSIM_CIRCT_SERIAL", raising=False)
@@ -50,9 +50,9 @@ def test_bounded_workers_preserve_assertions_and_bind_cache(tmp_path, monkeypatc
     mlir = tmp_path / "hw.mlir"
     calls = []
 
-    def import_rtl(path, *, assertions):
+    def import_rtl(path, *, assertions, output):
         calls.append(circt_frontend.circt_verilog_command(path, assertions=assertions))
-        return "hw.module @Top() { hw.output }\n"
+        output.write(b"hw.module @Top() { hw.output }\n")
 
     monkeypatch.setattr(circt_frontend, "find_bin", lambda _: Path("/circt-verilog"))
     monkeypatch.setattr(compiler, "circt_verilog_to_mlir", import_rtl)
@@ -71,6 +71,36 @@ def test_bounded_workers_preserve_assertions_and_bind_cache(tmp_path, monkeypatc
                              mlir_path=mlir, assertions=True)
     assert len(calls) == 3
     assert all(not flag.startswith("--mlir-threads") for flag in calls[-1])
+
+
+@pytest.mark.parametrize("failure", ["tool", "empty"])
+def test_failed_direct_import_keeps_previous_cache(tmp_path, monkeypatch, failure):
+    top = tmp_path / "Top.sv"
+    top.write_text("module Top; endmodule\n")
+    mlir = tmp_path / "hw.mlir"
+    contents = b"hw.module @Top() { hw.output }\n"
+    calls = []
+
+    def import_rtl(path, *, assertions, output):
+        calls.append(circt_frontend.circt_import_parallelism())
+        if len(calls) == 1:
+            output.write(contents)
+        elif failure == "tool":
+            output.write(b"partial import")
+            raise CirctError("tool failed")
+
+    monkeypatch.setattr(compiler, "circt_verilog_to_mlir", import_rtl)
+    monkeypatch.delenv("FLASHSIM_CIRCT_SERIAL", raising=False)
+    monkeypatch.setenv("FLASHSIM_CIRCT_THREADS", "2")
+    compiler.prepare_circt_mlir(top, mlir, assertions=True)
+    monkeypatch.setenv("FLASHSIM_CIRCT_THREADS", "4")
+    with pytest.raises(CirctError, match="tool failed|produced no MLIR"):
+        compiler.prepare_circt_mlir(top, mlir, assertions=True)
+    assert mlir.read_bytes() == contents
+    assert not list(tmp_path.glob("hw.mlir.*.tmp"))
+    monkeypatch.setenv("FLASHSIM_CIRCT_THREADS", "2")
+    compiler.prepare_circt_mlir(top, mlir, assertions=True)
+    assert calls == [2, 4]
 
 
 @pytest.mark.parametrize("threads", ["", "-1", "0", "4.0", "4294967296"])

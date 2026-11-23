@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from flashsim.circt_frontend import (
     CirctError,
@@ -38,6 +39,41 @@ def compile_verilog(
     return mod, cpp
 
 
+def prepare_circt_mlir(path: Path, mlir_path: Path, *, assertions: bool = False) -> None:
+    """Import RTL into a reusable MLIR file without parsing or generating C++."""
+    workers = circt_import_parallelism()
+    # Keep both legacy values reusable. Older FlashSim versions reject a
+    # marker containing a worker limit and regenerate their own cache.
+    threading = {None: "0", 0: "1"}.get(workers, f"threads:{workers}")
+    fingerprint = _assertion_sources(path) if assertions else None
+    if (_mlir_matches(mlir_path, path, threading, assertions=assertions)
+            and _mlir_fresh(mlir_path, path, fingerprint)):
+        return
+
+    mlir_path.parent.mkdir(parents=True, exist_ok=True)
+    stream = NamedTemporaryFile(dir=mlir_path.parent, prefix=mlir_path.name + '.',
+                                suffix='.tmp', delete=False)
+    temporary = Path(stream.name)
+    try:
+        with stream, phase('frontend.circt'):
+            circt_verilog_to_mlir(path, assertions=assertions, output=stream)
+        if not temporary.stat().st_size:
+            raise CirctError("circt-verilog produced no MLIR")
+        if assertions and fingerprint != _assertion_sources(path):
+            raise CirctError("assertion inputs changed during CIRCT compilation")
+        threading_marker = mlir_path.with_suffix(".mlir.circt-serial")
+        threading_marker.unlink(missing_ok=True)
+        temporary.replace(mlir_path)
+        mlir_path.with_suffix(".mlir.top").write_text(path.stem)
+        mlir_path.with_suffix(".mlir.assertions").write_text("1" if assertions else "0")
+        if assertions:
+            mlir_path.with_suffix(".mlir.assertion-sources.json").write_text(
+                json.dumps(fingerprint, sort_keys=True))
+        threading_marker.write_text(threading)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _compile_module(
     src: str, frontend: str, path: Path | None, mlir_path: Path | None, *,
     assertions: bool,
@@ -49,32 +85,14 @@ def _compile_module(
     if kind == "circt":
         if path is None:
             raise CirctError("CIRCT frontend needs a Verilog file path")
-        workers = circt_import_parallelism()
-        # Keep both legacy values reusable. Older FlashSim versions reject a
-        # marker containing a worker limit and regenerate their own cache.
-        threading = {None: "0", 0: "1"}.get(workers, f"threads:{workers}")
-        if mlir_path is None or not (
-            _mlir_fresh(mlir_path, path, assertions=assertions)
-            and _mlir_matches(mlir_path, path, threading, assertions=assertions)
-        ):
+        if mlir_path is None:
             fingerprint = _assertion_sources(path) if assertions else None
             with phase('frontend.circt'):
-                mlir = (circt_verilog_to_mlir(path, assertions=True) if assertions
-                        else circt_verilog_to_mlir(path))
+                mlir = circt_verilog_to_mlir(path, assertions=assertions)
             if assertions and fingerprint != _assertion_sources(path):
                 raise CirctError("assertion inputs changed during CIRCT compilation")
-            if mlir_path is not None:
-                mlir_path.parent.mkdir(parents=True, exist_ok=True)
-                threading_marker = mlir_path.with_suffix(".mlir.circt-serial")
-                threading_marker.unlink(missing_ok=True)
-                mlir_path.write_text(mlir)
-                mlir_path.with_suffix(".mlir.top").write_text(path.stem)
-                mlir_path.with_suffix(".mlir.assertions").write_text("1" if assertions else "0")
-                if assertions:
-                    mlir_path.with_suffix(".mlir.assertion-sources.json").write_text(
-                        json.dumps(fingerprint, sort_keys=True))
-                threading_marker.write_text(threading)
         else:
+            prepare_circt_mlir(path, mlir_path, assertions=assertions)
             mlir = mlir_path.read_text()
         with phase('parse.hw_mlir'):
             if preflatten == '1':
@@ -188,18 +206,17 @@ def _auto_split_count(path: Path, cpp_bytes: int) -> int:
     return 32 if cpp_bytes > 400_000_000 else 16
 
 
-def _mlir_fresh(mlir_path: Path, verilog: Path, *, assertions: bool = False) -> bool:
+def _mlir_fresh(mlir_path: Path, verilog: Path, fingerprint: dict[str, str] | None) -> bool:
     if not mlir_path.is_file():
         return False
-    if assertions:
+    if fingerprint is not None:
         try:
             recorded = json.loads(mlir_path.with_suffix(".mlir.assertion-sources.json").read_text())
-            return recorded == _assertion_sources(verilog)
+            return recorded == fingerprint
         except (OSError, ValueError):
             return False
     stamp = mlir_path.stat().st_mtime
-    return all(src.stat().st_mtime <= stamp
-               for src in verilog_sources(verilog, assertions=assertions))
+    return all(src.stat().st_mtime <= stamp for src in verilog_sources(verilog))
 
 
 def _assertion_sources(verilog: Path) -> dict[str, str]:
