@@ -16,7 +16,7 @@ import os
 import re
 import sys
 from collections import ChainMap, Counter, deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import fields
 from functools import lru_cache
 from flashsim.phase_timing import phase, timed_phase
@@ -2165,20 +2165,57 @@ def _value_differs(lhs: str, value: int, sigs: dict[str, Signal]) -> Expr:
     return BinOp("!=", Id(lhs), Const(value, width))
 
 
+def _rewrite_nbas_with_prior_writes(
+    body: list[Stmt],
+    earlier_writes: set[str] | None,
+    rewrite: Callable[[Stmt, set[str]], Stmt | None],
+) -> list[Stmt]:
+    written = set(earlier_writes or ())
+    added: list[str] = []
+
+    def walk(stmts: list[Stmt], *, _recur) -> list[Stmt]:
+        prefix = len(added)
+        out: list[Stmt] = []
+        for original in stmts:
+            stmt = original
+            if isinstance(stmt, If):
+                stmt = If(
+                    stmt.cond,
+                    _recur(stmt.then_body, _recur=_recur),
+                    _recur(stmt.else_body, _recur=_recur),
+                )
+            replacement = rewrite(stmt, written)
+            if replacement is None:
+                continue
+            out.append(replacement)
+            # Later siblings still see every possible write of the original
+            # conditional, even if its arm dropped an old-value self write.
+            names = (
+                (original.lhs,) if isinstance(original, NbAssign) else stmt_writes(original)
+            )
+            for name in names:
+                if name not in written:
+                    written.add(name)
+                    added.append(name)
+        # Sibling arms start with the same prior writes. Remove only the
+        # additions from this arm instead of copying the growing prefix.
+        written.difference_update(added[prefix:])
+        del added[prefix:]
+        return out
+
+    return walk(body, _recur=walk)
+
+
+@timed_phase('opt.self_gate_const_holds')
 def _self_gate_const_holds(
     body: list[Stmt], sigs: dict[str, Signal], earlier_writes: set[str] | None = None,
 ) -> list[Stmt]:
     """`if (en) x <= c` is a no-op once x already holds c; skip it while idle."""
-    out: list[Stmt] = []
-    written = set(earlier_writes or ())
-    for stmt in body:
+    def rewrite(stmt: Stmt, written: set[str]) -> Stmt:
         if not isinstance(stmt, If):
-            out.append(stmt)
-            written |= stmt_writes(stmt)
-            continue
-        then = _self_gate_const_holds(stmt.then_body, sigs, written)
-        els = _self_gate_const_holds(stmt.else_body, sigs, written)
-        if (not els and then
+            return stmt
+        then = stmt.then_body
+        if (not stmt.else_body and then
                 and all(_is_scalar_const_nba(s, sigs) for s in then)
                 and not any(s.lhs in written for s in then)):
             diffs = [
@@ -2189,11 +2226,10 @@ def _self_gate_const_holds(
             nz = diffs[0]
             for part in diffs[1:]:
                 nz = BinOp("|", nz, part)
-            out.append(If(BinOp("&", stmt.cond, nz), then, []))
-        else:
-            out.append(If(stmt.cond, then, els))
-        written |= stmt_writes(stmt)
-    return out
+            return If(BinOp("&", stmt.cond, nz), then, [])
+        return stmt
+
+    return _rewrite_nbas_with_prior_writes(body, earlier_writes, rewrite)
 
 
 def _sticky_rhs(lhs: str, rhs: Expr, sigs: dict[str, Signal]) -> bool:
@@ -2222,6 +2258,7 @@ def _differs(lhs: str, rhs: Expr, sigs: dict[str, Signal]) -> Expr:
     return BinOp("!=", Id(lhs), rhs)
 
 
+@timed_phase('opt.wrap_sticky_nbas')
 def _wrap_sticky_nbas(
     body: list[Stmt], sigs: dict[str, Signal], earlier_writes: set[str] | None = None,
 ) -> list[Stmt]:
@@ -2231,31 +2268,17 @@ def _wrap_sticky_nbas(
     scoreboard resets and muxed copies out of `_nba_live`. Leave `x <= x+1`
     counters alone: those fire every cycle and must stay live.
     """
-    out: list[Stmt] = []
-    written = set(earlier_writes or ())
-    for stmt in body:
-        if isinstance(stmt, NbAssign):
-            if stmt.lhs in written:
-                # A value equal to old state can still cancel a pending NBA.
-                out.append(stmt)
-            elif isinstance(stmt.rhs, Id) and stmt.rhs.name == stmt.lhs:
-                continue
-            elif _sticky_rhs(stmt.lhs, stmt.rhs, sigs):
-                out.append(If(_differs(stmt.lhs, stmt.rhs, sigs), [stmt], []))
-            else:
-                out.append(stmt)
-        elif isinstance(stmt, If):
-            out.append(
-                If(
-                    stmt.cond,
-                    _wrap_sticky_nbas(stmt.then_body, sigs, written),
-                    _wrap_sticky_nbas(stmt.else_body, sigs, written),
-                )
-            )
-        else:
-            out.append(stmt)
-        written |= stmt_writes(stmt)
-    return out
+    def rewrite(stmt: Stmt, written: set[str]) -> Stmt | None:
+        if not isinstance(stmt, NbAssign) or stmt.lhs in written:
+            # A value equal to old state can still cancel a pending NBA.
+            return stmt
+        if isinstance(stmt.rhs, Id) and stmt.rhs.name == stmt.lhs:
+            return None
+        if _sticky_rhs(stmt.lhs, stmt.rhs, sigs):
+            return If(_differs(stmt.lhs, stmt.rhs, sigs), [stmt], [])
+        return stmt
+
+    return _rewrite_nbas_with_prior_writes(body, earlier_writes, rewrite)
 
 
 def _map_stmts(stmts: list[Stmt], fn) -> list[Stmt]:

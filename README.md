@@ -1345,3 +1345,37 @@ FLASHSIM_GC_POLICY=defer python3 -B -m pytest flashsim -q
 
 These are compiler checks; complete GPU model qualification and simulation
 throughput still require their own runs.
+
+### Ordered nonblocking writes
+
+Idle gating walks the clocked body with one set of earlier writes. Each
+conditional arm rolls back its additions before the other arm starts. Later
+statements still see every possible target of the original conditional, which
+preserves the priority of writes that can cancel a pending update.
+
+On ARM64 macOS with Python 3.14.7, one fresh-process pair with 32,000 distinct
+conditional writes reduced the combined time for constant idle gating and
+sticky writes from 19.60 s to 0.28 s. Both rewritten bodies matched exactly.
+The full `StreamingTypedTileColorLanes` hierarchy from the asserted dual-CU
+RTL matched in optimized IR and all 97,217,662 generated C++ bytes, including
+126 assertions. Its optimizer time was 111.83 s and 110.99 s, respectively.
+The synthetic timings isolate the two earlier-write passes.
+
+Run the following from each FlashSim checkout to compare those passes.
+
+```sh
+PYTHONHASHSEED=73 python3 -B - <<'PY'
+from hashlib import sha256
+from time import perf_counter
+from flashsim.ir import Const, Id, If, NbAssign, Signal
+from flashsim.opt import _self_gate_const_holds, _wrap_sticky_nbas
+
+sigs = {f"r{i}": Signal(f"r{i}", 8, "reg") for i in range(32000)}
+body = [If(Id("enable"), [NbAssign(name, Const(0, 8))], []) for name in sigs]
+for transform in (_self_gate_const_holds, _wrap_sticky_nbas):
+    started = perf_counter()
+    result = transform(body, sigs)
+    print(transform.__name__, perf_counter() - started, sha256(repr(result).encode()).hexdigest())
+PY
+python3 -B -m pytest -q flashsim/test_pending_nba_priority.py
+```

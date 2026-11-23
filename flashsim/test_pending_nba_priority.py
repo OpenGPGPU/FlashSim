@@ -6,8 +6,29 @@ import subprocess
 import pytest
 
 from flashsim.emit import emit_cpp
-from flashsim.ir import AlwaysFF, Const, Id, If, Module, NbAssign, Signal
-from flashsim.opt import optimize
+from flashsim.ir import AlwaysFF, BinOp, Const, Id, If, Module, NbAssign, Signal
+from flashsim.opt import _self_gate_const_holds, _wrap_sticky_nbas, optimize
+
+
+def test_conditional_arms_track_prior_writes_independently():
+    sigs = {name: Signal(name, 8, 'reg') for name in ('a', 'b')}
+    clear = If(Id('clear'), [NbAssign('a', Const(0, 8))], [])
+    body = [If(Id('select'), [NbAssign('a', Id('data'))], [clear]), clear]
+    earlier_writes = {'b'}
+
+    branch, tail = _self_gate_const_holds(body, sigs, earlier_writes)
+    idle_gate = BinOp('&', Id('clear'), BinOp('!=', Id('a'), Const(0, 8)))
+    assert branch.else_body == [If(idle_gate, clear.then_body, [])]
+    assert tail == clear
+    assert earlier_writes == {'b'}
+
+    self_write = NbAssign('a', Id('a'))
+    branch, tail = _wrap_sticky_nbas(
+        [If(Id('select'), [self_write], [self_write]), self_write], sigs, earlier_writes,
+    )
+    assert not branch.then_body and not branch.else_body
+    assert tail == self_write
+    assert earlier_writes == {'b'}
 
 
 def _run(tmp_path, body, check, extra=0):
