@@ -10,7 +10,7 @@ from collections.abc import Iterable, Iterator
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from io import StringIO
-from itertools import groupby
+from itertools import chain, groupby
 
 from flashsim.phase_timing import phase as observe_phase
 
@@ -2077,7 +2077,6 @@ def _bulk_state_constructor(cpp: str, cls: str,
                             min_fields: int = _BULK_CONSTRUCTOR_MIN_FIELDS) -> str:
     """Initialize generated arithmetic storage without a huge ctor init list."""
     start = cpp.index(f"struct {cls} {{")
-    prefix, body = cpp[:start], cpp[start:]
     field = re.compile(
         r"^  (?P<type_decl>(?:alignas\(\d+\) )?"
         r"(?P<type>uint(?:8|16|32|64)_t|unsigned __int128|unsigned|bool)) "
@@ -2105,45 +2104,70 @@ def _bulk_state_constructor(cpp: str, cls: str,
         result.append(text[begin:].strip())
         return result
 
-    lines = body.splitlines(True)
-    depth, initialized = 0, 0
-    members = []
-    end = None
-    for index, line in enumerate(lines):
-        if depth == 1:
-            match = field.match(line)
-            if match:
+    closing = None
+
+    def initialized_members():
+        nonlocal closing
+        depth, offset = 0, start
+        for line in _iter_lines(cpp, start):
+            following = offset + len(line)
+            if depth == 1 and (match := field.match(line)):
                 declarations = [declarator.fullmatch(part)
                                 for part in split_declarators(match["declarators"])]
                 assert all(declarations), (cls, line)
-                if any(part["init"] is not None for part in declarations):
-                    initialized += sum(part["init"] is not None for part in declarations)
-                    members.append((index, match, declarations))
-        depth += line.count("{") - line.count("}")
-        if depth == 0:
-            end = index
-            break
-    if initialized < min_fields:
-        return cpp
-    assert end is not None
-    restore = [f"  {cls}() {{", "    memset(static_cast<void*>(this), 0, sizeof(*this));"]
-    for index, match, declarations in members:
-        names = ", ".join(part["name"] + part["dims"] for part in declarations)
-        lines[index] = "  " + match["type_decl"] + " " + names + ";\n"
-        for part in declarations:
-            initial = part["init"]
-            if initial is None or initial.replace(" ", "").lower() in (
-                    "0", "0u", "0ull", "{}", "{0}", "{0u}"):
-                continue
-            if part["dims"]:
-                name = "__bulk_initial_" + part["name"]
-                restore.append(f"    static const {match['type']} {name}{part['dims']} = {initial};")
-                restore.append(f"    memcpy({part['name']}, {name}, sizeof({part['name']}));")
-            else:
-                restore.append(f"    {part['name']} = {initial};")
-    restore += ["  }", ""]
-    lines[end] = "\n".join(restore) + lines[end]
-    return prefix + "".join(lines)
+                count = sum(part["init"] is not None for part in declarations)
+                if count:
+                    yield offset, following, match, declarations, count
+            depth += line.count("{") - line.count("}")
+            if depth == 0:
+                closing = offset
+                return
+            offset = following
+
+    # Buffer only enough declarations to decide whether rewriting is needed.
+    # Product models can have millions of initialized fields.
+    members = initialized_members()
+    pending = []
+    initialized = 0
+    while initialized < min_fields:
+        member = next(members, None)
+        if member is None:
+            return cpp
+        pending.append(member)
+        initialized += member[-1]
+
+    def copy_text(output, begin, end):
+        # An unchanged method or suffix may itself be larger than the
+        # constructor. Avoid materializing it as a single substring.
+        chunk = 1024 * 1024
+        for offset in range(begin, end, chunk):
+            output.write(cpp[offset:min(offset + chunk, end)])
+
+    with StringIO() as output, StringIO() as restore:
+        restore.write(f"  {cls}() {{\n    memset(static_cast<void*>(this), 0, sizeof(*this));\n")
+        written = 0
+        for offset, following, match, declarations, _ in chain(pending, members):
+            copy_text(output, written, offset)
+            names = ", ".join(part["name"] + part["dims"] for part in declarations)
+            output.write("  " + match["type_decl"] + " " + names + ";\n")
+            written = following
+            for part in declarations:
+                initial = part["init"]
+                if initial is None or initial.replace(" ", "").lower() in (
+                        "0", "0u", "0ull", "{}", "{0}", "{0u}"):
+                    continue
+                if part["dims"]:
+                    name = "__bulk_initial_" + part["name"]
+                    restore.write(f"    static const {match['type']} {name}{part['dims']} = {initial};\n")
+                    restore.write(f"    memcpy({part['name']}, {name}, sizeof({part['name']}));\n")
+                else:
+                    restore.write(f"    {part['name']} = {initial};\n")
+        assert closing is not None
+        copy_text(output, written, closing)
+        output.write(restore.getvalue())
+        output.write("  }\n")
+        copy_text(output, closing, len(cpp))
+        return output.getvalue()
 
 
 def _eval_invoke(name: str, indent: int) -> str:
@@ -2487,6 +2511,13 @@ def _hold_group_size() -> int:
 
 
 def emit_cpp(mod: Module) -> str:
+    # Release the raw emitter's local data before rewriting the constructor.
+    cpp = _emit_cpp_text(mod)
+    with observe_phase('emit.constructor'):
+        return _bulk_state_constructor(cpp, f"{mod.name}Dut")
+
+
+def _emit_cpp_text(mod: Module) -> str:
     hold_group = _hold_group_size()
     sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
     assigns = assign_map(mod)
@@ -3644,8 +3675,16 @@ def emit_cpp(mod: Module) -> str:
     lines.append("};")
     lines.append("")
     _WIRE_PART = {}
+    _EAGER_OF = {}
+    _EAGER_DONE = set()
+    _REGION_HOLDS = {}
+    _PASS_CONSUMERS = {}
+    _PASS_PAGE = []
+    _PASS_BIT = {}
+    _LEAF_PASSES = {}
     _WRITE_INDEX = {}
     _WRITE_WIDE = set()
+    _ARRAY_INDEX = {}
     _LEAF_HOLDS = {}
     _HOLD_WAKE_TABLES = {}
     _HOLD_WAKE_PACKED = {}
@@ -3655,14 +3694,12 @@ def emit_cpp(mod: Module) -> str:
     _PAGE_GEN = False
     with observe_phase('emit.join_text'):
         # Preserve the trailing newline without copying the complete joined
-        # model to append it. Constructor rewriting makes its own line view;
-        # drop the original line objects first, including aliases in `sink`
-        # and the large-write helper closure.
+        # model to append it. Release lines shared with the memory sink and
+        # large-write helper before returning the packed text.
         lines.append("")
         cpp = "\n".join(lines)
         lines.clear()
-    with observe_phase('emit.constructor'):
-        return _bulk_state_constructor(cpp, f"{mod.name}Dut")
+    return cpp
 
 
 # Methods that stay in the class body even when splitting: tiny helpers called
@@ -4069,9 +4106,8 @@ def _outline_static_commit_blocks(header: str, cls: str, body: str,
 _LINE_END_RE = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
 
 
-def _iter_lines(text: str):
+def _iter_lines(text: str, start: int = 0):
     """Yield splitlines(keepends=True) with bounded temporary line storage."""
-    start = 0
     while start < len(text):
         end = min(start + 1024 * 1024, len(text))
         if end < len(text):
