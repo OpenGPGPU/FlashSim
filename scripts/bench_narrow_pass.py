@@ -28,10 +28,14 @@ def main():
                         help='apply compiler wire compaction before flattening')
     parser.add_argument('--emit-cpp', action='store_true',
                         help='also measure emission and hash the resulting C++')
+    parser.add_argument('--shards', type=int, default=0,
+                        help='with --emit-cpp, measure emission and splitting into this many shards')
     parser.add_argument('--flashsim', type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
     if args.repeat < 1:
         parser.error('positive --repeat required')
+    if args.shards < 0 or (args.shards and not args.emit_cpp):
+        parser.error('--shards requires --emit-cpp and a nonnegative count')
     source = args.flashsim.resolve(strict=True)
     sys.path.insert(0, str(source))
     from flashsim import circt_frontend as frontend, emit, opt
@@ -97,10 +101,25 @@ def main():
             representation_sha256=digest, automatic_gc_during_benchmark=False)
         if args.emit_cpp:
             started = time.perf_counter()
-            cpp = emit.emit_cpp(result).encode()
-            summary.update(emit_seconds=time.perf_counter() - started,
-                           emitted_cpp_bytes=len(cpp),
-                           emitted_cpp_sha256=hashlib.sha256(cpp).hexdigest())
+            if args.shards:
+                if hasattr(emit, 'emit_split_cpp'):
+                    header, parts = emit.emit_split_cpp(result, args.shards)
+                else:
+                    header, parts = emit.split_dut_methods(emit.emit_cpp(result), args.shards)
+                summary.update(emit_seconds=time.perf_counter() - started)
+                digest = hashlib.sha256()
+                total_bytes = 0
+                for name, text in [('dut.h', header), *parts]:
+                    data = text.encode()
+                    digest.update(name.encode() + b'\0' + len(data).to_bytes(8, 'big'))
+                    digest.update(data)
+                    total_bytes += len(data)
+                summary.update(emitted_cpp_bytes=total_bytes, emitted_cpp_sha256=digest.hexdigest())
+            else:
+                cpp = emit.emit_cpp(result).encode()
+                summary.update(emit_seconds=time.perf_counter() - started,
+                               emitted_cpp_bytes=len(cpp),
+                               emitted_cpp_sha256=hashlib.sha256(cpp).hexdigest())
         print(json.dumps(summary), flush=True)
     finally:
         opt._narrow_bit_slices = original

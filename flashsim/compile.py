@@ -13,7 +13,7 @@ from flashsim.circt_frontend import (
     verilog_sources,
     verilog_dependencies,
 )
-from flashsim.emit import emit_cpp, split_dut_methods
+from flashsim.emit import emit_cpp, emit_split_cpp, split_dut_methods
 from flashsim.data_regions import group_primitive_storage
 from flashsim.gc_policy import compilation_gc_policy
 from flashsim.phase_timing import phase
@@ -32,6 +32,16 @@ def compile_verilog(
     *,
     assertions: bool = False,
 ) -> tuple[Module, str]:
+    mod = _compile_module(src, frontend, path, mlir_path, assertions=assertions)
+    with phase('emit_cpp'):
+        cpp = emit_cpp(mod)
+    return mod, cpp
+
+
+def _compile_module(
+    src: str, frontend: str, path: Path | None, mlir_path: Path | None, *,
+    assertions: bool,
+) -> Module:
     preflatten = os.environ.get('FLASHSIM_PREFLATTEN_WIRES', '0')
     if preflatten not in {'0', '1'}:
         raise ValueError('FLASHSIM_PREFLATTEN_WIRES must be 0 or 1')
@@ -81,9 +91,7 @@ def compile_verilog(
         owned = [mod]
         del mod
         mod = optimize(owned)
-    with phase('emit_cpp'):
-        cpp = emit_cpp(mod)
-    return mod, cpp
+    return mod
 
 
 @compilation_gc_policy
@@ -112,16 +120,23 @@ def compile_file(
     # old generation-options record attached to the replacement.
     (out_h.parent / ".flashsim_emit_options.json").unlink(missing_ok=True)
     mlir_path = out_h.parent / "hw.mlir" if _resolve_frontend(frontend) == "circt" else None
-    mod, cpp = compile_verilog(
-        path.read_text(), frontend=frontend, path=path, mlir_path=mlir_path,
-        assertions=assertions
-    )
-    if split == 0:
-        split = _auto_split_count(path, len(cpp))
+    if split > 0:
+        mod = _compile_module(path.read_text(), frontend, path, mlir_path,
+                              assertions=assertions)
+        header, parts = emit_split_cpp(mod, split)
+    else:
+        mod, cpp = compile_verilog(
+            path.read_text(), frontend=frontend, path=path, mlir_path=mlir_path,
+            assertions=assertions,
+        )
+        if split == 0:
+            split = _auto_split_count(path, len(cpp))
+        if split > 0:
+            with phase('split_dut_methods'):
+                header, parts = split_dut_methods(cpp, n_shards=split)
+            del cpp
     wanted: set[str] = set()
     if split > 0:
-        with phase('split_dut_methods'):
-            header, parts = split_dut_methods(cpp, n_shards=split)
         _write_generated(out_h, group_primitive_storage(
             header, f"{mod.name}Dut", region_fields))
         for name, body in parts:

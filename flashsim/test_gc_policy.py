@@ -83,7 +83,7 @@ def test_compile_scope_includes_lowering_emission_and_shards(tmp_path, monkeypat
     module = importlib.import_module("flashsim.compile")
     monkeypatch.setenv("FLASHSIM_GC_POLICY", "defer")
     observed = []
-    for name in ["parse_verilog", "optimize", "emit_cpp", "split_dut_methods",
+    for name in ["parse_verilog", "optimize", "emit_split_cpp",
                  "group_primitive_storage", "_write_generated"]:
         original = getattr(module, name)
 
@@ -98,8 +98,8 @@ def test_compile_scope_includes_lowering_emission_and_shards(tmp_path, monkeypat
     gc.enable()
     compile_file(source, tmp_path / "model/dut.h", frontend="native", split=2)
     assert gc.isenabled()
-    assert set(observed) == {"parse_verilog", "optimize", "emit_cpp",
-                             "split_dut_methods", "group_primitive_storage",
+    assert set(observed) == {"parse_verilog", "optimize", "emit_split_cpp",
+                             "group_primitive_storage",
                              "_write_generated"}
 
 
