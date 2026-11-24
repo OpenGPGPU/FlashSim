@@ -1686,6 +1686,9 @@ def _stmt_stop_leaves(
     return leaves
 
 
+_EMPTY_WAKE_DEPS: frozenset[str] = frozenset()
+
+
 def _stmt_cut_leaves(
     stmt: Stmt,
     assigns: dict[str, Expr],
@@ -1707,15 +1710,18 @@ def _stmt_cut_leaves(
             if name in memo:
                 continue
             if name in cut:
-                memo[name] = (frozenset(), frozenset((name,)))
+                memo[name] = (_EMPTY_WAKE_DEPS, frozenset((name,)))
                 continue
             if name in stop or name not in assigns:
-                memo[name] = (frozenset((name,)), frozenset())
+                memo[name] = (frozenset((name,)), _EMPTY_WAKE_DEPS)
                 continue
             deps = expr_ids(assigns[name])
             if not expanded:
                 stack.append((name, True))
                 stack.extend((d, False) for d in deps if d not in memo)
+                continue
+            if len(deps) == 1:
+                memo[name] = memo[next(iter(deps))]
                 continue
             leaves: set[str] = set()
             wires: set[str] = set()
@@ -1723,7 +1729,8 @@ def _stmt_cut_leaves(
                 a, b = memo[dep]
                 leaves |= a
                 wires |= b
-            memo[name] = (frozenset(leaves), frozenset(wires))
+            memo[name] = (frozenset(leaves) if leaves else _EMPTY_WAKE_DEPS,
+                          frozenset(wires) if wires else _EMPTY_WAKE_DEPS)
         return memo[root]
 
     leaves: set[str] = set()
@@ -1748,6 +1755,36 @@ def _stmt_cut_leaves(
 
     walk([stmt], _recur=walk)
     return leaves, wires
+
+
+def _collect_hold_wakes(
+    buckets: list[tuple[str, list[Stmt]]],
+    assigns: dict[str, Expr],
+    stop: set[str],
+    cut: set[str],
+    wire_deps: dict[str, AbstractSet[str]],
+) -> tuple[dict[str, list[int]], dict[str, list[int]]]:
+    leaf_holds: dict[str, list[int]] = defaultdict(list)
+    region_holds: dict[str, list[int]] = defaultdict(list)
+    memo: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
+
+    # Deduplicate within the current bucket. Appending each index in order
+    # keeps the full dependency tables sorted without a second copy.
+    for index, (_, stmts) in enumerate(buckets):
+        leaves: set[str] = set()
+        wires: set[str] = set()
+        for stmt in stmts:
+            if cut:
+                stmt_leaves, stmt_wires = _stmt_cut_leaves(stmt, assigns, stop, cut, memo)
+                leaves.update(stmt_leaves)
+                wires.update(stmt_wires)
+            else:
+                leaves.update(_stmt_stop_leaves(stmt, assigns, stop, wire_deps))
+        for leaf in leaves:
+            leaf_holds[leaf].append(index)
+        for wire in wires:
+            region_holds[wire].append(index)
+    return dict(leaf_holds), dict(region_holds)
 
 
 def _hold_wake_tables(leaf_holds: dict[str, list[int]]) -> dict[tuple[int, ...], int]:
@@ -2735,22 +2772,10 @@ def _emit_cpp_lines(mod: Module, lines: _LineSink) -> None:
                     continue
                 for off in range(0, len(stmts), hold_group):
                     hold_buckets.append((f"{key}#{off // hold_group}", stmts[off : off + hold_group]))
-            holds_map: dict[str, set[int]] = defaultdict(set)
-            cut_map: dict[str, set[int]] = defaultdict(set)
-            memo: dict[str, tuple[frozenset[str], frozenset[str]]] = {}
-            for i, (_key, stmts) in enumerate(hold_buckets):
-                for stmt in stmts:
-                    if cut:
-                        leaves, wires = _stmt_cut_leaves(stmt, assigns, stop, cut, memo)
-                        for w in wires:
-                            cut_map[w].add(i)
-                    else:
-                        leaves = _stmt_stop_leaves(stmt, assigns, stop, wire_deps)
-                    for leaf in leaves:
-                        holds_map[leaf].add(i)
-            leaf_holds = {k: sorted(v) for k, v in holds_map.items()}
-            region_holds = {k: sorted(v) for k, v in cut_map.items()}
-            del memo, holds_map, cut_map
+            del grouped
+            leaf_holds, region_holds = _collect_hold_wakes(
+                hold_buckets, assigns, stop, cut, wire_deps
+            )
             _report_wake_locality(
                 mod.name, hold_buckets, leaf_holds, always_body,
             )

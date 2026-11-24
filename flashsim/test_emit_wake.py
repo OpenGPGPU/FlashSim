@@ -7,8 +7,32 @@ alone strands sequential state whenever a next value repeats for a cycle.
 
 from __future__ import annotations
 
-from flashsim.emit import _stmt_stop_leaves
+from flashsim.emit import _collect_hold_wakes, _stmt_stop_leaves
 from flashsim.ir import BinOp, Const, Id, If, MemRead, NbAssign
+
+
+def test_hold_wakes_record_each_bucket_once_in_order() -> None:
+    assigns = {
+        "combined": BinOp("&", Id("source"), Id("boundary")),
+        "boundary": Id("driver"),
+    }
+    source = NbAssign("q", Id("combined"))
+    boundary = NbAssign("q", Id("boundary"))
+    driver = NbAssign("q", Id("driver"))
+    buckets = [
+        ("first", [source, source, boundary]),
+        ("second", [driver, boundary]),
+        ("last", [source, source]),
+    ]
+    stop = {"source", "driver"}
+    assert _collect_hold_wakes(buckets, assigns, stop, {"boundary"}, {}) == (
+        {"source": [0, 2], "driver": [1]},
+        {"boundary": [0, 1, 2]},
+    )
+    assert _collect_hold_wakes(buckets, assigns, stop, set(), {}) == (
+        {"source": [0, 2], "driver": [0, 1, 2]},
+        {},
+    )
 
 
 def test_wake_covers_data_path() -> None:
