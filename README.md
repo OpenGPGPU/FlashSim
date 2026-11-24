@@ -473,6 +473,13 @@ FLASHSIM_HOLD_GROUP=8 python -m flashsim arti-model design.sv -o model --fronten
 Set `FLASHSIM_SHARD_OPT=-O0`/`-O1` for a quick multi-CU smoke build; the default is
 `-O2`; the generated `dut_commit.cpp` shard is kept at O0 because it is a
 large dirty-list switch with little effect on the normal runtime path.
+Numbered shards use CRC32 to spread methods with similar generated names.
+In an assertion-enabled four-bank OpenGPU tessellation build, assigning the
+same 160,696 methods across 64 numbered files reduced the largest file from
+144.6 MiB to 67.9 MiB. This measurement covers generated C++ file sizes.
+Regeneration changes numbered shard contents and refreshes affected native
+cache entries.
+
 For particularly large models, `FLASHSIM_CONSERVATIVE_ALIAS=1` passes
 `-fno-strict-aliasing`, and `FLASHSIM_COMMIT_CHUNKS_OPT=-O0` can shorten a
 smoke build of a large split commit shard. `FLASHSIM_COMMIT_PARTS=16` can also

@@ -3852,10 +3852,12 @@ def _method_brace_delta(line: str) -> int:
 
 
 def _shard_index(name: str, n_shards: int) -> int:
-    """Stable, well-mixed shard id (avoid little-endian prefix bias on eval_*)."""
+    """Choose a stable shard even when method names have similar suffixes."""
     if name in _SPLIT_CORE:
         return 0
-    return zlib.adler32(name.encode()) % n_shards
+    # Power-of-two shard counts use only the low bits. Adler-32's low bits
+    # sum the name bytes, so generated index permutations crowded one shard.
+    return zlib.crc32(name.encode()) % n_shards
 
 
 def _outline_mem_ports(cls: str, body: list[str]) -> tuple[list[str], list[str], list[str]]:
