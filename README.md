@@ -1473,8 +1473,8 @@ import time
 import tracemalloc
 from flashsim import emit
 
-def lines():
-    for index in range(500_000):
+def lines(count=500_000):
+    for index in range(count):
         yield (f"    system_computeUnits_0_core_vectorCoalescer_memoryReturn_orderedPayloadWord{index}"
                f" = current_payload_word_{index};")
 
@@ -1505,7 +1505,7 @@ print(hashlib.sha256("".join(name + "\n" for region in regions for name in regio
 
 The assertion-enabled OpenGPU `4d468f439` MLIR produced identical optimized IR
 and C++ shards for `SharedL2Slice` and `GpuComputeUnitCore` in both checkouts.
-Total emission time varied under concurrent host memory pressure. The 497
+Total emission time varied under concurrent host memory pressure. The 499
 FlashSim tests selected below passed. Whole-host generation, native build time
 and simulator throughput require separate measurements.
 
@@ -1514,6 +1514,36 @@ PYTHONHASHSEED=73 FLASHSIM_COMMIT_PARTS=16 FLASHSIM_PHASE_TIMINGS=1 \
   python3 -B scripts/bench_narrow_pass.py "$OWNER_MLIR" --module "$MODULE" \
   --hierarchy --preflatten-wires --emit-cpp --shards 64 --repeat 1 --flashsim "$FLASH_CHECKOUT"
 python3 -B -m pytest flashsim -q -k 'not matches_verilator'
+```
+
+With explicit shards, `compile_file` also spills intermediate C++ to a
+temporary file beside the requested header when its buffered text reaches
+64 MiB. The file closes at the end of splitting. Disk use during this stage
+can reach the size of the intermediate text. Two alternating pairs that
+buffered and consumed 2,000,000 generated lines measured 224.22 to 65.42 MiB
+of peak Python allocations. All 233,777,780 bytes matched. A 1 MiB threshold
+forced the temporary-file path on the two real hierarchies above and produced
+the same C++ shards.
+
+To reproduce the buffer comparison, reuse `lines` from the example above and
+run the following with the current emitter.
+
+```python
+from contextlib import closing
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+with TemporaryDirectory() as work:
+    for spill in (False, True, True, False):
+        tracemalloc.start()
+        with closing(emit._CppBlocks(Path(work) if spill else None)) as output:
+            output.extend(lines(2_000_000))
+            output.finish()
+            digest = hashlib.sha256()
+            for line in output.lines(consume=True):
+                digest.update(line.encode())
+            print(spill, tracemalloc.get_traced_memory()[1] / 2**20, digest.hexdigest())
+        tracemalloc.stop()
 ```
 
 SOP simplification follows dependencies reachable from candidate OR
