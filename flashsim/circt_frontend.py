@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import gc
 import hashlib
+import heapq
 import os
 import re
 import subprocess
+import sys
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from io import BytesIO, TextIOWrapper
+from multiprocessing import get_context
 from pathlib import Path
 from typing import BinaryIO
 
@@ -31,6 +36,7 @@ from flashsim.ir import (
     Module,
     NbAssign,
     Signal,
+    Stmt,
     Ternary,
     UnaryOp,
     _LEAF_EXPR_TYPES,
@@ -96,6 +102,7 @@ _INSTANCE = re.compile(
 _OUTPUT = re.compile(r"hw\.output(?:\s+(.+))?$")
 _CLOCK_CAST = re.compile(r"%(\S+)\s*=\s*seq\.(?:to_clock|from_clock)\s+%(\S+)$")
 _SSA = re.compile(r"%([A-Za-z0-9_.:#-]+)")
+_SSA_DEFINITION = re.compile(r"^\s*%([A-Za-z0-9_.:-]+)\s*=", re.M)
 _ARRAY_TY = re.compile(r"!hw\.array<(\d+)xi(\d+)>")
 _INT_TY = re.compile(r"i(\d+)$")
 _REF_TY = re.compile(r"!llhd\.ref<(.*)>$")
@@ -153,10 +160,6 @@ def ssa_name(raw: str) -> str:
     if ident in {"true", "false"}:
         return f"c_{ident}"
     return ident
-
-
-def _ref(raw: str) -> Id:
-    return Id(ssa_name(raw if raw.startswith("%") else "%" + raw))
 
 
 def _const_value(text: str, width: int) -> int:
@@ -232,6 +235,12 @@ def _split_modules(src: str) -> list[_ParsedMod]:
 
 def parse_hw_mlir(src: str | Path, top: str | None = None, *, preflatten_wires: bool = False) -> Module:
     """Lower CIRCT text or a cached MLIR file."""
+    try:
+        jobs = int(os.environ.get("FLASHSIM_MODULE_JOBS", "1"))
+    except ValueError as exc:
+        raise ValueError("FLASHSIM_MODULE_JOBS must be a positive integer") from exc
+    if jobs < 1:
+        raise ValueError("FLASHSIM_MODULE_JOBS must be a positive integer")
     with phase('parse.split_modules'):
         if isinstance(src, Path):
             src = src.read_text()
@@ -241,27 +250,153 @@ def parse_hw_mlir(src: str | Path, top: str | None = None, *, preflatten_wires: 
     if not parsed:
         raise CirctError("no hw.module found in CIRCT output")
     default_top = next((m.name for m in reversed(parsed) if not m.private), parsed[-1].name)
-    with phase('parse.lower_modules'):
-        by_name: dict[str, Module] = {}
-        parsed.reverse()
-        while parsed:
-            raw = parsed.pop()
-            by_name[raw.name] = _lower_module(raw)
-        del raw
+    if preflatten_wires or jobs > 1:
+        with phase('parse.prepare_modules'):
+            by_name = _prepare_reachable_modules(
+                parsed, top, default_top, preflatten_wires, min(jobs, len(parsed)),
+            )
+    else:
+        with phase('parse.lower_modules'):
+            by_name = {}
+            parsed.reverse()
+            while parsed:
+                raw = parsed.pop()
+                by_name[raw.name] = _lower_module(raw)
+            del raw
     chosen = by_name[top] if top and top in by_name else by_name[default_top]
     remaining, reachable = _reachable_instances(chosen, by_name)
     # Unreachable modules cannot contribute to this top. Releasing their IR and
     # completed children reduces the peak cost of flattening large hierarchies.
     lib = {name: by_name[name] for name in reachable}
     del by_name
-    if preflatten_wires:
-        from flashsim.preflatten import compact_module_wires
-        with phase('parse.compact_wires'):
-            for name in sorted(lib):
-                lib[name] = compact_module_wires(lib[name])
-            chosen = lib[chosen.name]
     with phase('parse.flatten'):
         return _flatten(chosen, lib, remaining)
+
+
+def _prepare_module(raw: _ParsedMod, compact: bool) -> Module:
+    mod = _lower_module(raw)
+    if compact:
+        from flashsim.preflatten import compact_module_wires
+        mod = compact_module_wires(mod)
+    return mod
+
+
+def _initialize_module_worker(collect_cycles: bool, recursion_limit: int) -> None:
+    if not collect_cycles:
+        gc.disable()
+    sys.setrecursionlimit(recursion_limit)
+    # Parent timing covers the pool. Nested records from independent workers
+    # would interleave on stderr and break the parser's phase hierarchy.
+    os.environ.pop("FLASHSIM_PHASE_TIMINGS", None)
+
+
+def _prepare_reachable_modules(
+    parsed: list[_ParsedMod], top: str | None, default_top: str, compact: bool, jobs: int,
+) -> dict[str, Module]:
+    unvisited: dict[str, _ParsedMod] = {}
+    shadowed: list[_ParsedMod] = []
+    for raw in parsed:
+        previous = unvisited.get(raw.name)
+        if previous is not None:
+            shadowed.append(previous)
+        unvisited[raw.name] = raw
+    parsed.clear()
+    del raw, previous
+
+    ready: list[tuple[int, str, _ParsedMod]] = []
+    lib: dict[str, Module] = {}
+
+    def enqueue(name: str) -> None:
+        raw = unvisited.pop(name, None)
+        if raw is not None:
+            heapq.heappush(ready, (-len(raw.body), name, raw))
+
+    def accept(mod: Module) -> None:
+        lib[mod.name] = mod
+        for _, _, callee, _ in getattr(mod, "instances", []):
+            enqueue(callee)
+
+    enqueue(top if top is not None and top in unvisited else default_top)
+    # The top reveals the first independent modules. Keeping only compacted
+    # results avoids accumulating the entire uncompressed library in memory.
+    while ready and (jobs == 1 or len(ready) == 1):
+        accept(_prepare_module(heapq.heappop(ready)[2], compact))
+    if ready:
+        pending: dict[Future[Module], _ParsedMod] = {}
+        # The parent also lowers modules. Give it the largest available input
+        # to reduce transfers and bound queued child results to one per process.
+        with ProcessPoolExecutor(
+            max_workers=jobs - 1, mp_context=get_context("spawn"),
+            initializer=_initialize_module_worker,
+            initargs=(gc.isenabled(), max(sys.getrecursionlimit(), 10000)),
+        ) as pool:
+            while ready or pending:
+                completed = {future for future in pending if future.done()}
+                if not ready and not completed:
+                    completed = wait(pending, return_when=FIRST_COMPLETED).done
+                while completed:
+                    future = completed.pop()
+                    raw = pending.pop(future)
+                    try:
+                        mod = future.result()
+                    except RecursionError:
+                        # Pickle has a depth limit even when the iterative
+                        # compiler passes can handle the expression locally.
+                        mod = _prepare_module(raw, compact)
+                    accept(mod)
+                    del future, raw, mod
+                if ready:
+                    raw = heapq.heappop(ready)[2]
+                    while ready and len(pending) < jobs - 1:
+                        child = heapq.heappop(ready)[2]
+                        pending[pool.submit(_prepare_module, child, compact)] = child
+                        del child
+                    accept(_prepare_module(raw, compact))
+                    del raw
+
+    # Still validate all input modules, including definitions outside this
+    # top. Their IR can be discarded immediately.
+    while unvisited:
+        _lower_module(unvisited.popitem()[1])
+    while shadowed:
+        _lower_module(shadowed.pop())
+    return lib
+
+
+def _disambiguate_output_values(body: str, signals: dict[str, Signal]) -> str:
+    # A result's SSA name can equal the name of an output port (for example a
+    # registered SRAM read). Keep the output port and internal value distinct.
+    outputs = {name for name, signal in signals.items() if signal.kind == "output"}
+    if not outputs:
+        return body
+    collisions: dict[str, str] = {}
+    for match in _SSA_DEFINITION.finditer(body):
+        name = match[1]
+        ident = ssa_name(name)
+        if ident in outputs:
+            collisions[name] = ident
+    if not collisions:
+        return body
+
+    # Only generated names based on a colliding port can block a rename.
+    # Check that prefix before keeping any of the module's other SSA names.
+    generated_suffix = "__flashsim_value"
+    prefixes = {ident + generated_suffix for ident in collisions.values()}
+    used = set(signals)
+    for match in _SSA.finditer(body):
+        name = match[1]
+        if "flashsim" in name:
+            ident = ssa_name(name)
+            if ident.rstrip("_") in prefixes:
+                used.add(ident)
+    rename: dict[str, str] = {}
+    for name, ident in sorted(collisions.items()):
+        candidate = ident + generated_suffix
+        while candidate in used:
+            candidate += "_"
+        used.add(candidate)
+        rename[name] = candidate
+    return _SSA.sub(lambda match: "%" + rename.get(match[1], match[1]), body)
 
 
 def _lower_module(raw: _ParsedMod) -> Module:
@@ -276,28 +411,17 @@ def _lower_module(raw: _ParsedMod) -> Module:
         signals[port] = Signal(port, width, kind, depth)
         ports.append(port)
 
-    # A result's SSA name can equal the name of an output port (for example a
-    # registered SRAM read). Keep the output port and internal value distinct.
-    body_text = raw.body
-    definitions = set(re.findall(r"(?m)^\s*%([A-Za-z0-9_.:-]+)\s*=", body_text))
-    used = set(signals) | {ssa_name(n) for n in _SSA.findall(body_text)}
-    rename: dict[str, str] = {}
-    for name in sorted(definitions):
-        ident = ssa_name(name)
-        if ident not in signals or signals[ident].kind != "output":
-            continue
-        candidate = ident + "__flashsim_value"
-        while candidate in used:
-            candidate += "_"
-        used.add(candidate)
-        rename[name] = candidate
-    if rename:
-        body_text = _SSA.sub(
-            lambda match: "%" + rename.get(match.group(1), match.group(1)), body_text
-        )
+    body_text = _disambiguate_output_values(raw.body, signals)
+    value_refs: dict[str, Id] = {}
+
+    def _ref(token: str) -> Id:
+        node = value_refs.get(token)
+        if node is None:
+            value_refs[token] = node = Id(ssa_name(token))
+        return node
 
     assigns: list[Assign] = []
-    regs: list[tuple[str, str, int, int]] = []
+    body: list[Stmt] = []
     mem_writes: list[MemWrite] = []
     instances: list[tuple[str, str, dict[str, str], str]] = []
     clock = next(
@@ -308,7 +432,7 @@ def _lower_module(raw: _ParsedMod) -> Module:
         ),
         "clk",
     )
-    output_srcs: list[str] = []
+    output_srcs: list[Id] = []
     saw_output = False
     processes = []
     combinational = []
@@ -456,10 +580,9 @@ def _lower_module(raw: _ParsedMod) -> Module:
             continue
         if m := _FIRREG.match(line):
             ident = ssa_name(m.group(1))
-            nxt = ssa_name(m.group(2))
             width, depth = _parse_type(m.group(4))
             signals[ident] = Signal(ident, width, "reg", depth)
-            regs.append((ident, nxt, width, depth))
+            body.append(NbAssign(ident, _ref(m.group(2))))
             continue
         if m := _FIRMEM.match(line):
             ident = ssa_name(m.group(1))
@@ -581,11 +704,12 @@ def _lower_module(raw: _ParsedMod) -> Module:
         if m := _OUTPUT.match(line):
             saw_output = True
             payload = m.group(1)
-            output_srcs = [ssa_name(tok) for tok in _SSA.findall(payload)] if payload else []
+            output_srcs = [_ref(tok) for tok in _SSA.findall(payload)] if payload else []
             continue
         raise CirctError(f"unsupported CIRCT op: {line}")
 
-    body = [NbAssign(reg, Id(nxt)) for reg, nxt, _, _ in regs]
+    # Lowering below keeps only the decoded IR and the LLHD region text.
+    del body_text, ordinary_lines, value_refs
     out_ports = [p for p in ports if signals[p].kind == "output"]
     if saw_output:
         if len(output_srcs) != len(out_ports):
@@ -593,8 +717,8 @@ def _lower_module(raw: _ParsedMod) -> Module:
                 f"hw.output arity {len(output_srcs)} != output ports {len(out_ports)}"
             )
         for port, src in zip(out_ports, output_srcs):
-            if src != port:
-                assigns.append(Assign(port, Id(src)))
+            if src.name != port:
+                assigns.append(Assign(port, src))
     if references - driven:
         raise CirctError("undriven procedural references: " + ", ".join(sorted(references-driven)))
     assertions = []
@@ -643,7 +767,7 @@ def _lower_module(raw: _ParsedMod) -> Module:
                 signals[ident] = Signal(ident,width,"wire",depth)
             comb_results.append((names,types))
         global_values = {n: Id(n) for n in signals}
-        global_values.update({a.lhs: a.rhs for a in assigns if isinstance(a.rhs, (Const, Id))})
+        global_values.update((a.lhs, a.rhs) for a in assigns if isinstance(a.rhs, (Const, Id)))
 
         def lower_pure(line):
             lowered = _lower_module(_ParsedMod("assertion_expr", False, "", line))

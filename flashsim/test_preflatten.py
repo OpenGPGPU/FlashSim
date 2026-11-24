@@ -1,6 +1,7 @@
 """Early wire pruning preserves hierarchy boundaries and observable state."""
 
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
 import importlib
 import shutil
 import subprocess
@@ -136,6 +137,49 @@ def test_mlir_option_prunes_before_replicating_private_wires():
     compact = parse_hw_mlir(src, top='Top', preflatten_wires=True)
     assert len(compact.signals) < len(plain.signals)
     assert emit_cpp(optimize(compact)) == emit_cpp(optimize(plain))
+
+
+@pytest.mark.parametrize('compact', [False, True])
+def test_parallel_module_preparation_preserves_compiler_output(monkeypatch, capfd, compact):
+    leaf = '''hw.module private @Leaf(in %d : i8, out q : i8) {
+      %q__flashsim_value = hw.constant 3 : i8
+      %q..flashsim.value_ = hw.constant 5 : i8
+      %q = comb.xor %d, %q__flashsim_value : i8
+      %tmp = comb.xor %q, %q..flashsim.value_ : i8
+      hw.output %tmp : i8
+    }'''
+    src = leaf + '\n' + leaf.replace('@Leaf', '@Second') + '\n' + leaf.replace('@Leaf', '@Unused')
+    src += '''
+    hw.module @Top(in %d : i8, out x : i8, out y : i8, out z : i8) {
+      %x = hw.instance "left" @Leaf(d: %d: i8) -> (q: i8)
+      %y = hw.instance "right" @Leaf(d: %d: i8) -> (q: i8)
+      %z = hw.instance "other" @Second(d: %d: i8) -> (q: i8)
+      hw.output %x, %y, %z : i8, i8, i8
+    }'''
+    submit = ProcessPoolExecutor.submit
+    submitted = []
+
+    def checked_submit(pool, fn, raw, compact):
+        submitted.append(raw.name)
+        return submit(pool, fn, raw, compact)
+
+    monkeypatch.setattr(ProcessPoolExecutor, 'submit', checked_submit)
+    monkeypatch.setenv('FLASHSIM_MODULE_JOBS', '1')
+    serial = parse_hw_mlir(src, top='Top', preflatten_wires=compact)
+    assert submitted == []
+    monkeypatch.setenv('FLASHSIM_MODULE_JOBS', '2')
+    monkeypatch.setenv('FLASHSIM_PHASE_TIMINGS', '1')
+    parallel = parse_hw_mlir(src, top='Absent', preflatten_wires=compact)
+    assert submitted == ['Second']
+    observed = capfd.readouterr().err
+    assert '"phase": "parse.prepare_modules"' in observed
+    assert observed.count('"phase": "opt.inline_graph", "event": "begin"') == (2 if compact else 0)
+    assert parallel == serial
+    assert list(parallel.signals) == list(serial.signals)
+    if not compact:
+        assert 'left_q__flashsim_value_' in parallel.signals
+        assert 'left_q__flashsim_value__' in parallel.signals
+    assert emit_cpp(optimize(parallel)) == emit_cpp(optimize(serial))
 
 
 def test_reuse_rejects_changed_preflatten_option(tmp_path, monkeypatch):
