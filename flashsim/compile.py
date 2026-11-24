@@ -141,7 +141,7 @@ def compile_file(
     if split > 0:
         mod = _compile_module(path.read_text(), frontend, path, mlir_path,
                               assertions=assertions)
-        header, parts = emit_split_cpp(mod, split)
+        header, parts = emit_split_cpp(mod, split, spool_dir=out_h.parent)
     else:
         mod, cpp = compile_verilog(
             path.read_text(), frontend=frontend, path=path, mlir_path=mlir_path,

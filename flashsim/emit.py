@@ -8,11 +8,14 @@ import zlib
 from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import Iterable, Iterator, Mapping
 from collections.abc import Set as AbstractSet
+from contextlib import closing
 from dataclasses import dataclass
 from functools import lru_cache
 from io import StringIO
 from itertools import chain, groupby
-from typing import Protocol
+from pathlib import Path
+from tempfile import TemporaryFile
+from typing import Protocol, TextIO
 
 from flashsim.phase_timing import phase as observe_phase
 
@@ -4220,14 +4223,18 @@ def _iter_lines(text: str, start: int = 0):
 
 
 _CPP_BLOCK_LINES = 8192
+_CPP_SPOOL_BYTES = 64 * 1024 * 1024
 
 
 class _CppBlocks:
-    """Pack complete lines as they are emitted for an explicitly sharded DUT."""
+    """Pack source lines and spill large intermediate text beside the outputs."""
 
-    def __init__(self) -> None:
+    def __init__(self, spool_dir: Path | None = None) -> None:
         self._lines: list[str] = []
         self._blocks: deque[str] = deque()
+        self._spool_dir = spool_dir
+        self._spool: TextIO | None = None
+        self._buffered_bytes = 0
 
     def append(self, line: str) -> None:
         self._lines.append(line)
@@ -4240,18 +4247,43 @@ class _CppBlocks:
 
     def _flush(self) -> None:
         self._lines.append("")
-        self._blocks.append("\n".join(self._lines))
+        block = "\n".join(self._lines)
         self._lines.clear()
+        if self._spool is not None:
+            self._spool.write(block)
+            return
+        self._blocks.append(block)
+        if self._spool_dir is not None:
+            self._buffered_bytes += len(block) if block.isascii() else len(block.encode())
+            if self._buffered_bytes >= _CPP_SPOOL_BYTES:
+                self._spool = TemporaryFile(
+                    mode="w+t", encoding="utf-8", newline="\n", dir=self._spool_dir)
+                while self._blocks:
+                    self._spool.write(self._blocks.popleft())
 
     def finish(self) -> deque[str]:
         if self._lines:
             self._flush()
         return self._blocks
 
+    def lines(self, *, consume: bool = False) -> Iterator[str]:
+        if self._spool is not None:
+            self._spool.seek(0)
+            while chunk := self._spool.read(1024 * 1024):
+                if not chunk.endswith("\n"):
+                    chunk += self._spool.readline()
+                yield from chunk.splitlines(keepends=True)
+            return
+        if consume:
+            while self._blocks:
+                yield from _iter_lines(self._blocks.popleft())
+            return
+        for block in self._blocks:
+            yield from _iter_lines(block)
 
-def _consume_cpp_blocks(blocks: deque[str]) -> Iterator[str]:
-    while blocks:
-        yield from _iter_lines(blocks.popleft())
+    def close(self) -> None:
+        if self._spool is not None:
+            self._spool.close()
 
 
 def _constructor_rows(lines: Iterator[str], cls: str):
@@ -4276,9 +4308,8 @@ def _constructor_rows(lines: Iterator[str], cls: str):
         raise ValueError("substring not found")
 
 
-def _needs_bulk_constructor(blocks: Iterable[str], cls: str) -> bool:
+def _needs_bulk_constructor(lines: Iterator[str], cls: str) -> bool:
     initialized = 0
-    lines = (line for block in blocks for line in _iter_lines(block))
     for _, member, _ in _constructor_rows(lines, cls):
         if member:
             initialized += member[-1]
@@ -4305,25 +4336,25 @@ def _bulk_constructor_lines(lines: Iterator[str], cls: str) -> Iterator[str]:
     yield from lines
 
 
-def emit_split_cpp(mod: Module, n_shards: int) -> tuple[str, list[tuple[str, str]]]:
-    """Emit an explicitly sharded model without building a monolithic string."""
+def emit_split_cpp(
+    mod: Module, n_shards: int, *, spool_dir: Path | None = None,
+) -> tuple[str, list[tuple[str, str]]]:
+    """Emit sharded C++ and spill large intermediate text when given a directory."""
     if n_shards < 1:
         raise ValueError("n_shards must be >= 1")
     cls = f"{mod.name}Dut"
-    with observe_phase('emit_cpp'):
-        output = _CppBlocks()
-        _emit_cpp_lines(mod, output)
-        with observe_phase('emit.join_text'):
-            blocks = output.finish()
-        with observe_phase('emit.constructor'):
-            bulk = _needs_bulk_constructor(blocks, cls)
-    # The rewrite feeds the splitter directly. Release each input block as
-    # its lines move into the output header and shards.
-    with observe_phase('split_dut_methods'):
-        source = _consume_cpp_blocks(blocks)
-        if bulk:
-            source = _bulk_constructor_lines(source, cls)
-        return _split_dut_lines(cls, source, n_shards)
+    with closing(_CppBlocks(spool_dir)) as output:
+        with observe_phase('emit_cpp'):
+            _emit_cpp_lines(mod, output)
+            with observe_phase('emit.join_text'):
+                output.finish()
+            with observe_phase('emit.constructor'):
+                bulk = _needs_bulk_constructor(output.lines(), cls)
+        with observe_phase('split_dut_methods'):
+            source = output.lines(consume=True)
+            if bulk:
+                source = _bulk_constructor_lines(source, cls)
+            return _split_dut_lines(cls, source, n_shards)
 
 
 class _SplitSink:

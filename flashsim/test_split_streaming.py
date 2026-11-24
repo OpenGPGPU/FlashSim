@@ -30,7 +30,8 @@ def test_split_keeps_non_method_source_and_unusual_line_endings():
 
 
 @pytest.mark.parametrize('min_fields', [3, 10])
-def test_explicit_split_preserves_constructor_and_releases_input(monkeypatch, min_fields):
+@pytest.mark.parametrize('spill', [False, True])
+def test_explicit_split_preserves_constructor_and_releases_input(monkeypatch, tmp_path, min_fields, spill):
     source = [
         '#include <cstdint>\r', 'struct SampleDut {',
         '  uint32_t first = 0u, other = 7;',
@@ -49,10 +50,19 @@ def test_explicit_split_preserves_constructor_and_releases_input(monkeypatch, mi
     raw_lines = [Line(line) for line in source]
     refs = [weakref.ref(line) for line in raw_lines]
     split = emit._split_dut_lines
+    temporary_file = emit.TemporaryFile
+    files = []
+
+    def open_spool(**options):
+        assert options['dir'] == tmp_path
+        stream = temporary_file(**options)
+        files.append(stream)
+        return stream
 
     def check_split(cls, lines, n_shards):
         assert not raw_lines
         assert all(ref() is None for ref in refs)
+        assert len(files) == int(spill)
         return split(cls, lines, n_shards)
 
     def emit_lines(mod, output):
@@ -63,7 +73,11 @@ def test_explicit_split_preserves_constructor_and_releases_input(monkeypatch, mi
         raw_lines.clear()
 
     monkeypatch.setattr(emit, '_CPP_BLOCK_LINES', 3)
+    monkeypatch.setattr(emit, '_CPP_SPOOL_BYTES', 16 if spill else 64 * 1024 * 1024)
     monkeypatch.setattr(emit, '_BULK_CONSTRUCTOR_MIN_FIELDS', min_fields)
     monkeypatch.setattr(emit, '_emit_cpp_lines', emit_lines)
     monkeypatch.setattr(emit, '_split_dut_lines', check_split)
-    assert emit.emit_split_cpp(SimpleNamespace(name='Sample'), 4) == expected
+    monkeypatch.setattr(emit, 'TemporaryFile', open_spool)
+    assert emit.emit_split_cpp(SimpleNamespace(name='Sample'), 4, spool_dir=tmp_path) == expected
+    assert all(stream.closed for stream in files)
+    assert not list(tmp_path.iterdir())
