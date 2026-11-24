@@ -227,6 +227,54 @@ circt_frontend.parse_hw_mlir(source, top='GpuHostSystemAxi')
 PY
 ```
 
+`FLASHSIM_MODULE_JOBS=2` lets the Python compiler and one spawned worker
+lower independent CIRCT modules together. With `FLASHSIM_PREFLATTEN_WIRES=1`,
+each reachable module is compacted immediately after lowering. The worker
+returns compacted IR and the parent keeps the largest ready module local.
+The default job count is one. Use the CLI or a Python entry point with
+the multiprocessing main guard when enabling extra jobs.
+
+On ARM64 macOS with Python 3.14.7, the assertion-enabled dual-CU OpenGPU
+`4d468f439` MLIR produced the same compacted IR for 1,430 modules and 3,791
+assertions. Timing stops at the flatten handoff. The memory measurement
+covers the whole process tree.
+
+| Module preparation | Time | Sampled peak |
+| --- | ---: | ---: |
+| `53a1507` (median of two runs) | 87.06 s | 2.90 GiB |
+| One Python job | 77.43 s | 2.10 GiB |
+| Two Python jobs | 68.75 s | 2.30 GiB |
+
+A separate `GpuComputeUnitCore` hierarchy generated the same 48.8 MB of C++
+with 173 assertions. Its sampled peak was 1.14 GiB at `53a1507` and 1.29 GiB
+with two jobs. Use one job when the extra process memory matters more.
+
+Run the following in each checkout with `FLASHSIM_MODULE_JOBS` set to
+`1` or `2`, the same cached MLIR, and `run_owner_bounded.py` from OpenGPU.
+
+```sh
+PYTHONHASHSEED=73 FLASHSIM_MODULE_JOBS="${FLASHSIM_MODULE_JOBS:-2}" \
+  python3 -B "$GPU_CHECKOUT/scripts/run_owner_bounded.py" \
+  --memory-mib 4096 --timeout-seconds 380 -- python3 -B -c '
+import gc, sys
+from pathlib import Path
+from time import perf_counter
+from flashsim import circt_frontend as frontend
+
+def stop_at_flatten(top, library, remaining):
+    print(top.name, len(library), perf_counter() - start, flush=True)
+    return top
+
+gc.disable()
+frontend._flatten = stop_at_flatten
+start = perf_counter()
+frontend.parse_hw_mlir(Path(sys.argv[1]), top="GpuHostSystemAxi", preflatten_wires=True)
+' "$OWNER_MLIR"
+```
+
+Verify the compiler output in both modes with
+`python3 -B -m pytest -q flashsim/test_preflatten.py`.
+
 Memoized expression mapping visits terminal nodes directly without scheduling
 a second traversal pass. Shared roots retain the same identity memo and visitor
 semantics. On the actual 32850-bit-waiter `L2MshrTable` (328653 flattened signals),
