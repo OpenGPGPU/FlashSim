@@ -30,6 +30,23 @@ def test_split_keeps_non_method_source_and_unusual_line_endings():
                      ('dut_1.cpp', '#include "dut.h"\n\n')]
 
 
+@pytest.mark.parametrize('n_shards', [16, 32, 64])
+def test_equal_byte_sum_methods_spread_across_shards(n_shards):
+    names = [f'eval_bank_{bank}_lane_{9 - bank}' for bank in range(10)]
+    body = '    value += 1;\n' * 24
+    source = 'struct SampleDut {\n  int value;\n' + ''.join(
+        f'  void {name}() {{\n{body}  }}\n' for name in [*names, 'tick']
+    ) + '};\n'
+    _, parts = split_dut_methods(source, n_shards=n_shards)
+    placement = {
+        name: [shard for shard, text in parts if f'SampleDut::{name}()' in text]
+        for name in names
+    }
+    assert all(len(shards) == 1 for shards in placement.values())
+    assert len({shards[0] for shards in placement.values()}) >= 7
+    assert 'SampleDut::tick()' in dict(parts)['dut_0.cpp']
+
+
 @pytest.mark.parametrize('min_fields', [3, 10])
 @pytest.mark.parametrize('spill', [False, True])
 @pytest.mark.parametrize('file_parts', [False, True])
