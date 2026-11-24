@@ -128,3 +128,27 @@ def test_cached_mlir_releases_module_text_during_lowering(tmp_path, monkeypatch)
     finally:
         if enabled:
             gc.enable()
+
+
+def test_flatten_releases_last_use_child_before_expanding_sibling(monkeypatch):
+    frontend = importlib.import_module('flashsim.circt_frontend')
+    original_flatten = frontend._flatten
+    left = None
+    top = '''hw.module @Top(in %clock : i1, in %a : i1, in %b : i1, out x : i1, out y : i1) {
+  %x = hw.instance "left" @Gate(clock: %clock: i1, a: %a: i1, b: %b: i1) -> (y: i1)
+  %y = hw.instance "right" @Other(clock: %clock: i1, a: %a: i1, b: %b: i1) -> (y: i1)
+  hw.output %x, %y : i1, i1
+}'''
+
+    def flatten(module, library, remaining):
+        nonlocal left
+        if module.name == 'Other':
+            assert left is not None and left() is None
+        result = original_flatten(module, library, remaining)
+        if module.name == 'Gate':
+            left = weakref.ref(result)
+        return result
+
+    monkeypatch.setattr(frontend, '_flatten', flatten)
+    source = '\n'.join((MLIR, MLIR.replace('@Gate', '@Other'), top))
+    assert frontend.parse_hw_mlir(source, top='Top').name == 'Top'
