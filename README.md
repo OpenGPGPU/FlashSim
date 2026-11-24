@@ -566,6 +566,16 @@ the existing shard and its text. Exact UTF-8 bytes, suffix replacement and
 unchanged modification times are covered by
 `python3 -B -m pytest flashsim/test_compile_incremental.py -q`.
 
+Sharded compilation buffers regular translation units in 256 KiB UTF-8
+chunks and writes them to scratch files. Publishing compares the finished
+bytes against existing outputs so identical shards retain their timestamps.
+On ARM64 macOS with Python 3.13.12, splitting 97.7 MiB of synthetic C++ into
+64 regular shards reduced sampled peak RSS from 126.2 to 57.3 MiB. The two
+split runs took 0.74 and 0.96 seconds, and all 65 output file digests matched.
+Run `python3 -B -m pytest flashsim/test_split_streaming.py flashsim/test_compile_incremental.py -q`
+to check byte equality, constructor handling, Unicode and unchanged output
+timestamps.
+
 To reproduce, create a derived directory with each tool revision and time its
 verification on the same original C++ input:
 

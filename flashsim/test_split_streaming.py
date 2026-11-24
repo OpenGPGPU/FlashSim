@@ -84,7 +84,7 @@ def test_explicit_split_preserves_constructor_and_releases_input(
     output_dir = tmp_path / "parts" if file_parts else None
     if output_dir is not None:
         output_dir.mkdir()
-    monkeypatch.setattr(emit, '_SPLIT_BUFFER_CHARS', 80)
+    monkeypatch.setattr(emit, '_SPLIT_BUFFER_BYTES', 80)
     header, parts = emit.emit_split_cpp(
         SimpleNamespace(name='Sample'), 4, spool_dir=tmp_path, output_dir=output_dir)
     assert all(isinstance(body, Path) == file_parts for _, body in parts)

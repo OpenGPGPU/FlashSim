@@ -4400,21 +4400,25 @@ def emit_split_cpp(
             return _split_dut_lines(cls, source, n_shards, output_dir=output_dir)
 
 
-_SPLIT_BUFFER_CHARS = 256 * 1024
+_SPLIT_BUFFER_BYTES = 256 * 1024
 
 
 class _SplitSink:
     """Buffer a source part in memory or write it to a scratch file in chunks."""
 
     def __init__(self, path: Path | None = None) -> None:
-        self._text = StringIO()
+        self._text = StringIO() if path is None else None
         self._path = path
+        self._buffer = bytearray()
         self._started = False
 
     def append(self, text: str) -> None:
-        self._text.write(text)
-        if self._path is not None and self._text.tell() >= _SPLIT_BUFFER_CHARS:
-            self._flush()
+        if self._text is not None:
+            self._text.write(text)
+        else:
+            self._buffer.extend(text.encode())
+            if len(self._buffer) >= _SPLIT_BUFFER_BYTES:
+                self._flush()
 
     def extend(self, lines: Iterable[str]) -> None:
         for line in lines:
@@ -4422,21 +4426,20 @@ class _SplitSink:
 
     def _flush(self) -> None:
         assert self._path is not None
-        mode = "a" if self._started else "w"
-        with self._path.open(mode, encoding="utf-8", newline="") as file:
-            file.write(self._text.getvalue())
+        mode = "ab" if self._started else "wb"
+        with self._path.open(mode) as file:
+            file.write(self._buffer)
         self._started = True
-        self._text.seek(0)
-        self._text.truncate()
+        self._buffer.clear()
 
     def finish(self) -> str | Path:
-        if self._path is None:
+        if self._text is not None:
             result = self._text.getvalue()
-        else:
-            self._flush()
-            result = self._path
-        self._text.close()
-        return result
+            self._text.close()
+            return result
+        self._flush()
+        assert self._path is not None
+        return self._path
 
 
 def split_dut_methods(
