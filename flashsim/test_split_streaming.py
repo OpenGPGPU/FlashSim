@@ -1,4 +1,5 @@
 """Large-model splitting preserves source lines without a full line list."""
+from pathlib import Path
 import random
 from types import SimpleNamespace
 import weakref
@@ -31,7 +32,9 @@ def test_split_keeps_non_method_source_and_unusual_line_endings():
 
 @pytest.mark.parametrize('min_fields', [3, 10])
 @pytest.mark.parametrize('spill', [False, True])
-def test_explicit_split_preserves_constructor_and_releases_input(monkeypatch, tmp_path, min_fields, spill):
+@pytest.mark.parametrize('file_parts', [False, True])
+def test_explicit_split_preserves_constructor_and_releases_input(
+        monkeypatch, tmp_path, min_fields, spill, file_parts):
     source = [
         '#include <cstdint>\r', 'struct SampleDut {',
         '  uint32_t first = 0u, other = 7;',
@@ -59,11 +62,11 @@ def test_explicit_split_preserves_constructor_and_releases_input(monkeypatch, tm
         files.append(stream)
         return stream
 
-    def check_split(cls, lines, n_shards):
+    def check_split(cls, lines, n_shards, **kwargs):
         assert not raw_lines
         assert all(ref() is None for ref in refs)
         assert len(files) == int(spill)
-        return split(cls, lines, n_shards)
+        return split(cls, lines, n_shards, **kwargs)
 
     def emit_lines(mod, output):
         output.extend(raw_lines[:3])
@@ -78,6 +81,15 @@ def test_explicit_split_preserves_constructor_and_releases_input(monkeypatch, tm
     monkeypatch.setattr(emit, '_emit_cpp_lines', emit_lines)
     monkeypatch.setattr(emit, '_split_dut_lines', check_split)
     monkeypatch.setattr(emit, 'TemporaryFile', open_spool)
-    assert emit.emit_split_cpp(SimpleNamespace(name='Sample'), 4, spool_dir=tmp_path) == expected
+    output_dir = tmp_path / "parts" if file_parts else None
+    if output_dir is not None:
+        output_dir.mkdir()
+    monkeypatch.setattr(emit, '_SPLIT_BUFFER_CHARS', 80)
+    header, parts = emit.emit_split_cpp(
+        SimpleNamespace(name='Sample'), 4, spool_dir=tmp_path, output_dir=output_dir)
+    assert all(isinstance(body, Path) == file_parts for _, body in parts)
+    actual = [(name, body.read_bytes().decode() if file_parts else body)
+              for name, body in parts]
+    assert (header, actual) == expected
     assert all(stream.closed for stream in files)
-    assert not list(tmp_path.iterdir())
+    assert list(tmp_path.iterdir()) == ([output_dir] if file_parts else [])

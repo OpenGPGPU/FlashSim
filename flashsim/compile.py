@@ -4,7 +4,7 @@ import json
 import os
 from collections.abc import Iterator
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 
 from flashsim.circt_frontend import (
     CirctError,
@@ -138,10 +138,10 @@ def compile_file(
     # old generation-options record attached to the replacement.
     (out_h.parent / ".flashsim_emit_options.json").unlink(missing_ok=True)
     mlir_path = out_h.parent / "hw.mlir" if _resolve_frontend(frontend) == "circt" else None
-    if split > 0:
+    explicit_split = split > 0
+    if explicit_split:
         mod = _compile_module(path.read_text(), frontend, path, mlir_path,
                               assertions=assertions)
-        header, parts = emit_split_cpp(mod, split, spool_dir=out_h.parent)
     else:
         mod, cpp = compile_verilog(
             path.read_text(), frontend=frontend, path=path, mlir_path=mlir_path,
@@ -149,17 +149,22 @@ def compile_file(
         )
         if split == 0:
             split = _auto_split_count(path, len(cpp))
-        if split > 0:
-            with phase('split_dut_methods'):
-                header, parts = split_dut_methods(cpp, n_shards=split)
-            del cpp
     wanted: set[str] = set()
     if split > 0:
-        _write_generated(out_h, group_primitive_storage(
-            header, f"{mod.name}Dut", region_fields))
-        for name, body in parts:
-            wanted.add(name)
-            _write_generated(out_h.parent / name, body)
+        with TemporaryDirectory(prefix=".flashsim-shards.", dir=out_h.parent) as scratch:
+            output_dir = Path(scratch)
+            if explicit_split:
+                header, parts = emit_split_cpp(
+                    mod, split, spool_dir=output_dir, output_dir=output_dir)
+            else:
+                with phase('split_dut_methods'):
+                    header, parts = split_dut_methods(cpp, n_shards=split, output_dir=output_dir)
+                del cpp
+            _write_generated(out_h, group_primitive_storage(
+                header, f"{mod.name}Dut", region_fields))
+            for name, body in parts:
+                wanted.add(name)
+                _write_generated(out_h.parent / name, body)
     else:
         _write_generated(out_h, group_primitive_storage(
             cpp, f"{mod.name}Dut", region_fields))
@@ -171,20 +176,28 @@ def compile_file(
     return mod
 
 
-def _encoded_chunks(text: str) -> Iterator[bytes]:
+def _generated_chunks(source: str | Path) -> Iterator[bytes]:
+    if isinstance(source, Path):
+        with source.open('rb') as generated:
+            while chunk := generated.read(1024 * 1024):
+                yield chunk
+        return
     chars_per_chunk = 1024 * 1024
-    for start in range(0, len(text), chars_per_chunk):
-        yield text[start:start + chars_per_chunk].encode()
+    for start in range(0, len(source), chars_per_chunk):
+        yield source[start:start + chars_per_chunk].encode()
 
 
-def _write_generated(path: Path, text: str) -> None:
+def _write_generated(path: Path, source: str | Path) -> None:
     if path.is_file():
         with path.open('rb') as previous:
-            if (all(previous.read(len(chunk)) == chunk for chunk in _encoded_chunks(text))
+            if (all(previous.read(len(chunk)) == chunk for chunk in _generated_chunks(source))
                     and not previous.read(1)):
                 return
-    with path.open('wb') as output:
-        output.writelines(_encoded_chunks(text))
+    if isinstance(source, Path):
+        source.replace(path)
+    else:
+        with path.open('wb') as output:
+            output.writelines(_generated_chunks(source))
 
 
 def _auto_split_count(path: Path, cpp_bytes: int) -> int:
