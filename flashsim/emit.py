@@ -4380,8 +4380,9 @@ def _bulk_constructor_lines(lines: Iterator[str], cls: str) -> Iterator[str]:
 
 def emit_split_cpp(
     mod: Module, n_shards: int, *, spool_dir: Path | None = None,
-) -> tuple[str, list[tuple[str, str]]]:
-    """Emit sharded C++ and spill large intermediate text when given a directory."""
+    output_dir: Path | None = None,
+) -> tuple[str, list[tuple[str, str | Path]]]:
+    """Emit sharded C++ with optional file-backed input and output buffers."""
     if n_shards < 1:
         raise ValueError("n_shards must be >= 1")
     cls = f"{mod.name}Dut"
@@ -4396,30 +4397,51 @@ def emit_split_cpp(
             source = output.lines(consume=True)
             if bulk:
                 source = _bulk_constructor_lines(source, cls)
-            return _split_dut_lines(cls, source, n_shards)
+            return _split_dut_lines(cls, source, n_shards, output_dir=output_dir)
+
+
+_SPLIT_BUFFER_CHARS = 256 * 1024
 
 
 class _SplitSink:
-    """Pack output incrementally instead of retaining one Python object per line."""
-    def __init__(self):
+    """Buffer a source part in memory or write it to a scratch file in chunks."""
+
+    def __init__(self, path: Path | None = None) -> None:
         self._text = StringIO()
+        self._path = path
+        self._started = False
 
     def append(self, text: str) -> None:
         self._text.write(text)
+        if self._path is not None and self._text.tell() >= _SPLIT_BUFFER_CHARS:
+            self._flush()
 
-    def extend(self, lines) -> None:
+    def extend(self, lines: Iterable[str]) -> None:
         for line in lines:
             self.append(line)
 
-    def finish(self) -> str:
-        text = self._text.getvalue()
+    def _flush(self) -> None:
+        assert self._path is not None
+        mode = "a" if self._started else "w"
+        with self._path.open(mode, encoding="utf-8", newline="") as file:
+            file.write(self._text.getvalue())
+        self._started = True
+        self._text.seek(0)
+        self._text.truncate()
+
+    def finish(self) -> str | Path:
+        if self._path is None:
+            result = self._text.getvalue()
+        else:
+            self._flush()
+            result = self._path
         self._text.close()
-        return text
+        return result
 
 
 def split_dut_methods(
-    cpp: str, n_shards: int = 8
-) -> tuple[str, list[tuple[str, str]]]:
+    cpp: str, n_shards: int = 8, *, output_dir: Path | None = None,
+) -> tuple[str, list[tuple[str, str | Path]]]:
     """Move in-class method bodies into `n_shards` out-of-line .cpp files.
 
     Large FlashSim tops (GpuHostSystemAxi) are a ~300MB translation unit; clang
@@ -4434,14 +4456,18 @@ def split_dut_methods(
     m = re.search(r"^struct (\w+) \{", cpp, re.M)
     if not m:
         raise ValueError("dut header has no struct")
-    return _split_dut_lines(m.group(1), _iter_lines(cpp), n_shards)
+    return _split_dut_lines(m.group(1), _iter_lines(cpp), n_shards, output_dir=output_dir)
 
 
 def _split_dut_lines(
-    cls: str, lines: Iterator[str], n_shards: int
-) -> tuple[str, list[tuple[str, str]]]:
+    cls: str, lines: Iterator[str], n_shards: int, *, output_dir: Path | None = None,
+) -> tuple[str, list[tuple[str, str | Path]]]:
+    def shard_sink(name: str) -> _SplitSink:
+        return _SplitSink(output_dir / name if output_dir is not None else None)
+
+    # Commit helpers inspect the header for their index type and layout.
     out_lines = _SplitSink()
-    shards = [_SplitSink() for _ in range(n_shards)]
+    shards = [shard_sink(f"dut_{i}.cpp") for i in range(n_shards)]
     own_files: dict[str, _SplitSink] = {}
     for s in shards:
         s.append(f'#include "dut.h"\n')
@@ -4501,7 +4527,7 @@ def _split_dut_lines(
             out_lines.extend(declarations)
             if helpers:
                 if "_mem_ports" not in own_files:
-                    own_files["_mem_ports"] = _SplitSink()
+                    own_files["_mem_ports"] = shard_sink("dut_mem_ports.cpp")
                     own_files["_mem_ports"].extend([f'#include "dut.h"\n', "\n"])
                 bucket = own_files["_mem_ports"]
                 bucket.extend(helpers)
@@ -4510,11 +4536,12 @@ def _split_dut_lines(
             out_lines.extend(declarations)
             if helpers:
                 if "_mem_stores" not in own_files:
-                    own_files["_mem_stores"] = _SplitSink()
+                    own_files["_mem_stores"] = shard_sink("dut_mem_stores.cpp")
                     own_files["_mem_stores"].extend([f'#include "dut.h"\n', "\n"])
                 own_files["_mem_stores"].extend(helpers)
         if name in _SPLIT_OWN_FILE:
             if name not in own_files:
+                # The commit switch is rewritten as a unit below.
                 own_files[name] = _SplitSink()
                 own_files[name].extend([f'#include "dut.h"\n', "\n"])
             bucket = own_files[name]
@@ -4530,10 +4557,15 @@ def _split_dut_lines(
         shards[shard_i].append("\n")
 
     header = out_lines.finish()
+    assert isinstance(header, str)
     parts = [(f"dut_{k}.cpp", shards[k].finish()) for k in range(n_shards)]
     for name, sink in sorted(own_files.items()):
         body = sink.finish()
-        if name == "_commit" and "fs_bump(" in body:
+        if name != "_commit":
+            parts.append((f"dut_{name.lstrip('_')}.cpp", body))
+            continue
+        assert isinstance(body, str)
+        if "fs_bump(" in body:
             # The large commit switch stays at -O0 for bounded compile time.
             # Its page-invalidation loop is small but can dominate real GTK
             # draws when compiled at -O0. Give that loop a separate -O2 TU,
@@ -4561,16 +4593,15 @@ def _split_dut_lines(
                 "  }\n"
                 "  for (unsigned i = 0; i < n; i++) pg[ids[i]]++;\n"
                 "}\n"))
-        compact = _chunk_commit_switch(cls, body) if name == "_commit" else None
-        if name == "_commit":
-            transformed, block_helper = _outline_static_commit_blocks(
-                header, cls, compact if compact else body)
-            if block_helper is not None:
-                parts.append(("dut_commit_blocks.cpp", block_helper))
-                if compact:
-                    compact = transformed
-                else:
-                    body = transformed
+        compact = _chunk_commit_switch(cls, body)
+        transformed, block_helper = _outline_static_commit_blocks(
+            header, cls, compact if compact else body)
+        if block_helper is not None:
+            parts.append(("dut_commit_blocks.cpp", block_helper))
+            if compact:
+                compact = transformed
+            else:
+                body = transformed
         if compact:
             # Bounded switches use normal -O2 without optimizing one giant CFG.
             try:
