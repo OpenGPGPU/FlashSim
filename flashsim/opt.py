@@ -1931,13 +1931,19 @@ def _merge_sop_terms(
         # Keep the exhaustive absorption pass for small cones, where it is
         # cheap and catches the more general subset case.
         if len(terms) > 64:
+            # Each merge restarts the ordered search. Reuse the literal order
+            # for unchanged terms, with a cache scoped to this cone.
+            @lru_cache(maxsize=_SOP_TERMS_MAX)
+            def ordered_literals(term: frozenset[tuple[Expr, bool]]) -> list[tuple[Expr, bool]]:
+                return sorted(term, key=literal_key)
+
             while True:
                 merged = False
                 snapshot = sorted(terms, key=cached_term_key)
                 for t in snapshot:
                     if t not in terms:
                         continue
-                    for k, pol in sorted(t, key=literal_key):
+                    for k, pol in ordered_literals(t):
                         candidate = (t - {(k, pol)}) | {(k, not pol)}
                         if candidate in terms:
                             terms.discard(t)
