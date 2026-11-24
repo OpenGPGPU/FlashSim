@@ -967,16 +967,20 @@ def _slice_src(
     if fuel <= 0 or width <= 0 or low < 0:
         return None
     is_id = isinstance(src, Id)
-    if is_id and (src.name not in assigns or src.name in seen):
-        # With no assignment to follow, the only successful query is the
-        # entire signal. Parents still record missing signal widths.
+    source_width = None
+    if is_id:
         try:
             source_width = sigs[src.name].width
         except (KeyError, TypeError):
             if memo is not None:
                 memo.unknown_widths += 1
             return None
-        return src if low == 0 and width == source_width else None
+        # Returning the current Id or a failed bound query needs no recursive
+        # cache entry. Keep the width for partial slices through assignments.
+        if low == 0 and width == source_width:
+            return src
+        if low + width > source_width or src.name not in assigns or src.name in seen:
+            return None
     seen = frozenset(seen)
     if width_cache is None:
         width_cache = {}
@@ -995,7 +999,7 @@ def _slice_src(
     unknown_widths = memo.unknown_widths
     result = _slice_src_uncached(
         src, low, width, assigns, sigs, uses, fresh, cache, seen,
-        fuel, width_cache, memo
+        fuel, width_cache, memo, source_width
     )
     final_epoch = len(fresh)
     if memo.epoch != final_epoch:
@@ -1022,6 +1026,7 @@ def _slice_src_uncached(
     fuel: int,
     width_cache: dict[int, tuple[Expr, int]],
     memo: _SliceMemo,
+    src_w: int | None = None,
 ) -> Expr | None:
     """Narrow `src[low +: width]` onto the operands that actually feed it.
 
@@ -1029,17 +1034,16 @@ def _slice_src_uncached(
     must not keep the other half in its leaf set. Returns None when the
     slice cannot be made smaller without copying a large shared tree.
     """
-    if fuel <= 0 or width <= 0 or low < 0:
-        return None
-    try:
-        src_w = _slice_width(src, sigs, width_cache)
-    except (KeyError, TypeError):
-        memo.unknown_widths += 1
-        return None
-    if low + width > src_w:
-        return None
-    if low == 0 and width == src_w:
-        return src
+    if src_w is None:
+        try:
+            src_w = _slice_width(src, sigs, width_cache)
+        except (KeyError, TypeError):
+            memo.unknown_widths += 1
+            return None
+        if low + width > src_w:
+            return None
+        if low == 0 and width == src_w:
+            return src
     if isinstance(src, Const):
         mask = (1 << width) - 1
         return Const((src.value >> low) & mask, width)

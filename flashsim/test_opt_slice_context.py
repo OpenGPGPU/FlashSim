@@ -120,6 +120,22 @@ def test_unassigned_identifier_rechecks_a_width_declared_later():
     assert not memo.entries
 
 
+def test_bound_identifier_width_is_checked_before_recursive_slicing(monkeypatch):
+    src = Id("a")
+    signals = {"a": Signal("a", 4, "wire")}
+    assignments = {"a": Const(6, 4)}
+    memo = opt._SliceMemo()
+
+    def unexpected(*args):
+        raise AssertionError("terminal width check reached recursive slicing")
+
+    monkeypatch.setattr(opt, "_slice_src_uncached", unexpected)
+    rest = (assignments, signals, {}, {}, {}, set())
+    assert opt._slice_src(src, 0, 4, *rest, memo=memo) is src
+    assert opt._slice_src(src, 1, 4, *rest, memo=memo) is None
+    assert not memo.entries
+
+
 def test_cache_is_bounded_and_full_width_id_returns_the_current_object(monkeypatch):
     monkeypatch.setattr(opt, "_SLICE_RESULT_CACHE_MAX", 3)
     memo = opt._SliceMemo()
